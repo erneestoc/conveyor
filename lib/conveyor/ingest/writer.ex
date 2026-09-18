@@ -11,7 +11,7 @@ defmodule Conveyor.Ingest.Writer do
 
   import Ecto.Query
 
-  alias Conveyor.Ingest.Batch
+  alias Conveyor.Ingest.{Batch, Retry}
 
   alias Conveyor.Invocations.{
     Action,
@@ -106,22 +106,34 @@ defmodule Conveyor.Ingest.Writer do
 
   # A failure anywhere in the group rolls everything back; the caller then retries batch by
   # batch so one bad invocation (typically a fenced one) cannot hold up the others.
+  # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
   defp commit_group(pending) do
-    case Repo.transaction(fn -> Enum.each(pending, fn {batch, _} -> apply_batch!(batch) end) end,
-           timeout: 60_000
-         ) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    Retry.with_backoff(
+      fn ->
+        case Repo.transaction(
+               fn -> Enum.each(pending, fn {batch, _} -> apply_batch!(batch) end) end,
+               timeout: 60_000
+             ) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      end,
+      label: "writer group commit"
+    )
   rescue
     e -> {:error, e}
   end
 
   defp commit_single(batch) do
-    case Repo.transaction(fn -> apply_batch!(batch) end, timeout: 60_000) do
-      {:ok, _} -> :ok
-      {:error, reason} -> {:error, reason}
-    end
+    Retry.with_backoff(
+      fn ->
+        case Repo.transaction(fn -> apply_batch!(batch) end, timeout: 60_000) do
+          {:ok, _} -> :ok
+          {:error, reason} -> {:error, reason}
+        end
+      end,
+      label: "writer commit #{batch.invocation_id}"
+    )
   rescue
     e in Fenced ->
       {:error, {:fenced, e.expected}}

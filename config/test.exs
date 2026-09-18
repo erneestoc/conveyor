@@ -10,6 +10,8 @@ config :conveyor, Conveyor.Repo,
   password: "postgres",
   hostname: "localhost",
   port: 5440,
+  queue_target: 1_000,
+  queue_interval: 10_000,
   database: "conveyor_test#{System.get_env("MIX_TEST_PARTITION")}",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: System.schedulers_online() * 2

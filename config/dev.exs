@@ -9,7 +9,11 @@ config :conveyor, Conveyor.Repo,
   database: "conveyor_dev",
   stacktrace: true,
   show_sensitive_data_on_connection_error: true,
-  pool_size: 10
+  pool_size: String.to_integer(System.get_env("POOL_SIZE") || "20"),
+  # Ingest workers and writers share this pool; under load requests wait instead of
+  # being dropped (see Conveyor.Ingest.Retry for what happens when they still fail).
+  queue_target: 1_000,
+  queue_interval: 10_000
 
 # For development, we disable any cache and enable
 # debugging and code reloading.

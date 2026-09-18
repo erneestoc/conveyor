@@ -14,7 +14,7 @@ defmodule Conveyor.Ingest.Worker do
 
   alias Conveyor.Bep.Event
   alias Conveyor.Ingest
-  alias Conveyor.Ingest.{Batch, Normalizer, Scrub, WriterPool}
+  alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, WriterPool}
   alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -39,7 +39,11 @@ defmodule Conveyor.Ingest.Worker do
 
   @impl true
   def handle_continue(:load, %{ctx: ctx, invocation_id: id, stream_id: stream_id}) do
-    inv = load_or_create!(ctx, id, stream_id)
+    inv =
+      Retry.with_backoff(fn -> load_or_create!(ctx, id, stream_id) end,
+        label: "worker load #{id}"
+      )
+
     norm = Normalizer.new(inv, keywords: ctx.keywords, api_key_tags: ctx.api_key_tags)
     day = Invocations.day(inv)
 

@@ -73,7 +73,13 @@ defmodule Conveyor.Ingest do
       )
       when stream_id.invocation_id != "" do
     with {:ok, pid} <- worker(ctx, stream_id.invocation_id, stream_id) do
-      GenServer.call(pid, {:lifecycle, :invocation_attempt_started, obe}, :infinity)
+      try do
+        GenServer.call(pid, {:lifecycle, :invocation_attempt_started, obe}, :infinity)
+      catch
+        # A worker that died while loading (e.g. database unavailable) must surface as
+        # UNAVAILABLE so that Bazel retries, never as an internal error.
+        :exit, {reason, _} -> {:error, {:worker_down, reason}}
+      end
     end
   end
 
