@@ -1,0 +1,36 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+sh_test(
+    name = "pass_test",
+    srcs = ["pass.sh"],
+    size = "small",
+)
+
+sh_test(
+    name = "fail_test",
+    srcs = ["fail.sh"],
+    size = "small",
+    tags = ["manual"],
+)
+
+sh_test(
+    name = "flaky_test",
+    srcs = ["flaky.sh"],
+    size = "small",
+    flaky = True,
+    tags = ["manual", "local"],
+)
+
+sh_test(
+    name = "sharded_test",
+    srcs = ["pass.sh"],
+    size = "small",
+    shard_count = 3,
+)
+
+sh_test(
+    name = "uses_greeting_test",
+    srcs = ["uses_greeting.sh"],
+    data = ["//lib:greeting"],
+    size = "small",
+)

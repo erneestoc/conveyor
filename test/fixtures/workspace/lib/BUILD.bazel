@@ -1,0 +1,26 @@
+genrule(
+    name = "greeting",
+    outs = ["greeting.txt"],
+    cmd = "sleep 1 && echo 'hello from conveyor' > $@",
+    visibility = ["//visibility:public"],
+)
+
+genrule(
+    name = "slow",
+    outs = ["slow.txt"],
+    cmd = "sleep 2 && echo slow > $@",
+)
+
+genrule(
+    name = "broken",
+    outs = ["broken.txt"],
+    cmd = "echo 'this genrule always fails' >&2 && exit 1",
+    tags = ["manual"],
+)
+
+genrule(
+    name = "very_slow",
+    outs = ["very_slow.txt"],
+    cmd = "sleep 12 && echo very_slow > $@",
+    tags = ["manual", "no-cache"],
+)

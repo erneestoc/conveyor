@@ -1,0 +1,3 @@
+common --enable_bzlmod
+build --experimental_profile_include_target_label
+build --experimental_profile_include_primary_output

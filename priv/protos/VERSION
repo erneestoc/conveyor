@@ -1,0 +1,4 @@
+bazel: 9.2.0 (https://github.com/bazelbuild/bazel/tree/9.2.0)
+googleapis: master snapshot 2026-09-18 (https://github.com/googleapis/googleapis)
+remote-apis: main snapshot 2026-09-18 (https://github.com/bazelbuild/remote-apis)
+All three are Apache-2.0; their LICENSE files are kept alongside the .proto files.
