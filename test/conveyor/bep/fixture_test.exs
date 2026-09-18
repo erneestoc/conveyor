@@ -29,3 +29,14 @@ defmodule Conveyor.Bep.FixtureTest do
     end
   end
 end
+
+defmodule Conveyor.Bep.FixtureErrorsTest do
+  use ExUnit.Case, async: true
+
+  alias Conveyor.Bep.Fixture
+
+  test "truncated frames and invalid varints raise" do
+    assert_raise ArgumentError, ~r/truncated/, fn -> Fixture.decode_all!(<<10, 1, 2>>) end
+    assert_raise ArgumentError, ~r/invalid varint/, fn -> Fixture.decode_varint(<<0x80>>) end
+  end
+end

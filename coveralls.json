@@ -1,0 +1,13 @@
+{
+  "minimum_coverage": 95,
+  "skip_files": [
+    "lib/conveyor_proto/",
+    "test/support/",
+    "lib/conveyor/release.ex",
+    "lib/conveyor_web/telemetry.ex"
+  ],
+  "coverage_options": {
+    "treat_no_relevant_lines_as_covered": true,
+    "output_dir": "cover/"
+  }
+}

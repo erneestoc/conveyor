@@ -11,7 +11,8 @@ defmodule Conveyor.MixProject do
       aliases: aliases(),
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
-      listeners: [Phoenix.CodeReloader]
+      listeners: [Phoenix.CodeReloader],
+      test_coverage: [tool: ExCoveralls]
     ]
   end
 
@@ -27,7 +28,12 @@ defmodule Conveyor.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [
+        precommit: :test,
+        coveralls: :test,
+        "coveralls.html": :test,
+        "coveralls.json": :test
+      ]
     ]
   end
 
@@ -77,7 +83,9 @@ defmodule Conveyor.MixProject do
       {:protobuf, "~> 0.17.0"},
       {:google_protos, "~> 0.4"},
       # HTTP/2 client adapter for the gRPC client (replay tool, artifact fetching)
-      {:mint, "~> 1.9"}
+      {:mint, "~> 1.9"},
+      # Test coverage gate (95% minimum, see coveralls.json)
+      {:excoveralls, "~> 0.18", only: :test}
     ]
   end
 
@@ -100,7 +108,7 @@ defmodule Conveyor.MixProject do
         "esbuild conveyor --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
+      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "coveralls"]
     ]
   end
 end

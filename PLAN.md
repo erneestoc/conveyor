@@ -78,6 +78,7 @@ build --bes_header=x-api-key=bes_xxx            # or via --bes_header in a CI-on
 build --build_metadata=USER=alice --build_metadata=CI=false --build_metadata=AI=true
 build --bes_upload_mode=wait_for_upload_complete   # default; fully_async for CI speed
 build --bes_timeout=60s
+build --build_event_upload_max_retries=10          # default 4: Bazel gives up on a BES outage within a few seconds
 build --remote_cache=grpcs://cache.example.com     # profile/test logs become fetchable
 build --remote_build_event_upload=minimal
 build --experimental_profile_include_target_label
@@ -457,6 +458,7 @@ Several identical app nodes behind a gRPC-aware load balancer, sharing one Postg
 - **Reconnects may land anywhere.** Bazel resends from the last un-acked sequence; the receiving node's worker rehydrates from the invocation row (§6 item 6) and continues. Node loss, restarts and scale-in all reduce to "client reconnects elsewhere".
 - **Stale workers are fenced by Postgres**, not by a cluster lock: the compare-and-set on `last_event_seq` plus the segment primary key make a late commit from a dying node fail. Built in M1, so single-node installs get it for free.
 - **Scale-in is safe.** On SIGTERM a node fails its readiness check, stops accepting connections, drains and commits writers, then closes streams with `UNAVAILABLE`. Requires a termination grace period (≥ 60 s) and connection draining on the balancer. LiveView sessions reconnect to another node on their own (state re-mounts from the URL and DB).
+- **Bazel's retry budget is short.** Measured in M0 with Bazel 9.2: with the default `--build_event_upload_max_retries=4` the client gives up after a few seconds of `UNAVAILABLE`, and the build then reports "The Build Event Protocol upload failed" (the build itself still succeeds). With `--build_event_upload_max_retries=10` a server that was down for ~2 s got the full stream resent and the upload completed. Consequences: (1) the documented `.bazelrc` raises the retry count; (2) single-node restarts must be fast (release boot is ~1 s; there is no compile step in production), and the drain must close streams *only after* the new process can accept, which for a single node means a blue/green swap behind the proxy or accepting a short window of failed uploads during upgrades; (3) in multi-node mode the balancer must stop routing to a draining node before it closes streams, so retries land on a healthy node.
 - **The ceiling moves to Postgres.** Adding nodes scales decoding, connection count and LiveView fan-out; write throughput is bounded by the one database. Beyond the §13.1 envelope × nodes: a larger Postgres, then raw segments written directly to the object store with only metadata in Postgres (segments are immutable blobs, so this is natural), then read replicas for dashboards.
 
 **What multi-node mode requires**
@@ -511,8 +513,10 @@ Small installs run fine on 2 vCPU / 4 GB + a modest Postgres; the §13.1 envelop
 
 ## 15. Testing strategy
 
+**Coverage requirement: 95% line coverage or higher, enforced.** `mix coveralls` (excoveralls, MIT) with `minimum_coverage: 95` runs inside `mix precommit` and in CI; a PR that drops below fails. Generated protobuf modules (`lib/conveyor_proto/`), test support files and the release/telemetry boilerplate are excluded from the denominator because they contain no logic of ours. Every milestone's acceptance implicitly includes "coverage stays ≥ 95%", so tests are written with the feature, not after: the normalizer, query compiler, ANSI renderer, profile summarizer and LiveViews all get unit or LiveView tests as they land, and the replay tool plus recorded fixtures drive the gRPC and ingest paths end to end.
+
 - **Fixtures**: record real streams with `bazel build/test … --build_event_binary_file=x.bep` (varint-delimited `build_event_stream.BuildEvent`) from small sample workspaces: success, build failure, test failures + flaky, aborted/interrupted, remote cache hits, `--build_event_publish_all_actions`, huge log, Bazel 7/8/9 versions. `mix bes.replay` wraps them into `OrderedBuildEvent`s + lifecycle events and streams over real gRPC at configurable speed; also the load-test tool (N parallel replays).
-- **Unit**: normalizer (event → DB ops), query parser/compiler (property tests for round-trips), ANSI renderer, trace-profile summarizer, tag merging.
+- **Unit** (the bulk of the 95%): normalizer (event → DB ops), query parser/compiler (property tests for round-trips), ANSI renderer, trace-profile summarizer, tag merging.
 - **Integration**: gRPC end-to-end with retry/duplicate/out-of-order cases; disconnect + reconnect; auth failures; CAS sink write/read.
 - **LiveView**: list filtering/live insert, detail tabs, log streaming, settings flows.
 - **Real Bazel in CI**: GitHub Actions job runs bazelisk on a tiny workspace against the server container and asserts the invocation appears with expected status and counts (matrix over Bazel 7.x/8.x/9.x).
