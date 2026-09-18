@@ -31,6 +31,9 @@ defmodule Conveyor.Bep.Replay do
     * `:delay_ms` — pause between events (default 0)
     * `:lifecycle` — send lifecycle events (default true)
     * `:project_id` — value of `--bes_instance_name` (default "")
+    * `:drop_after` — simulate a connection loss: cancel the stream after this many events
+      have been sent, then reconnect and resume from the last acknowledged sequence number,
+      exactly like Bazel's retry (the last acked event may be re-sent as a duplicate)
   """
   @spec run(Path.t() | [BepEvent.t()], keyword()) :: {:ok, result()} | {:error, term()}
   def run(path_or_events, opts \\ [])
@@ -45,6 +48,7 @@ defmodule Conveyor.Bep.Replay do
     delay = Keyword.get(opts, :delay_ms, 0)
     lifecycle? = Keyword.get(opts, :lifecycle, true)
     project_id = Keyword.get(opts, :project_id, "")
+    drop_after = Keyword.get(opts, :drop_after)
     metadata = metadata(opts)
 
     events = rewrite_invocation_id(events, invocation_id)
@@ -53,42 +57,78 @@ defmodule Conveyor.Bep.Replay do
     with {:ok, channel} <-
            GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint) do
       try do
-        stream_id = %V1.StreamId{
-          build_id: build_id,
-          invocation_id: invocation_id,
-          component: :TOOL
-        }
-
-        with :ok <-
-               maybe_lifecycle(lifecycle?, channel, metadata, project_id, [
-                 {%{stream_id | invocation_id: ""}, 1,
-                  {:build_enqueued, %V1.BuildEvent.BuildEnqueued{}}},
-                 {stream_id, 1,
-                  {:invocation_attempt_started,
-                   %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}}
-               ]),
-             {:ok, acks} <- send_stream(channel, metadata, project_id, stream_id, events, delay),
-             :ok <-
-               maybe_lifecycle(lifecycle?, channel, metadata, project_id, [
-                 {stream_id, 2,
-                  {:invocation_attempt_finished,
-                   %V1.BuildEvent.InvocationAttemptFinished{invocation_status: status(events)}}},
-                 {%{stream_id | invocation_id: ""}, 2,
-                  {:build_finished, %V1.BuildEvent.BuildFinished{status: status(events)}}}
-               ]) do
-          {:ok,
-           %{
-             invocation_id: invocation_id,
-             build_id: build_id,
-             sent: length(events) + 1,
-             acks: acks,
-             duration_ms: System.monotonic_time(:millisecond) - started_at
-           }}
-        end
+        run_connected(
+          channel,
+          events,
+          invocation_id,
+          build_id,
+          delay,
+          lifecycle?,
+          project_id,
+          drop_after,
+          metadata,
+          started_at
+        )
+      catch
+        # A stream the server closed early (e.g. UNAUTHENTICATED) makes later sends exit.
+        :exit, reason -> {:error, {:stream_closed, reason}}
       after
         GRPC.Stub.disconnect(channel)
       end
     end
+  end
+
+  defp run_connected(
+         channel,
+         events,
+         invocation_id,
+         build_id,
+         delay,
+         lifecycle?,
+         project_id,
+         drop_after,
+         metadata,
+         started_at
+       ) do
+    {:ok, :placeholder}
+    |> then(fn _ ->
+      stream_id = %V1.StreamId{build_id: build_id, invocation_id: invocation_id, component: :TOOL}
+
+      conn = %{
+        channel: channel,
+        metadata: metadata,
+        project_id: project_id,
+        stream_id: stream_id,
+        delay: delay
+      }
+
+      with :ok <-
+             maybe_lifecycle(lifecycle?, conn, [
+               {%{stream_id | invocation_id: ""}, 1,
+                {:build_enqueued, %V1.BuildEvent.BuildEnqueued{}}},
+               {stream_id, 1,
+                {:invocation_attempt_started,
+                 %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}}
+             ]),
+           {:ok, acks} <- send_with_retry(conn, events, drop_after),
+           :ok <-
+             maybe_lifecycle(lifecycle?, conn, [
+               {stream_id, 2,
+                {:invocation_attempt_finished,
+                 %V1.BuildEvent.InvocationAttemptFinished{invocation_status: status(events)}}},
+               {%{stream_id | invocation_id: ""}, 2,
+                {:build_finished, %V1.BuildEvent.BuildFinished{status: status(events)}}}
+             ]) do
+        {:ok,
+         %{
+           invocation_id: invocation_id,
+           build_id: build_id,
+           sent: length(events) + 1,
+           acks: acks,
+           duration_ms: System.monotonic_time(:millisecond) - started_at
+         }}
+      end
+    end)
   end
 
   @doc "Wraps a BEP event as Bazel does on the wire."
@@ -107,50 +147,81 @@ defmodule Conveyor.Bep.Replay do
     }
   end
 
-  defp send_stream(channel, metadata, project_id, stream_id, events, delay) do
-    stream = Stub.publish_build_tool_event_stream(channel, metadata: metadata)
+  defp send_with_retry(conn, events, nil), do: send_stream(conn, events, 1, nil)
 
-    events
-    |> Enum.with_index(1)
-    |> Enum.each(fn {event, seq} ->
-      if delay > 0, do: Process.sleep(delay)
-      GRPC.Stub.send_request(stream, request(project_id, ordered_event(stream_id, seq, event)))
+  defp send_with_retry(conn, events, drop_after) do
+    # First attempt: send `drop_after` events, then drop the connection mid-stream without
+    # reading acks (a client that lost its connection cannot know what was acked). Resend
+    # everything: the server acknowledges already-committed sequence numbers immediately,
+    # which exercises the same deduplication path Bazel relies on after a retry.
+    :ok = send_stream(conn, events, 1, drop_after)
+    send_stream(conn, events, 1, nil)
+  end
+
+  # Sends events `from_seq..N` plus the stream-finished marker as N+1. With `drop_after`,
+  # cancels the stream after that many events instead and returns the acks received so far.
+  defp send_stream(conn, events, from_seq, drop_after) do
+    stream = Stub.publish_build_tool_event_stream(conn.channel, metadata: conn.metadata)
+    total = length(events)
+
+    to_send =
+      events
+      |> Enum.with_index(1)
+      |> Enum.drop(from_seq - 1)
+      |> then(&if(drop_after, do: Enum.take(&1, drop_after), else: &1))
+
+    Enum.each(to_send, fn {event, seq} ->
+      if conn.delay > 0, do: Process.sleep(conn.delay)
+
+      GRPC.Stub.send_request(
+        stream,
+        request(conn.project_id, ordered_event(conn.stream_id, seq, event))
+      )
     end)
 
-    finished =
-      {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+    if drop_after do
+      GRPC.Stub.cancel(stream)
+      :ok
+    else
+      finished =
+        {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
 
-    final = request(project_id, ordered_event(stream_id, length(events) + 1, finished))
-    GRPC.Stub.send_request(stream, final, end_stream: true)
+      final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
+      GRPC.Stub.send_request(stream, final, end_stream: true)
 
-    with {:ok, replies} <- GRPC.Stub.recv(stream) do
-      Enum.reduce_while(replies, {:ok, []}, fn
-        {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}}, {:ok, acc} ->
-          {:cont, {:ok, [seq | acc]}}
-
-        {:error, reason}, _ ->
-          {:halt, {:error, reason}}
-      end)
-      |> case do
-        {:ok, acks} -> {:ok, Enum.reverse(acks)}
-        error -> error
+      with {:ok, replies} <- GRPC.Stub.recv(stream) do
+        collect_acks(replies)
       end
+    end
+  end
+
+  defp collect_acks(replies) do
+    Enum.reduce_while(replies, {:ok, []}, fn
+      {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}}, {:ok, acc} ->
+        {:cont, {:ok, [seq | acc]}}
+
+      {:error, reason}, _ ->
+        {:halt, {:error, reason}}
+    end)
+    |> case do
+      {:ok, acks} -> {:ok, Enum.reverse(acks)}
+      error -> error
     end
   end
 
   defp request(project_id, obe),
     do: %V1.PublishBuildToolEventStreamRequest{ordered_build_event: obe, project_id: project_id}
 
-  defp maybe_lifecycle(false, _channel, _metadata, _project_id, _events), do: :ok
+  defp maybe_lifecycle(false, _conn, _events), do: :ok
 
-  defp maybe_lifecycle(true, channel, metadata, project_id, events) do
+  defp maybe_lifecycle(true, conn, events) do
     Enum.reduce_while(events, :ok, fn {stream_id, seq, payload}, :ok ->
       req = %V1.PublishLifecycleEventRequest{
         build_event: ordered_event(stream_id, seq, payload),
-        project_id: project_id
+        project_id: conn.project_id
       }
 
-      case Stub.publish_lifecycle_event(channel, req, metadata: metadata) do
+      case Stub.publish_lifecycle_event(conn.channel, req, metadata: conn.metadata) do
         {:ok, _} -> {:cont, :ok}
         {:error, reason} -> {:halt, {:error, {:lifecycle, reason}}}
       end

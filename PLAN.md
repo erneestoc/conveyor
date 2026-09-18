@@ -205,10 +205,10 @@ log_segments        -- Progress stdout/stderr, same batching; range-partitioned 
   -- byte_offset/line_offset let the log view seek without decompressing everything
 
 targets
-  invocation_id, label, kind text, configuration_id text, aspect text
-  status text (building|success|failed|skipped|aborted), test_status text, test_size text
-  first_seen_at, completed_at, failure_message text
-  PK (invocation_id, label, configuration_id, aspect)
+  invocation_id, label, aspect text, configuration_id text (attribute, not part of the key: TargetConfigured carries no configuration, so a target is one row per label+aspect and the last configuration wins)
+  kind text, status text (configured|success|failed), test_status text, test_size text
+  first_seen_at, completed_at, failure_message text, output_groups jsonb
+  UNIQUE (invocation_id, label, aspect)
 
 test_results
   invocation_id, label, run int, shard int, attempt int
@@ -394,7 +394,7 @@ Queries run over `invocations` denormalized columns with `percentile_cont` group
 - Project settings: segments, retention override, artifact cache endpoints/credentials, optional OIDC group restriction (`allowed_groups`).
 
 ### 12.2 API keys (gRPC ingest, upload API, read API)
-- Format `bes_<key_id>_<secret>`: `key_id` is 8 random chars (public, indexed, shown in the UI), `secret` is 32 random bytes base64url. Only `sha256(secret)` is stored; lookup by `key_id`, then constant-time compare. Shown exactly once at creation.
+- Format `conveyor_<key_id>_<secret>`: `key_id` is 8 base32 chars (public, indexed, shown in the UI), `secret` is 32 random bytes base64url. Only `sha256(secret)` is stored; lookup by `key_id`, then constant-time compare. Shown exactly once at creation.
 - Scoped to one project; several active keys per project (per CI system, per team, per environment). Scopes: `ingest`, `upload` (profile/BEP upload API), `read` (JSON API). Optional `expires_at`. `default_tags` (e.g. `ci=true`) applied to every build.
 - Accepted as `x-api-key: <key>` or `authorization: Bearer <key>` in gRPC metadata / HTTP headers.
 - **Rotation without downtime**: *Rotate* creates a successor key (same name, scopes, tags; `rotated_from_id` set) and gives the old key a grace expiry (default 7 days, configurable). Operators roll the new key out to CI secrets / developer wrappers while both work. The UI shows `last_used_at` and `last_used_ip` per key, so you can see when the old key is dead and revoke it early. Expiring keys are surfaced on the Settings page and via a `/api/v1/keys/expiring` endpoint (for alerting). Revocation is immediate (ETS cache invalidated through PubSub); in-flight streams keep running to their end unless "revoke and disconnect" is chosen.
@@ -409,7 +409,7 @@ Queries run over `invocations` denormalized columns with `percentile_cont` group
 - `/health` and `/metrics` bypass auth (optionally token-protected).
 
 ### 12.4 Security checklist (built in, tested in M6)
-- **Secrets never persisted**: server-side scrubbing of `--bes_header`, `--remote_header`, `--remote_exec_header`, `--remote_cache_header`, `--remote_downloader_header`, `--bes_proxy` values and anything matching common token patterns in `OptionsParsed`, `UnstructuredCommandLine`, `StructuredCommandLine` and the Progress log (Bazel echoes command lines) before the bytes hit disk; scrubbed raw segments too (we rewrite the protobuf, not just the view).
+- **Secrets never persisted**: server-side scrubbing of `--bes_header`, `--remote_header`, `--remote_exec_header`, `--remote_cache_header`, `--remote_downloader_header` values, URL credentials, and anything matching common token patterns (`token=`, `secret=`, `api_key=`, `Bearer …`) in `BuildStarted.options_description`, `OptionsParsed`, `UnstructuredCommandLine`, `StructuredCommandLine`, `ActionExecuted.command_line` and the Progress log before the bytes hit disk; the raw protobuf is rewritten, not just the view. This matters more than expected: Bazel copies the *client environment* into the command line as `--client_env=NAME=VALUE`, so any token in a developer's shell environment would otherwise be stored. (Found in M1: the recorded fixtures contained one, now scrubbed.)
 - **Transport**: TLS on the gRPC port (`grpcs://`) or terminate at the proxy; HSTS on the web port; document mTLS at the proxy for high-security sites.
 - **Abuse limits per key** (settings, sane defaults): max concurrent streams, max events/s, max event size (64 MB), max per-invocation raw bytes (e.g. 2 GB, beyond which log bytes are truncated with a marker while structured events keep flowing), max invocations/hour; upload API size caps; gzip-bomb guard when parsing profiles (streaming decompression with an output cap).
 - **SSRF**: artifact fetch only to configured cache endpoints (host allow-list), no redirects, private-range guard when `CACHE_ENDPOINTS` isn't set.
@@ -545,8 +545,8 @@ Rough sizes assume one engineer working with AI assistance; each milestone ends 
 
 | # | Milestone | Scope | Acceptance |
 |---|---|---|---|
-| M0 | Bootstrap + protocol spike (≈1 wk) | `mix phx.new` (LiveView, Postgres, Tailwind), vendor + compile protos, gRPC endpoint with `PublishBuildEvent`, ack loop, dump decoded events, replay tool, fixtures recorded with Bazel 9.2 locally, verify elixir-grpc 1.0 on OTP 29 and which BEP files `minimal` upload actually uploads. | `bazel test //... --bes_backend=grpc://localhost:1985 --bes_results_url=http://localhost:4000/invocation/` finishes with no BES warnings; server logs every event; killing/restarting the server mid-build resumes cleanly. |
-| M1 | Ingest + persistence + scale foundation (≈2–3 wks) | Projects + API-key interceptor (scoped keys), IngestWorker, normalizer for all payloads in §2.2, segment storage, sharded group-commit writers, dedup/ordering, DB fencing (compare-and-set), graceful drain on shutdown, finalization, idle timeout, lifecycle RPC, secret scrubbing, Oban, `mix bes.gen_key`, telemetry, `bes_loadgen` v1 + correctness oracle. | Fixture replays produce correct rows/counters; retry/duplicate/restart tests pass with zero loss; 200 concurrent replays at 10× speed sustain 10k events/s with ack p99 < 150 ms on a laptop. |
+| M0 ✅ | Bootstrap + protocol spike (≈1 wk) | `mix phx.new` (LiveView, Postgres, Tailwind), vendor + compile protos, gRPC endpoint with `PublishBuildEvent`, ack loop, dump decoded events, replay tool, fixtures recorded with Bazel 9.2 locally, verify elixir-grpc 1.0 on OTP 29 and which BEP files `minimal` upload actually uploads. | `bazel test //... --bes_backend=grpc://localhost:1985 --bes_results_url=http://localhost:4000/invocation/` finishes with no BES warnings; server logs every event; killing/restarting the server mid-build resumes cleanly. |
+| M1 ✅ | Ingest + persistence + scale foundation (≈2–3 wks) | Projects + API-key interceptor (scoped keys), IngestWorker, normalizer for all payloads in §2.2, segment storage, sharded group-commit writers, dedup/ordering, DB fencing (compare-and-set), graceful drain on shutdown, finalization, idle timeout, lifecycle RPC, secret scrubbing, Oban, `mix bes.gen_key`, telemetry, `bes_loadgen` v1 + correctness oracle. | Fixture replays produce correct rows/counters; retry/duplicate/restart tests pass with zero loss; 200 concurrent replays at 10× speed sustain 10k events/s with ack p99 < 150 ms on a laptop. |
 | M2 | Builds list + detail (≈2 wks) | Project switcher, list with live updates, cursor pagination, basic filters; detail Overview, Log (ANSI, virtualized, live tail, seekable segments), Targets, Tests, Actions, Details, Raw events; `--bes_results_url` landing. | Watching a build live in the UI: appears on start, log streams, targets/tests populate, status flips on finish; list stays smooth with 1,000 in-progress builds. |
 | M3 | Tags + query language + facets (≈1 wk) | Tag merge pipeline, `tag_keys`, parser/compiler, search box with autocomplete, facet sidebar, shareable URLs, segments (per project). | Queries from §7 all work; `--build_metadata` keys are filterable minutes after first use with no schema change. |
 | M4 | Metrics + dashboard (≈2 wks) | BuildMetrics/BuildToolLogs persistence, Metrics tab, dashboard panels of §11 with segment comparison and all-projects scope, Tests page (flaky/slowest). | p50/p90/p99 by Local vs CI, cache hit trends, failure breakdown render for a 1M-invocation synthetic dataset < 1 s per panel. |
@@ -615,3 +615,11 @@ bes/
 1. `mix phx.new bes --live`, add `grpc_server`, `grpc`, `protobuf`; vendor protos; generate modules.
 2. Implement `PublishBuildEvent` with ack loop; run `bazel build //...` on a sample workspace against it; record fixtures.
 3. Write `mix bes.replay`; commit fixtures; then start M1.
+
+---
+
+## 21. Implementation notes (kept current as milestones land)
+
+- **M0 (done).** Bazel 9.2 streams into the server with in-order acks; fixtures recorded for seven scenarios; `mix conveyor.replay` replays them as new builds. Measured Bazel's BES retry budget (§13.2).
+- **M1 (done).** Projects and API keys (`conveyor_<id>_<secret>`, sha256 at rest, ETS cache, rotate/revoke/expiry), auth interceptor (`:api_key` or `:none` mode), per-invocation `IngestWorker` (ordering, dedup, backpressure, idle timeout, finalization, linger), `Normalizer` for every BEP payload, secret scrubbing, zstd event/log segments in daily partitions, sharded group-commit `Writer` with compare-and-set fencing and per-batch fallback, Oban with partition maintenance, PubSub digests, `Conveyor.Ingest.Verify` oracle, `--drop-after` chaos in the replay tool, 83 tests at 95.7% coverage. Acks are pipelined through a per-stream `Acker` process (Cowboy accepts replies from any process), which took a 98-event build from 7.7 s to ~70 ms end to end.
+- **Learned in M1.** `TargetConfigured` ids carry no configuration, so targets are keyed by label+aspect. Bazel 9 names the profile `command-<uuid>.profile.gz`. `CREATE TABLE IF NOT EXISTS … PARTITION OF` still races between two booting nodes and must tolerate `duplicate_table`. A finish lifecycle event arriving after the worker exited must not start a new worker (it did, and the worker lived until the idle timeout).

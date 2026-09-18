@@ -10,8 +10,12 @@ defmodule Conveyor.Application do
     children = [
       ConveyorWeb.Telemetry,
       Conveyor.Repo,
+      {Oban, Application.fetch_env!(:conveyor, Oban)},
+      {Task, &Conveyor.Storage.boot/0},
       {DNSCluster, query: Application.get_env(:conveyor, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Conveyor.PubSub},
+      Conveyor.Projects.ApiKeyCache,
+      Conveyor.Ingest.Supervisor,
       # Start a worker by calling: Conveyor.Worker.start_link(arg)
       # {Conveyor.Worker, arg},
       # Start to serve requests, typically the last entry

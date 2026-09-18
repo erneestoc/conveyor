@@ -77,3 +77,9 @@ config :phoenix_live_view,
 # The BES gRPC port can be overridden in development with BES_GRPC_PORT.
 config :conveyor, Conveyor.Grpc,
   port: String.to_integer(System.get_env("BES_GRPC_PORT") || "1985")
+
+# Local development accepts unauthenticated BES streams into the "default" project unless
+# BES_INGEST_AUTH=api_key is set.
+config :conveyor, Conveyor.Ingest,
+  auth: if(System.get_env("BES_INGEST_AUTH") == "api_key", do: :api_key, else: :none),
+  linger_ms: 5_000

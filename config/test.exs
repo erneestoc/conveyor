@@ -37,3 +37,13 @@ config :phoenix,
 
 # Tests start the gRPC server on demand with a random port.
 config :conveyor, Conveyor.Grpc, port: 0, start_server: false
+
+config :conveyor, Conveyor.Ingest,
+  auth: :api_key,
+  idle_timeout_ms: 60_000,
+  linger_ms: 0,
+  batch_flush_ms: 5,
+  writer_flush_ms: 2,
+  broadcast_interval_ms: 10
+
+config :conveyor, Oban, testing: :manual

@@ -27,7 +27,7 @@ defmodule Conveyor.GrpcCase do
 
   def fixture(name), do: Path.join([File.cwd!(), "test/fixtures/bep", "#{name}.bep"])
 
-  defp free_port do
+  def free_port do
     {:ok, socket} = :gen_tcp.listen(0, ip: {127, 0, 0, 1})
     {:ok, port} = :inet.port(socket)
     :gen_tcp.close(socket)

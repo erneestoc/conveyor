@@ -1,0 +1,107 @@
+defmodule Conveyor.Ingest.ScrubTest do
+  use ExUnit.Case, async: true
+
+  alias BuildEventStream, as: BES
+  alias Conveyor.Bep.Fixture
+  alias Conveyor.Ingest.Scrub
+
+  @fixture Path.join(File.cwd!(), "test/fixtures/bep/clean_build_and_test.bep")
+
+  test "redacts header flags, url credentials, generic secrets and bearer tokens" do
+    assert Scrub.text("--bes_header=x-api-key=conveyor_abc_secret --foo=bar") ==
+             "--bes_header=x-api-key=<redacted> --foo=bar"
+
+    assert Scrub.text("--remote_header=Authorization=Bearer%20xyz") ==
+             "--remote_header=Authorization=<redacted>"
+
+    assert Scrub.text("--remote_cache=https://user:pa55@cache.example.com/x") ==
+             "--remote_cache=https://<redacted>@cache.example.com/x"
+
+    assert Scrub.text("token=abc password=def api_key=ghi") ==
+             "token=<redacted> password=<redacted> api_key=<redacted>"
+
+    assert Scrub.text("Authorization: Bearer abc.def-ghi") == "Authorization: Bearer <redacted>"
+    assert Scrub.text("nothing here") == "nothing here"
+    assert Scrub.text(nil) == nil
+  end
+
+  test "scrubs every command-line carrying payload and reports whether it changed" do
+    secret = "--bes_header=x-api-key=conveyor_k_s3cret"
+
+    base = %BES.BuildEvent{
+      id: %BES.BuildEventId{id: {:started, %BES.BuildEventId.BuildStartedId{}}}
+    }
+
+    events = [
+      %{base | payload: {:started, %BES.BuildStarted{options_description: secret}}},
+      %{
+        base
+        | payload:
+            {:unstructured_command_line, %BES.UnstructuredCommandLine{args: ["bazel", secret]}}
+      },
+      %{
+        base
+        | payload:
+            {:options_parsed,
+             %BES.OptionsParsed{
+               cmd_line: [secret],
+               explicit_cmd_line: [secret],
+               startup_options: [],
+               explicit_startup_options: []
+             }}
+      },
+      %{base | payload: {:progress, %BES.Progress{stdout: "", stderr: "INFO: #{secret}\n"}}},
+      %{
+        base
+        | payload:
+            {:action,
+             %BES.ActionExecuted{
+               command_line: ["sh", "-c", "curl -H 'Authorization: Bearer tok'"]
+             }}
+      },
+      %{
+        base
+        | payload:
+            {:structured_command_line,
+             %CommandLine.CommandLine{
+               command_line_label: "canonical",
+               sections: [
+                 %CommandLine.CommandLineSection{
+                   section_label: "chunks",
+                   section_type: {:chunk_list, %CommandLine.ChunkList{chunk: [secret]}}
+                 },
+                 %CommandLine.CommandLineSection{
+                   section_label: "options",
+                   section_type:
+                     {:option_list,
+                      %CommandLine.OptionList{
+                        option: [
+                          %CommandLine.Option{
+                            combined_form: secret,
+                            option_name: "bes_header",
+                            option_value: "x-api-key=conveyor_k_s3cret"
+                          }
+                        ]
+                      }}
+                 },
+                 %CommandLine.CommandLineSection{section_label: "empty"}
+               ]
+             }}
+      }
+    ]
+
+    for event <- events do
+      {scrubbed, changed?} = Scrub.event(event)
+      assert changed?, "expected #{inspect(elem(event.payload, 0))} to change"
+      refute scrubbed |> BES.BuildEvent.encode() |> String.contains?("s3cret")
+      refute scrubbed |> BES.BuildEvent.encode() |> String.contains?("Bearer tok")
+      assert {^scrubbed, false} = Scrub.event(scrubbed)
+    end
+  end
+
+  test "recorded fixtures are already scrubbed, so scrubbing them again changes nothing" do
+    for event <- Fixture.read!(@fixture) do
+      assert {^event, false} = Scrub.event(event)
+    end
+  end
+end

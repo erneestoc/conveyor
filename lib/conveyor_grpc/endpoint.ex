@@ -3,5 +3,6 @@ defmodule Conveyor.Grpc.Endpoint do
   use GRPC.Endpoint
 
   intercept(GRPC.Server.Interceptors.Logger, level: :debug)
+  intercept Conveyor.Grpc.AuthInterceptor
   run(Conveyor.Grpc.PublishBuildEventServer)
 end

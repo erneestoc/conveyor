@@ -12,6 +12,28 @@ config :conveyor,
   generators: [timestamp_type: :utc_datetime]
 
 # Configure the endpoint
+# Ingest pipeline defaults (see Conveyor.Ingest); runtime.exs overrides from env in prod
+config :conveyor, Conveyor.Ingest,
+  # :api_key requires a valid x-api-key / bearer token on every BES call; :none maps every
+  # stream to the "default" project (development and trusted networks only)
+  auth: :api_key,
+  idle_timeout_ms: 10 * 60 * 1000,
+  linger_ms: 30_000,
+  batch_max_events: 500,
+  batch_max_bytes: 256 * 1024,
+  batch_flush_ms: 50,
+  writer_shards: System.schedulers_online(),
+  writer_flush_ms: 20,
+  broadcast_interval_ms: 250
+
+config :conveyor, Oban,
+  repo: Conveyor.Repo,
+  queues: [default: 10, maintenance: 2],
+  plugins: [
+    {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
+    {Oban.Plugins.Cron, crontab: [{"0 * * * *", Conveyor.Workers.PartitionMaintenance}]}
+  ]
+
 # BES gRPC listener (Bazel's --bes_backend target)
 config :conveyor, Conveyor.Grpc, port: 1985, start_server: true
 

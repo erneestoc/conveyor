@@ -1,14 +1,17 @@
 defmodule Mix.Tasks.Conveyor.ReplayTest do
-  use Conveyor.GrpcCase, async: false
+  use Conveyor.IngestCase, async: false
 
-  setup do
+  alias Conveyor.Projects
+
+  setup %{project: project} do
+    {:ok, _key, plaintext} = Projects.create_api_key(project, %{name: "test"})
     Mix.shell(Mix.Shell.Process)
     on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
-    :ok
+    %{key: plaintext}
   end
 
   @tag :capture_log
-  test "replays files and reports acks", %{grpc_port: port} do
+  test "replays files, verifies persistence and reports acks", %{grpc_port: port, key: key} do
     Mix.Tasks.Conveyor.Replay.run([
       fixture("build_failure"),
       fixture("flaky_test"),
@@ -19,12 +22,16 @@ defmodule Mix.Tasks.Conveyor.ReplayTest do
       "--concurrency",
       "2",
       "--api-key",
-      "k"
+      key,
+      "--drop-after",
+      "5",
+      "--verify"
     ])
 
     messages = collect_shell_messages()
     assert Enum.count(messages, &(&1 =~ ~r/events, \d+ ms, ok$/)) == 4
     assert Enum.any?(messages, &(&1 =~ "4/4 replays succeeded"))
+    assert Enum.any?(messages, &(&1 =~ "4/4 invocations verified"))
   end
 
   @tag :capture_log
@@ -35,7 +42,8 @@ defmodule Mix.Tasks.Conveyor.ReplayTest do
                "--port",
                "1",
                "--host",
-               "127.0.0.1"
+               "127.0.0.1",
+               "--verify"
              ])
            ) ==
              {:shutdown, 1}

@@ -19,7 +19,8 @@ mix setup
 PORT=4000 mix phx.server                          # web on :4000, BES gRPC on :1985
 ```
 
-Point a Bazel workspace at it:
+In development the BES endpoint accepts unauthenticated streams into the `default`
+project (set `BES_INGEST_AUTH=api_key` to require keys). Point a Bazel workspace at it:
 
 ```sh
 bazel test //... \
@@ -28,10 +29,19 @@ bazel test //... \
   --build_metadata=USER=$USER --build_metadata=CI=false
 ```
 
-Or replay a recorded build without Bazel:
+With API keys (production default), create a project and a key, then pass the key as a
+header. Keys are shown once; only a hash is stored.
 
 ```sh
-mix conveyor.replay test/fixtures/bep/clean_build_and_test.bep --repeat 10 --concurrency 5
+mix run -e 'IO.puts(elem(Conveyor.Projects.create_api_key(Conveyor.Projects.ensure_default_project!(), %{name: "laptop"}), 2))'
+bazel test //... --bes_backend=grpc://localhost:1985 --bes_header=x-api-key=conveyor_...
+```
+
+Or replay a recorded build without Bazel, optionally simulating dropped connections and
+verifying that everything was persisted exactly once:
+
+```sh
+mix conveyor.replay test/fixtures/bep/clean_build_and_test.bep --repeat 10 --concurrency 5 --drop-after 20 --verify
 ```
 
 Fixtures under `test/fixtures/bep/` were recorded from `test/fixtures/workspace/` with

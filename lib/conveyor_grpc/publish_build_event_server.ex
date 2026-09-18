@@ -3,32 +3,34 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
   Implements `google.devtools.build.v1.PublishBuildEvent`, the service Bazel talks to when
   `--bes_backend` is set.
 
-  Two RPCs:
-
     * `PublishLifecycleEvent` (unary): build enqueued / invocation started / invocation
       finished / build finished, sent around the tool event stream.
-    * `PublishBuildToolEventStream` (bidirectional): the ordered stream of Build Event
-      Protocol events. Every `OrderedBuildEvent` must be acknowledged, in order, with its
-      `sequence_number`. Bazel resends from the first un-acked sequence number after any
-      failure, so the handler only acks once the event is safely handled.
+    * `PublishBuildToolEventStream` (bidirectional): the ordered Build Event Protocol
+      stream. Every `OrderedBuildEvent` is acknowledged, in order, with its
+      `sequence_number` — and only after `Conveyor.Ingest.push/2` has committed it. Bazel
+      resends from the first un-acked sequence number after any failure.
   """
   use GRPC.Server, service: Google.Devtools.Build.V1.PublishBuildEvent.Service
 
-  require Logger
-
   alias Conveyor.Bep.Event
+  alias Conveyor.Grpc.Acker
+  alias Conveyor.Ingest
   alias Google.Devtools.Build.V1, as: V1
 
   @spec publish_lifecycle_event(V1.PublishLifecycleEventRequest.t(), GRPC.Server.Stream.t()) ::
-          Google.Protobuf.Empty.t()
+          any()
   def publish_lifecycle_event(%V1.PublishLifecycleEventRequest{} = req, stream) do
-    %V1.OrderedBuildEvent{stream_id: stream_id, sequence_number: seq, event: event} =
-      req.build_event
+    ctx = context(stream, req.notification_keywords, req.project_id)
 
-    Logger.info(
-      "BES lifecycle #{Event.bes_kind(event)} build=#{stream_id && stream_id.build_id} " <>
-        "invocation=#{stream_id && stream_id.invocation_id} seq=#{seq}"
-    )
+    case Ingest.lifecycle(ctx, req.build_event) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :unavailable,
+          message: "lifecycle event not accepted: #{inspect(reason)}"
+    end
 
     req
     |> GRPC.Stream.unary(materializer: stream)
@@ -38,39 +40,52 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
 
   @spec publish_build_tool_event_stream(Enumerable.t(), GRPC.Server.Stream.t()) :: any()
   def publish_build_tool_event_stream(requests, stream) do
-    headers = GRPC.Stream.get_headers(stream)
+    # Reading requests and sending acks happen in different processes so that the handler
+    # never waits on a commit: events are pushed as they arrive and acknowledged, strictly in
+    # order, as the writer commits them. Cowboy accepts replies from any process.
+    acker = Acker.start(stream)
+    stream = %{stream | local: Map.put(stream.local, :stream_id, nil)}
 
-    Logger.debug(
-      "BES stream opened, headers=#{inspect(Map.drop(headers, ["x-api-key", "authorization"]))}"
-    )
+    last_seq =
+      Enum.reduce(requests, 0, fn %V1.PublishBuildToolEventStreamRequest{ordered_build_event: obe} =
+                                    req,
+                                  _ ->
+        ctx = context(stream, req.notification_keywords, req.project_id)
 
-    # Imperative loop on purpose: acks must go out strictly in sequence order, and the
-    # Flow-based GRPC.Stream API may process elements concurrently.
-    Enum.each(requests, fn %V1.PublishBuildToolEventStreamRequest{ordered_build_event: obe} ->
-      handle_event(obe)
+        if Event.bes_kind(obe.event) == :component_stream_finished,
+          do: Acker.final(acker, obe.sequence_number)
 
-      GRPC.Server.send_reply(stream, %V1.PublishBuildToolEventStreamResponse{
-        stream_id: obe.stream_id,
-        sequence_number: obe.sequence_number
-      })
-    end)
-  end
+        case Ingest.push(ctx, obe, acker) do
+          :ok ->
+            obe.sequence_number
 
-  defp handle_event(%V1.OrderedBuildEvent{stream_id: sid, sequence_number: seq, event: event}) do
-    case Event.bes_kind(event) do
-      :bazel_event ->
-        case Event.unwrap(event) do
-          {:ok, bep} ->
-            Logger.info(
-              "BEP #{sid.invocation_id} ##{seq} #{Event.payload_kind(bep)} last=#{bep.last_message}"
-            )
+          {:error, :out_of_order} ->
+            raise GRPC.RPCError,
+              status: :failed_precondition,
+              message: "unexpected sequence number #{obe.sequence_number}"
 
           {:error, reason} ->
-            Logger.warning("BEP #{sid.invocation_id} ##{seq} undecodable: #{inspect(reason)}")
+            raise GRPC.RPCError,
+              status: :unavailable,
+              message: "event not accepted: #{inspect(reason)}"
         end
+      end)
 
-      kind ->
-        Logger.info("BES #{sid.invocation_id} ##{seq} #{kind}")
+    case Acker.await(acker, last_seq) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        raise GRPC.RPCError,
+          status: :unavailable,
+          message: "event not persisted: #{inspect(reason)}"
     end
   end
+
+  defp context(%GRPC.Server.Stream{local: %{ctx: ctx}}, keywords, project_id) do
+    %{ctx | keywords: keywords || [], instance_name: blank_to_nil(project_id)}
+  end
+
+  defp blank_to_nil(""), do: nil
+  defp blank_to_nil(v), do: v
 end
