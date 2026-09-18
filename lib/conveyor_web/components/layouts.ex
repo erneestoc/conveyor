@@ -31,46 +31,121 @@ defmodule ConveyorWeb.Layouts do
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
 
+  attr :projects, :list, default: [], doc: "projects for the switcher"
+  attr :project, :any, default: nil, doc: "the selected project, or nil for all projects"
+  attr :current_path, :string, default: "/", doc: "used to highlight the active nav item"
+  attr :wide, :boolean, default: true, doc: "use the full viewport width"
+
   slot :inner_block, required: true
 
   def app(assigns) do
     ~H"""
-    <header class="navbar px-4 sm:px-6 lg:px-8">
-      <div class="flex-1">
-        <a href="/" class="flex-1 flex w-fit items-center gap-2">
-          <img src={~p"/images/logo.svg"} width="36" />
-          <span class="text-sm font-semibold">v{Application.spec(:phoenix, :vsn)}</span>
-        </a>
-      </div>
-      <div class="flex-none">
-        <ul class="flex flex-column px-1 space-x-4 items-center">
-          <li>
-            <a href="https://phoenixframework.org/" class="btn btn-ghost">Website</a>
-          </li>
-          <li>
-            <a href="https://github.com/phoenixframework/phoenix" class="btn btn-ghost">GitHub</a>
-          </li>
-          <li>
+    <div class="flex min-h-screen flex-col bg-base-100 text-base-content">
+      <header class="sticky top-0 z-30 border-b border-base-300/70 bg-base-100/90 backdrop-blur">
+        <div class="mx-auto flex h-12 max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
+          <.link
+            navigate={~p"/"}
+            class="flex items-center gap-2 font-semibold tracking-tight"
+            id="brand"
+          >
+            <span class="grid size-6 place-items-center rounded bg-primary text-primary-content">
+              <.icon name="hero-forward-micro" class="size-3.5" />
+            </span>
+            Conveyor
+          </.link>
+
+          <.project_switcher projects={@projects} project={@project} />
+
+          <nav class="ml-2 hidden items-center gap-1 text-sm sm:flex" id="main-nav">
+            <.nav_link
+              navigate={builds_path(@project)}
+              active={
+                String.starts_with?(@current_path, "/p/") or @current_path == "/" or
+                  String.starts_with?(@current_path, "/invocation/")
+              }
+            >
+              Builds
+            </.nav_link>
+            <span class="rounded px-2 py-1 text-base-content/40" title="Coming in a later milestone">Dashboard</span>
+            <span class="rounded px-2 py-1 text-base-content/40" title="Coming in a later milestone">Tests</span>
+          </nav>
+
+          <div class="ml-auto flex items-center gap-3">
             <.theme_toggle />
-          </li>
-          <li>
-            <a href="https://phoenix.hexdocs.pm/overview.html" class="btn btn-primary">
-              Get Started <span aria-hidden="true">&rarr;</span>
-            </a>
-          </li>
-        </ul>
-      </div>
-    </header>
+          </div>
+        </div>
+      </header>
 
-    <main class="px-4 py-20 sm:px-6 lg:px-8">
-      <div class="mx-auto max-w-2xl space-y-4">
+      <main class={[
+        "mx-auto w-full flex-1 px-4 py-4 sm:px-6",
+        @wide && "max-w-screen-2xl",
+        !@wide && "max-w-3xl"
+      ]}>
         {render_slot(@inner_block)}
-      </div>
-    </main>
+      </main>
 
-    <.flash_group flash={@flash} />
+      <.flash_group flash={@flash} />
+    </div>
     """
   end
+
+  attr :navigate, :string, required: true
+  attr :active, :boolean, default: false
+  slot :inner_block, required: true
+
+  defp nav_link(assigns) do
+    ~H"""
+    <.link
+      navigate={@navigate}
+      class={[
+        "rounded px-2 py-1 transition-colors hover:bg-base-200",
+        @active && "bg-base-200 font-medium text-base-content",
+        !@active && "text-base-content/70"
+      ]}
+    >
+      {render_slot(@inner_block)}
+    </.link>
+    """
+  end
+
+  attr :projects, :list, required: true
+  attr :project, :any, required: true
+
+  defp project_switcher(assigns) do
+    ~H"""
+    <details class="relative" id="project-switcher">
+      <summary class="flex cursor-pointer select-none items-center gap-1 rounded border border-base-300 bg-base-100 px-2 py-1 text-sm hover:bg-base-200">
+        <.icon name="hero-folder-micro" class="size-3.5 text-base-content/60" />
+        <span class="max-w-40 truncate">{if @project, do: @project.name, else: "All projects"}</span>
+        <.icon name="hero-chevron-down-micro" class="size-3.5 text-base-content/60" />
+      </summary>
+      <div class="absolute left-0 mt-1 w-56 rounded-md border border-base-300 bg-base-100 p-1 shadow-lg">
+        <.link
+          navigate={~p"/"}
+          class={[
+            "block rounded px-2 py-1.5 text-sm hover:bg-base-200",
+            is_nil(@project) && "font-medium"
+          ]}
+        >
+          All projects
+        </.link>
+        <.link
+          :for={p <- @projects}
+          navigate={~p"/p/#{p.slug}"}
+          class={[
+            "block truncate rounded px-2 py-1.5 text-sm hover:bg-base-200",
+            @project && @project.id == p.id && "font-medium"
+          ]}
+        >
+          {p.name}
+        </.link>
+      </div>
+    </details>
+    """
+  end
+
+  defp builds_path(nil), do: ~p"/"
+  defp builds_path(project), do: ~p"/p/#{project.slug}"
 
   @doc """
   Shows the flash group with standard titles and content.

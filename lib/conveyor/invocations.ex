@@ -29,7 +29,10 @@ defmodule Conveyor.Invocations do
   @spec get!(String.t()) :: Invocation.t()
   def get!(id), do: Repo.get!(Invocation, id)
 
-  @doc "Newest-first page of invocations. Options: `:project_id`, `:status`, `:limit` (default 50), `:before` ({started_at, id} cursor)."
+  @doc """
+  Newest-first page of invocations. Options: `:project_id`, `:status`, `:statuses` (list),
+  `:limit` (default 50), `:before` (`{started_at, id}` cursor).
+  """
   @spec list(keyword()) :: [Invocation.t()]
   def list(opts \\ []) do
     limit = Keyword.get(opts, :limit, 50)
@@ -37,6 +40,7 @@ defmodule Conveyor.Invocations do
     Invocation
     |> maybe_where(:project_id, opts[:project_id])
     |> maybe_where(:status, opts[:status])
+    |> maybe_statuses(opts[:statuses])
     |> maybe_before(opts[:before])
     |> order_by([i], desc: i.started_at, desc: i.id)
     |> limit(^limit)
@@ -45,6 +49,9 @@ defmodule Conveyor.Invocations do
 
   defp maybe_where(query, _field, nil), do: query
   defp maybe_where(query, field, value), do: where(query, [i], field(i, ^field) == ^value)
+
+  defp maybe_statuses(query, nil), do: query
+  defp maybe_statuses(query, statuses), do: where(query, [i], i.status in ^statuses)
 
   defp maybe_before(query, nil), do: query
 
@@ -59,6 +66,51 @@ defmodule Conveyor.Invocations do
   @spec targets(Invocation.t() | String.t()) :: [Target.t()]
   def targets(inv),
     do: Repo.all(from t in Target, where: t.invocation_id == ^id(inv), order_by: t.label)
+
+  @spec failed_targets(Invocation.t() | String.t()) :: [Target.t()]
+  def failed_targets(inv) do
+    Repo.all(
+      from t in Target,
+        where:
+          t.invocation_id == ^id(inv) and
+            (t.status == "failed" or
+               t.test_status in [
+                 "FAILED",
+                 "TIMEOUT",
+                 "FLAKY",
+                 "INCOMPLETE",
+                 "REMOTE_FAILURE",
+                 "FAILED_TO_BUILD"
+               ]),
+        order_by: t.label
+    )
+  end
+
+  @spec slowest_tests(Invocation.t() | String.t(), pos_integer()) :: [TestResult.t()]
+  def slowest_tests(inv, limit \\ 10) do
+    Repo.all(
+      from t in TestResult,
+        where: t.invocation_id == ^id(inv) and not is_nil(t.duration_ms),
+        order_by: [desc: t.duration_ms],
+        limit: ^limit
+    )
+  end
+
+  @doc "One page of decoded raw events with their sequence numbers: `{events, total}`."
+  @spec events_page(Invocation.t(), pos_integer(), pos_integer()) ::
+          {[{pos_integer(), BuildEventStream.BuildEvent.t()}], non_neg_integer()}
+  def events_page(%Invocation{} = inv, page, per_page) do
+    frames = raw_frames(inv)
+    total = length(frames)
+
+    events =
+      frames
+      |> Enum.with_index(1)
+      |> Enum.slice((page - 1) * per_page, per_page)
+      |> Enum.map(fn {frame, seq} -> {seq, BuildEventStream.BuildEvent.decode(frame)} end)
+
+    {events, total}
+  end
 
   @spec test_results(Invocation.t() | String.t()) :: [TestResult.t()]
   def test_results(inv),

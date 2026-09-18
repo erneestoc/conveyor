@@ -17,7 +17,11 @@ defmodule ConveyorWeb.Router do
   scope "/", ConveyorWeb do
     pipe_through :browser
 
-    get "/", PageController, :home
+    live "/", BuildsLive, :all
+    live "/p/:slug", BuildsLive, :project
+    live "/invocation/:id", InvocationLive, :overview
+    live "/invocation/:id/:tab", InvocationLive, :tab
+    get "/invocation/:id/download/:kind", DownloadController, :show
   end
 
   # Other scopes may use custom stacks.

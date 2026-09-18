@@ -30,8 +30,8 @@
   --color-base-200: oklch(25.26% 0.014 253.1);
   --color-base-300: oklch(20.15% 0.012 254.09);
   --color-base-content: oklch(97.807% 0.029 256.847);
-  --color-primary: oklch(58% 0.233 277.117);
-  --color-primary-content: oklch(96% 0.018 272.314);
+  --color-primary: oklch(72% 0.11 195);
+  --color-primary-content: oklch(20% 0.03 195);
   --color-secondary: oklch(58% 0.233 277.117);
   --color-secondary-content: oklch(96% 0.018 272.314);
   --color-accent: oklch(60% 0.25 292.717);
@@ -65,8 +65,8 @@
   --color-base-200: oklch(96% 0.001 286.375);
   --color-base-300: oklch(92% 0.004 286.32);
   --color-base-content: oklch(21% 0.006 285.885);
-  --color-primary: oklch(70% 0.213 47.604);
-  --color-primary-content: oklch(98% 0.016 73.684);
+  --color-primary: oklch(52% 0.1 195);
+  --color-primary-content: oklch(98% 0.01 195);
   --color-secondary: oklch(55% 0.027 264.364);
   --color-secondary-content: oklch(98% 0.002 247.839);
   --color-accent: oklch(0% 0 0);
@@ -103,3 +103,17 @@
 [data-phx-session], [data-phx-teleported-src] { display: contents }
 
 /* This file is for your main application CSS */
+
+/* Build log viewer: terminal-like surface with ANSI colour classes emitted by the JS hook */
+.log-viewer { font-variant-ligatures: none; }
+.log-viewer .ln { color: color-mix(in oklab, currentColor 35%, transparent); user-select: none; }
+.ansi-bold { font-weight: 600; }
+.ansi-dim { opacity: .7; }
+.ansi-italic { font-style: italic; }
+.ansi-underline { text-decoration: underline; }
+.ansi-fg-0 { color: #6b7280; } .ansi-fg-1 { color: #ef4444; } .ansi-fg-2 { color: #22c55e; } .ansi-fg-3 { color: #eab308; }
+.ansi-fg-4 { color: #3b82f6; } .ansi-fg-5 { color: #d946ef; } .ansi-fg-6 { color: #06b6d4; } .ansi-fg-7 { color: #e5e7eb; }
+.ansi-fg-8 { color: #9ca3af; } .ansi-fg-9 { color: #f87171; } .ansi-fg-10 { color: #4ade80; } .ansi-fg-11 { color: #facc15; }
+.ansi-fg-12 { color: #60a5fa; } .ansi-fg-13 { color: #e879f9; } .ansi-fg-14 { color: #22d3ee; } .ansi-fg-15 { color: #f9fafb; }
+.ansi-bg-1 { background: #7f1d1d; } .ansi-bg-2 { background: #14532d; } .ansi-bg-3 { background: #713f12; } .ansi-bg-4 { background: #1e3a8a; }
+[data-theme=light] .ansi-fg-7 { color: #374151; } [data-theme=light] .ansi-fg-15 { color: #111827; }
