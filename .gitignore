@@ -42,3 +42,4 @@ test/fixtures/workspace/bazel-*
 # Local dev environment
 .env
 /bes_loadgen
+/site/

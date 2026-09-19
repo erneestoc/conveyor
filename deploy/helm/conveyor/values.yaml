@@ -1,0 +1,107 @@
+# Conveyor Helm chart. Required: a PostgreSQL database and, with more than one replica,
+# an S3-compatible bucket. Everything Conveyor reads is an environment variable; `config`
+# becomes a ConfigMap, `secrets` a Secret (or point `existingSecret` at your own).
+
+image:
+  repository: ghcr.io/example/conveyor
+  tag: ""            # defaults to the chart's appVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+replicaCount: 3
+
+# Public hostnames. The UI and the BES gRPC endpoint are usually separate hosts because
+# gRPC needs HTTP/2 end to end.
+hosts:
+  web: conveyor.example.com
+  grpc: bes.example.com
+
+config:
+  AUTH_MODE: open               # open (ADMIN_TOKEN gates Settings) or oidc
+  # OIDC_ISSUER: https://login.example.com
+  # OIDC_CLIENT_ID: conveyor
+  # OIDC_ADMIN_GROUPS: platform
+  # ADMIN_EMAILS: lead@example.com
+  # ALLOWED_EMAIL_DOMAINS: example.com
+  BES_INGEST_AUTH: api_key
+  CAS_SINK_ENABLED: "true"
+  BLOB_STORE: s3                # disk works only with replicaCount 1 (see persistence)
+  S3_BUCKET: conveyor-blobs
+  S3_REGION: us-east-1
+  # S3_ENDPOINT: https://minio.example.com   # S3-compatible stores
+  # S3_PATH_STYLE: "true"
+  RETENTION_DAYS: "90"
+  RETENTION_RAW_DAYS: "14"
+  POOL_SIZE: "40"
+  MAX_STREAMS_PER_KEY: "500"
+  MAX_EVENTS_PER_SECOND_PER_KEY: "5000"
+  MAX_LOG_MB: "256"
+  SHUTDOWN_DRAIN_SECONDS: "45"
+  FORCE_SSL: "false"            # TLS terminates at the ingress
+
+# Rendered into a Secret named <release>-conveyor unless existingSecret is set. Keys:
+# DATABASE_URL (required), SECRET_KEY_BASE (required, 64+ random bytes), RELEASE_COOKIE
+# (required when clustered), ADMIN_TOKEN, OIDC_CLIENT_SECRET, METRICS_TOKEN,
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY (omit when using IRSA or an instance role).
+secrets: {}
+existingSecret: ""
+
+# Erlang clustering through the headless service (libcluster Kubernetes.DNS): no RBAC.
+cluster:
+  enabled: true
+  nodeBasename: conveyor
+
+# Disk blob store for single-replica installs without S3: a PVC mounted at BLOB_DIR.
+persistence:
+  enabled: false
+  size: 50Gi
+  storageClass: ""
+
+service:
+  type: ClusterIP
+  annotations: {}
+
+ingress:
+  className: nginx
+  web:
+    enabled: true
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+    tls: true
+  grpc:
+    enabled: true
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt
+      nginx.ingress.kubernetes.io/backend-protocol: GRPC
+      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+      nginx.ingress.kubernetes.io/proxy-body-size: 64m
+    tls: true
+
+resources:
+  requests: { cpu: "1", memory: 1Gi }
+  limits: { cpu: "4", memory: 4Gi }
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 60
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+# Prometheus scrape annotations on the pods; METRICS_TOKEN (in secrets) protects /metrics.
+metrics:
+  annotations: true
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+
+terminationGracePeriodSeconds: 60
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+extraEnv: []

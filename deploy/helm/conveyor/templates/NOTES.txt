@@ -1,0 +1,17 @@
+Conveyor {{ .Chart.AppVersion }} is rolling out as {{ include "conveyor.fullname" . }}.
+
+  UI:    https://{{ .Values.hosts.web }}
+  Bazel: --bes_backend=grpcs://{{ .Values.hosts.grpc }}:443
+         --bes_results_url=https://{{ .Values.hosts.web }}/invocation/
+         --bes_header=x-api-key=<key from Settings>
+         --build_event_upload_max_retries=10
+
+Watch the rollout:  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "conveyor.fullname" . }}
+Readiness:          kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }}
+{{- if not .Values.existingSecret }}
+{{- if not .Values.secrets.DATABASE_URL }}
+
+WARNING: secrets.DATABASE_URL is not set. Set it (and SECRET_KEY_BASE, RELEASE_COOKIE)
+in values or point existingSecret at a Secret that has them.
+{{- end }}
+{{- end }}

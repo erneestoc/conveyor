@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "conveyor.fullname" . }}
+  labels: {{- include "conveyor.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations: {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {{- include "conveyor.selectorLabels" . | nindent 4 }}
+  ports:
+    - { name: http, port: 4000, targetPort: http }
+    - { name: grpc, port: 1985, targetPort: grpc }
+{{- if .Values.cluster.enabled }}
+---
+# Headless service used by libcluster (Kubernetes.DNS) to find peer pods, including
+# pods that are not ready yet so a booting node joins before it serves traffic.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "conveyor.fullname" . }}-headless
+  labels: {{- include "conveyor.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: {{- include "conveyor.selectorLabels" . | nindent 4 }}
+  ports:
+    - { name: epmd, port: 4369, targetPort: 4369 }
+    - { name: dist, port: 9100, targetPort: 9100 }
+{{- end }}

@@ -1,0 +1,9 @@
+apiVersion: v2
+name: conveyor
+description: Self-hosted Bazel Build Event Service server with a real-time UI
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/example/conveyor
+sources: [https://github.com/example/conveyor]
+keywords: [bazel, build-event-service, bes, observability]

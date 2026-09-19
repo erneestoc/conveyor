@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "conveyor.fullname" . }}
+  labels: {{- include "conveyor.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels: {{- include "conveyor.selectorLabels" . | nindent 6 }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels:
+        {{- include "conveyor.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- if .Values.metrics.annotations }}
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: /metrics
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: conveyor
+          image: {{ include "conveyor.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - { name: http, containerPort: 4000 }
+            - { name: grpc, containerPort: 1985 }
+            {{- if .Values.cluster.enabled }}
+            - { name: epmd, containerPort: 4369 }
+            - { name: dist, containerPort: 9100 }
+            {{- end }}
+          envFrom:
+            - configMapRef: { name: {{ include "conveyor.fullname" . }} }
+            - secretRef: { name: {{ include "conveyor.secretName" . }} }
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            # Let endpoints propagate the readiness change before SIGTERM starts the drain.
+            preStop:
+              exec: { command: ["sh", "-c", "sleep 5"] }
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - { name: blobs, mountPath: /var/lib/conveyor/blobs }
+          {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: blobs
+          persistentVolumeClaim: { claimName: {{ include "conveyor.fullname" . }}-blobs }
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}

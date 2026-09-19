@@ -1,0 +1,55 @@
+site_name: Conveyor
+site_description: Self-hosted Bazel Build Event Service server with a real-time UI
+site_url: https://example.github.io/conveyor/
+repo_url: https://github.com/example/conveyor
+repo_name: conveyor
+edit_uri: edit/main/docs/
+copyright: MIT licensed
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - search.suggest
+    - toc.follow
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      toggle: { icon: material/brightness-7, name: Dark mode }
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      toggle: { icon: material/brightness-4, name: Light mode }
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc: { permalink: true }
+  - pymdownx.superfences
+  - pymdownx.tabbed: { alternate_style: true }
+  - pymdownx.details
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Quick start: quickstart.md
+      - Configure Bazel: bazel.md
+      - Conveyor in CI: ci.md
+  - Concepts:
+      - Architecture: architecture.md
+      - Design decisions: decisions.md
+      - Scale and measurements: scale.md
+  - Deploy:
+      - Production guide: production.md
+      - Kubernetes and Helm: kubernetes.md
+      - Configuration reference: configuration.md
+      - Sign-in and access: auth.md
+      - Security model: security.md
+      - Cache endpoints: cache-endpoints.md
+      - Operations: operations.md
+  - Development: development.md
+  - Changelog: changelog.md

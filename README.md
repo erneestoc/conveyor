@@ -14,7 +14,10 @@ rate, failures and flaky tests per team, branch or CI segment.
 - Logs of any size stream into a virtualized viewer (50 MB renders in a fraction of a second).
 - API keys per project for Bazel, OpenID Connect for people, audit log, secret scrubbing.
 
-Status: **0.1.0**, verified end to end with Bazel 7, 8 and 9.
+Status: **0.1.0**, verified end to end with Bazel 7, 8 and 9. Documentation:
+**https://example.github.io/conveyor/** (source in `docs/`).
+
+![Conveyor builds list](docs/assets/builds.png)
 
 ## Quick start
 
@@ -40,9 +43,12 @@ the full client recipe (upload modes, remote cache, profiles) and
 
 ## Deploying
 
+- Image: `ghcr.io/example/conveyor:0.1.0` (multi-arch, non-root, migrates on boot).
+- Helm: `helm install conveyor oci://ghcr.io/example/charts/conveyor --version 0.1.0`, see
+  [docs/kubernetes.md](docs/kubernetes.md) and [deploy/helm/conveyor](deploy/helm/conveyor).
 - [docs/production.md](docs/production.md): topology, sizing from the load tests, Postgres
   settings, connection pooling, rollouts, alerts and a go-live checklist.
-- [deploy/kubernetes](deploy/kubernetes): manifests with a horizontal autoscaler.
+- [deploy/kubernetes](deploy/kubernetes): plain manifests with a horizontal autoscaler.
 - [deploy/aws-asg](deploy/aws-asg): Terraform for an EC2 auto-scaling group.
 - [deploy/grafana/conveyor.json](deploy/grafana/conveyor.json): dashboard for the
   Prometheus metrics served at `/metrics`.
