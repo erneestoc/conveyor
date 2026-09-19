@@ -113,27 +113,36 @@ defmodule Conveyor.Ingest.Writer do
     # write the whole group's rows with one statement per table.
     event_rows = batches |> Enum.map(&Batch.event_segment_row/1) |> Enum.reject(&is_nil/1)
     log_rows = batches |> Enum.map(&Batch.log_segment_row/1) |> Enum.reject(&is_nil/1)
+    # Tag counts are rows shared by every invocation of a project. Updating them inside the
+    # group transaction made every shard queue on the same row locks for the whole commit
+    # (measured: >90 % of active backends waiting on tag_keys), so they are merged across the
+    # group and applied in one short statement after the commit.
+    tag_rows = tag_key_rows(batches)
 
-    Retry.with_backoff(
-      fn ->
-        case Repo.transaction(
-               fn ->
-                 if event_rows != [],
-                   do: Repo.insert_all(EventSegment, event_rows, on_conflict: :nothing)
+    result =
+      Retry.with_backoff(
+        fn ->
+          case Repo.transaction(
+                 fn ->
+                   if event_rows != [],
+                     do: Repo.insert_all(EventSegment, event_rows, on_conflict: :nothing)
 
-                 if log_rows != [],
-                   do: Repo.insert_all(LogSegment, log_rows, on_conflict: :nothing)
+                   if log_rows != [],
+                     do: Repo.insert_all(LogSegment, log_rows, on_conflict: :nothing)
 
-                 Enum.each(batches, &apply_batch!(&1, segments: false))
-               end,
-               timeout: 60_000
-             ) do
-          {:ok, _} -> :ok
-          {:error, reason} -> {:error, reason}
-        end
-      end,
-      label: "writer group commit"
-    )
+                   Enum.each(batches, &apply_batch!(&1, segments: false, tag_keys: false))
+                 end,
+                 timeout: 60_000
+               ) do
+            {:ok, _} -> :ok
+            {:error, reason} -> {:error, reason}
+          end
+        end,
+        label: "writer group commit"
+      )
+
+    if result == :ok, do: count_tag_keys(tag_rows)
+    result
   rescue
     e -> {:error, e}
   end
@@ -160,8 +169,11 @@ defmodule Conveyor.Ingest.Writer do
       {:error, Exception.message(e)}
   end
 
-  @doc "Applies one batch inside the current transaction. Raises on failure."
-  @spec apply_batch!(Batch.t()) :: :ok
+  @doc """
+  Applies one batch inside the current transaction. Raises on failure. `segments: false`
+  and `tag_keys: false` skip parts the group commit writes for all batches at once.
+  """
+  @spec apply_batch!(Batch.t(), keyword()) :: :ok
   def apply_batch!(%Batch{} = b, opts \\ []) do
     if Keyword.get(opts, :segments, true) do
       if row = Batch.event_segment_row(b),
@@ -221,22 +233,55 @@ defmodule Conveyor.Ingest.Writer do
       )
     end
 
-    if b.tag_keys != %{} do
-      now = DateTime.utc_now()
-
-      rows =
-        Enum.map(b.tag_keys, fn {{k, v}, n} ->
-          %{project_id: b.project_id, key: k, value: v, count: n, last_seen_at: now}
-        end)
-
-      Repo.insert_all(TagKey, rows,
-        on_conflict: [set: [last_seen_at: now], inc: [count: 1]],
-        conflict_target: [:project_id, :key, :value]
-      )
-    end
+    if Keyword.get(opts, :tag_keys, true), do: count_tag_keys!(tag_key_rows([b]))
 
     update_invocation!(b)
     :ok
+  end
+
+  # One tag_keys upsert for a whole group: counts merged per (project, key, value) and rows
+  # sorted so concurrent statements lock them in the same order (no deadlocks).
+  defp tag_key_rows(batches) do
+    now = DateTime.utc_now()
+
+    batches
+    |> Enum.reduce(%{}, fn b, acc ->
+      Enum.reduce(b.tag_keys, acc, fn {{k, v}, n}, acc ->
+        Map.update(acc, {b.project_id, k, v}, n, &(&1 + n))
+      end)
+    end)
+    |> Enum.sort()
+    |> Enum.map(fn {{project_id, k, v}, n} ->
+      %{project_id: project_id, key: k, value: v, count: n, last_seen_at: now}
+    end)
+  end
+
+  defp count_tag_keys!([]), do: :ok
+
+  defp count_tag_keys!(rows) do
+    on_conflict =
+      from t in TagKey,
+        update: [
+          inc: [count: fragment("EXCLUDED.count")],
+          set: [last_seen_at: fragment("EXCLUDED.last_seen_at")]
+        ]
+
+    Repo.insert_all(TagKey, rows,
+      on_conflict: on_conflict,
+      conflict_target: [:project_id, :key, :value]
+    )
+
+    :ok
+  end
+
+  # After a group commit. The batches are already durable and acked, so a failure here is
+  # logged rather than turned into a retry of the group; the counts are facet hints.
+  defp count_tag_keys(rows) do
+    Retry.with_backoff(fn -> count_tag_keys!(rows) end, label: "tag counts")
+  rescue
+    e ->
+      Logger.warning("tag counts not updated for #{length(rows)} rows: #{Exception.message(e)}")
+      :ok
   end
 
   # Compare-and-set on last_event_seq fences stale workers (another node or a restart).

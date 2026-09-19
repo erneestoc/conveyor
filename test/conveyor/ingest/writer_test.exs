@@ -113,6 +113,28 @@ defmodule Conveyor.Ingest.WriterTest do
     assert Process.alive?(GenServer.whereis(writer))
   end
 
+  @tag :capture_log
+  test "a failed tag count after the group commit does not fail the batch", %{id: id} do
+    # project_id nil violates NOT NULL on tag_keys only; the batch itself commits first.
+    bad_tags =
+      Batch.new(id, nil, Date.utc_today(), 1, 0, 0)
+      |> Batch.add_event(1, "started", "x")
+      |> Batch.count_tags(%{"k" => "v"})
+
+    writer = WriterPool.for_invocation(id)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        Writer.submit(writer, bad_tags)
+        ref = bad_tags.ref
+        assert_receive {:batch_committed, ^ref}, 2_000
+      end)
+
+    assert log =~ "tag counts not updated"
+    assert Repo.get!(Invocation, id).last_event_seq == 1
+    assert Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k") == []
+  end
+
   test "pool sharding is stable" do
     assert WriterPool.for_invocation("abc") == WriterPool.for_invocation("abc")
     assert WriterPool.shards() >= 1
