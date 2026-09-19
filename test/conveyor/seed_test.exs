@@ -21,7 +21,14 @@ defmodule Conveyor.SeedTest do
       assert DateTime.diff(inv.finished_at, inv.started_at, :millisecond) == inv.duration_ms
       assert inv.duration_ms >= 500
       assert inv.user_name in ["ci" | ~w(alice bob carol dave erin frank grace heidi)]
-      assert Map.take(inv.tags, ~w(user ci branch team)) |> map_size() == 4
+      assert Map.take(inv.tags, ~w(user ci branch team host bazel_version)) |> map_size() == 6
+      refute Map.has_key?(inv.tags, "scenario")
+      assert inv.tags["host"] == inv.host and inv.workspace_status["BUILD_HOST"] == inv.host
+      assert inv.workspace =~ "/acme"
+
+      assert inv.remote_cache_hits + inv.remote_exec + inv.worker_exec + inv.sandbox_exec ==
+               inv.actions_executed
+
       assert Invocations.raw_frames(inv) != []
 
       # Targets and actions move with the build.

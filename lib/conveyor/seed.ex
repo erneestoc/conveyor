@@ -4,7 +4,8 @@ defmodule Conveyor.Seed do
   pipeline, so every invocation has a log, targets, tests, actions, named sets, metrics and
   raw events, then spreads the builds over the last N days (weekday and working-hour
   weighted) with varied users, hosts, branches, teams and Bazel versions, scales build
-  lengths to CI-like and local-like distributions, and rebuilds the project's tag facets.
+  lengths and action counters to CI-like and local-like distributions (per-action detail
+  stays the fixture's), and rebuilds the project's tag facets.
 
       Conveyor.Seed.replay(project_id, 2_000, 30)
 
@@ -149,28 +150,51 @@ defmodule Conveyor.Seed do
     finished = DateTime.add(plan.started_at, duration, :millisecond)
 
     tags =
-      Map.merge(inv.tags, %{
+      inv.tags
+      |> Map.delete("scenario")
+      |> Map.merge(%{
         "user" => plan.user,
         "ci" => to_string(plan.ci?),
         "branch" => plan.branch,
-        "team" => plan.team
+        "team" => plan.team,
+        "host" => plan.host,
+        "bazel_version" => plan.version,
+        "build_user" => plan.user,
+        "build_host" => plan.host
       })
 
+    workspace_status =
+      inv.workspace_status
+      |> Map.replace("BUILD_USER", plan.user)
+      |> Map.replace("BUILD_HOST", plan.host)
+
+    home =
+      cond do
+        plan.ci? -> "/home/ci/work"
+        String.ends_with?(plan.host, "linux") -> "/home/#{plan.user}/src"
+        true -> "/Users/#{plan.user}/src"
+      end
+
     Repo.update_all(from(i in Invocation, where: i.id == ^id),
-      set: [
-        started_at: plan.started_at,
-        finished_at: finished,
-        last_event_at: finished,
-        duration_ms: duration,
-        wall_ms: scale.(inv.wall_ms),
-        analysis_ms: scale.(inv.analysis_ms),
-        execution_ms: scale.(inv.execution_ms),
-        critical_path_ms: scale.(inv.critical_path_ms),
-        user_name: plan.user,
-        host: plan.host,
-        bazel_version: plan.version,
-        tags: tags
-      ]
+      set:
+        [
+          started_at: plan.started_at,
+          finished_at: finished,
+          last_event_at: finished,
+          duration_ms: duration,
+          wall_ms: scale.(inv.wall_ms),
+          analysis_ms: scale.(inv.analysis_ms),
+          execution_ms: scale.(inv.execution_ms),
+          critical_path_ms: scale.(inv.critical_path_ms),
+          user_name: plan.user,
+          host: plan.host,
+          bazel_version: plan.version,
+          tags: tags,
+          workspace_status: workspace_status,
+          workspace: "#{home}/acme",
+          cwd: "#{home}/acme",
+          local_exec_root: "#{home}/.cache/bazel/execroot/_main"
+        ] ++ cache_stats(plan)
     )
 
     from(t in Target,
@@ -202,6 +226,35 @@ defmodule Conveyor.Seed do
     |> Repo.update_all([])
 
     :ok
+  end
+
+  # Build-level action counters sized like a real repository: CI builds hit a warm remote
+  # cache and execute remotely; local builds are smaller and mostly sandboxed. The
+  # per-action detail stays the fixture's.
+  defp cache_stats(plan) do
+    executed = if plan.ci?, do: 200 + :rand.uniform(2_800), else: 20 + :rand.uniform(380)
+
+    hit_rate =
+      cond do
+        plan.ci? -> 0.6 + :rand.uniform() * 0.35
+        :rand.uniform() < 0.4 -> 0.3 + :rand.uniform() * 0.4
+        true -> 0.0
+      end
+
+    hits = round(executed * hit_rate)
+    misses = executed - hits
+    remote = if plan.ci?, do: round(misses * 0.8), else: 0
+    worker = round((misses - remote) * 0.3)
+
+    [
+      actions_created: executed + :rand.uniform(500),
+      actions_executed: executed,
+      remote_cache_hits: hits,
+      remote_exec: remote,
+      worker_exec: worker,
+      sandbox_exec: misses - remote - worker,
+      local_exec: 0
+    ]
   end
 
   # Facets are a cache of the tags column; rebuild them from the truth after reshaping.
