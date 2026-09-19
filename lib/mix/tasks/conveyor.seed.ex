@@ -1,8 +1,18 @@
 defmodule Mix.Tasks.Conveyor.Seed do
-  @shortdoc "Inserts synthetic invocations for dashboards and load tests"
+  @shortdoc "Seeds invocations: fixture replays for browsing, or synthetic rows for volume"
   @moduledoc """
-  Generates realistic-looking invocations (statuses, durations, users, tags, cache stats)
-  spread over the last N days, directly into the database.
+  Two modes.
+
+  `--replay N` pushes the recorded BEP fixtures through the real ingest pipeline (every tab
+  of every build is populated: log, targets, tests, actions, timeline, events) and spreads
+  them over the last N days with varied users, hosts, branches and build lengths. It starts
+  the application without the gRPC and web servers, so it is safe while a dev server runs;
+  refresh the browser afterwards.
+
+      mix conveyor.seed --replay 2000 [--days 30] [--concurrency 32] [--project default]
+
+  `--invocations N` inserts synthetic rows directly (statuses, durations, users, tags, cache
+  stats only; the builds have no events), for dashboard volume and load tests.
 
       mix conveyor.seed --invocations 5000 [--days 30] [--project default]
   """
@@ -13,7 +23,13 @@ defmodule Mix.Tasks.Conveyor.Seed do
   alias Conveyor.Invocations.{Invocation, Target, TagKey}
   alias Conveyor.Repo
 
-  @switches [invocations: :integer, days: :integer, project: :string]
+  @switches [
+    invocations: :integer,
+    replay: :integer,
+    concurrency: :integer,
+    days: :integer,
+    project: :string
+  ]
   @users ~w(alice bob carol dave erin frank grace heidi)
   @hosts ~w(mac-1 mac-2 linux-a linux-b ci-runner-1 ci-runner-2 ci-runner-3)
   @patterns [
@@ -34,19 +50,39 @@ defmodule Mix.Tasks.Conveyor.Seed do
   @impl true
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
-    start_repo()
-    n = Keyword.get(opts, :invocations, 1_000)
     days = Keyword.get(opts, :days, 30)
+
+    if opts[:replay], do: start_app(), else: start_repo()
 
     project =
       Conveyor.Projects.get_project_by_slug(Keyword.get(opts, :project, "default")) ||
         Conveyor.Projects.ensure_default_project!()
 
-    {count, targets} = seed(project.id, n, days)
+    if n = opts[:replay] do
+      ids = Conveyor.Seed.replay(project.id, n, days, Keyword.take(opts, [:concurrency]))
 
-    Mix.shell().info(
-      "inserted #{count} invocations and #{targets} failed targets into project #{project.slug}"
-    )
+      Mix.shell().info(
+        "replayed #{length(ids)} builds over #{days} days into project #{project.slug}"
+      )
+    else
+      n = Keyword.get(opts, :invocations, 1_000)
+      {count, targets} = seed(project.id, n, days)
+
+      Mix.shell().info(
+        "inserted #{count} invocations and #{targets} failed targets into project #{project.slug}"
+      )
+    end
+  end
+
+  # The ingest pipeline needs the application, but not its listeners: a dev server may be
+  # running on the same ports.
+  defp start_app do
+    Mix.Task.run("app.config")
+    grpc = Application.get_env(:conveyor, Conveyor.Grpc, [])
+    Application.put_env(:conveyor, Conveyor.Grpc, Keyword.put(grpc, :start_server, false))
+    endpoint = Application.get_env(:conveyor, ConveyorWeb.Endpoint, [])
+    Application.put_env(:conveyor, ConveyorWeb.Endpoint, Keyword.put(endpoint, :server, false))
+    Mix.Task.run("app.start")
   end
 
   # Only the repo is needed; starting the whole app would also bind the gRPC port.
