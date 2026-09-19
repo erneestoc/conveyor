@@ -17,7 +17,10 @@ defmodule Conveyor.GrpcCase do
     pid =
       start_supervised!(
         {GRPC.Server.Supervisor,
-         endpoint: Conveyor.Grpc.Endpoint, port: port, start_server: true},
+         endpoint: Conveyor.Grpc.Endpoint,
+         port: port,
+         start_server: true,
+         max_body_size: 64 * 1024 * 1024},
         id: {:grpc_server, port}
       )
 

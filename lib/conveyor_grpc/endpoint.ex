@@ -6,4 +6,7 @@ defmodule Conveyor.Grpc.Endpoint do
   intercept Conveyor.Grpc.AuthInterceptor
   run(Conveyor.Grpc.PublishBuildEventServer)
   run(Conveyor.Grpc.ByteStreamServer)
+  run(Conveyor.Grpc.CasServer)
+  run(Conveyor.Grpc.CapabilitiesServer)
+  run(Conveyor.Grpc.ActionCacheServer)
 end
