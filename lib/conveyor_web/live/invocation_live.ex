@@ -15,7 +15,7 @@ defmodule ConveyorWeb.InvocationLive do
   alias Conveyor.Projects
   alias ConveyorWeb.Format
 
-  @tabs ~w(overview log targets tests actions metrics details events)
+  @tabs ~w(overview log timeline targets tests actions metrics details events)
   @events_per_page 100
 
   @impl true
@@ -46,6 +46,7 @@ defmodule ConveyorWeb.InvocationLive do
        targets_by_key: %{},
        tests_by_key: %{},
        action_count: 0,
+       timeline_actions: [],
        events: [],
        events_page: 1,
        events_total: 0,
@@ -125,6 +126,10 @@ defmodule ConveyorWeb.InvocationLive do
       |> assign(action_count: length(actions))
       |> stream(:actions, actions, reset: true)
     end
+  end
+
+  defp load_tab(socket, "timeline", _page) do
+    socket |> load_tab("tests", 1) |> load_tab("actions", 1)
   end
 
   defp load_tab(socket, "metrics", _page) do
@@ -256,8 +261,15 @@ defmodule ConveyorWeb.InvocationLive do
 
   defp apply_actions(socket, rows) do
     if loaded?(socket, :actions) do
-      socket = assign(socket, action_count: socket.assigns.action_count + length(rows))
-      Enum.reduce(rows, socket, &stream_insert(&2, :actions, struct(Action, &1)))
+      structs = Enum.map(rows, &struct(Action, &1))
+
+      socket =
+        assign(socket,
+          action_count: socket.assigns.action_count + length(rows),
+          timeline_actions: socket.assigns.timeline_actions ++ structs
+        )
+
+      Enum.reduce(structs, socket, &stream_insert(&2, :actions, &1))
     else
       socket
     end
@@ -447,6 +459,12 @@ defmodule ConveyorWeb.InvocationLive do
             mnemonics={@mnemonics}
           />
           <.log :if={@tab == "log"} invocation={@invocation} />
+          <ConveyorWeb.Timeline.timeline
+            :if={@tab == "timeline"}
+            invocation={@invocation}
+            tests={Map.values(@tests_by_key)}
+            actions={@timeline_actions}
+          />
           <.targets :if={@tab == "targets"} streams={@streams} count={map_size(@targets_by_key)} />
           <.tests :if={@tab == "tests"} groups={test_groups(@tests_by_key)} />
           <.actions
