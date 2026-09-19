@@ -27,9 +27,11 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
   `mix precommit > log 2>&1; echo $?` and only commit on 0.
 - Act autonomously; ask only for real product decisions (see §8).
 - Multi-node (Kubernetes + EC2 ASG) is in scope (M7). Load testing is a first-class deliverable.
+- Routes: `/invocation/:id/:tab` is a LiveView catch-all, so any new 3-segment path under `/invocation/:id/` must go under `/download/…` or `/artifact/…` (a `get` declared after it is shadowed).
+- Blob store in dev writes to `tmp/blobs_dev` (test: `tmp/blobs_test`, both git-ignored); `CAS_SINK_ENABLED` is on in dev config.
 - Original implementation only: do not read BuildBuddy or other BES implementations' source.
 
-## 3. Status (2026-09-19): commits on `main`
+## 3. Status (2026-09-19, late): commits on `main`
 
 | Commit | Milestone | Content |
 |---|---|---|
@@ -38,10 +40,12 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 | M2 | UI | App shell, `BuildsLive`, `InvocationLive` (overview/log/targets/tests/actions/details/events), log viewer hook, download controller |
 | M3 | Query language | `Conveyor.Query` (parser, Ecto compiler, in-memory evaluator), facets, search UI |
 | M4 | Dashboard | `Conveyor.Metrics.{Scope,Dashboard,Tests}`, `DashboardLive`, `TestsLive`, SVG charts, Metrics tab, `mix conveyor.seed` |
-| M5 part 1 | Timeline | `ConveyorWeb.Timeline` (BEP-based SVG timeline tab) |
+| M5 | Artifacts + timeline | `Conveyor.Blobs` (Disk/S3), `Conveyor.Artifacts` (+ `Resource`, `BytestreamClient`, `Junit`), gRPC `ByteStreamServer`/`CasServer`/`CapabilitiesServer`/`ActionCacheServer` (CAS sink), `UploadController` + `Plugs.ApiAuth` + `tools/bes-upload-profile`, `Conveyor.Profile` + `Workers.{FetchProfile,ProfileSummary,BlobMaintenance}`, canvas profile timeline (`assets/js/hooks/profile_timeline.js`, `assets/js/profile_worker.js`), test.log/test.xml viewer, cache endpoints in Settings |
 | M6 part 1 | Settings | `SettingsLive`: projects + API keys (create/rotate/revoke), nav link |
 
-122 tests, 96.1% coverage. Verified with real Bazel 9.2.0 end to end (`bazel test` → list → detail).
+178 tests, 95.6% coverage. Verified with real Bazel 9.2.0 end to end, including
+`--remote_cache=grpc://localhost:1985 --remote_upload_local_results=false --remote_build_event_upload=minimal --noremote_accept_cached`
+against the CAS sink (profile, test.log, test.xml uploaded; profile timeline + summary rendered).
 
 ## 4. Running things locally
 
@@ -110,13 +114,11 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
-### M5 remainder — artifacts + profile timeline
-1. **Blob store** `Conveyor.Blob` behaviour with `Disk` (default, `BLOB_DIR`) and `S3` adapters; `blobs` table (key = digest, size, content_type, storage). Keys are digests only (no path traversal).
-2. **Artifact fetcher** `Conveyor.Artifacts.fetch(invocation, file_map)` for `bytestream://host/blobs/<sha256>/<size>` URIs: gRPC `ByteStream.Read` client (hand-write `Google.Bytestream.ByteStream.Service`/Stub; messages exist in the `googleapis` dep) with per-project cache endpoint credentials in `project.settings["cache_endpoints"]` (host → headers), host allow-list (SSRF guard), cached in the blob store. Lazy on view, eager for the profile at finalization (Oban job).
-3. **HTTP upload API** `PUT /api/v1/invocations/:id/artifacts/:name` and `PUT /api/v1/invocations/:id/bep` authenticated by API key (`upload` scope); shipped wrapper script `tools/bes-upload-profile`.
-4. **Optional CAS sink** (`CAS_SINK_ENABLED`): ByteStream Write/Read/QueryWriteStatus, CAS FindMissingBlobs/BatchUpdateBlobs/BatchReadBlobs, Capabilities (cache only, sha256) on the same gRPC endpoint → blobs into the store with TTL. Verify in a spike which files `--remote_build_event_upload=minimal` uploads.
-5. **Tier B timeline:** serve the profile gz via a controller; JS Web Worker decompresses (`DecompressionStream`) and parses trace events; canvas hook with lanes per pid/tid, zoom/pan, tooltip, search, critical-path toggle; replaces the SVG Tier A lanes when available. Server-side summary job (streaming JSON) → `invocation_metrics.profile_summary` (per-category/mnemonic totals, critical path components, top 50 events).
-6. Test `test.log` / `test.xml` viewing (JUnit parse) from fetched artifacts. Note Bazel 9 names the profile `command-<uuid>.profile.gz`.
+### M5 — done (see PLAN §21). Follow-ups worth remembering
+- `--remote_build_event_upload=minimal` uploads only the profile and test outputs; other BEP files get `bytestream://` URIs that are *not* in the store (the UI shows a hint). `full` would upload everything.
+- IMDS/instance-role credentials for S3 are not implemented (static keys + `AWS_SESSION_TOKEN` only); private CAs for cache endpoints (TLS uses the system store).
+- Dashboard "where does build time go" aggregation over `profile_summary` (PLAN §10) is not built.
+- The Tier B canvas is verified via Node (`build()` + a `worker_threads` simulation of the built bundle) and a headless screenshot of the inline path; headless Chrome does not drive Web Worker fetches under `--virtual-time-budget`, and LiveView never connects headless, so use the `data-inline="true"` trick on a temporary page under `priv/static/assets/` for visual checks.
 
 ### M6 remainder — auth + security
 - OIDC via `assent` (`Assent.Strategy.OIDC`, discovery, PKCE, state/nonce), `AUTH_MODE=open|oidc`, `users` table, roles viewer/admin from `ADMIN_EMAILS` / `OIDC_ADMIN_GROUPS` (`OIDC_GROUPS_CLAIM`), `ALLOWED_EMAIL_DOMAINS`, per-project `allowed_groups`; gate `/settings` (and `ADMIN_TOKEN` in open mode); `audit_log` table for key/project/login events; per-key limits (concurrent streams, events/s, bytes per invocation → truncate log with marker); CSP + security headers; `sobelow`, `mix hex.audit`, `mix deps.audit` in CI; `docs/security.md` threat model. Known advisory: cowlib 2.20.0 EEF-CVE-2026-43969 (LOW, cookie encoder; not used by gRPC path) — re-check for a fixed release.
@@ -131,7 +133,7 @@ Dockerfile (release, non-root), `docker-compose.yml` (app + Postgres), `Conveyor
 
 ## 8. Open decisions for the user (ask when they matter)
 
-1. CAS sink in v1 or after (M5 step 4).
+1. ~~CAS sink~~ shipped behind `CAS_SINK_ENABLED` (default off).
 2. Bazel version floor (suggest 7.x+).
 3. Reference hardware for the load-test envelope.
 4. Raw event retention default: 7 vs 14 days.
