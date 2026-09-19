@@ -117,7 +117,9 @@ defmodule ConveyorWeb.BuildsLive do
   end
 
   # Clicking a facet adds (or, when already present, removes) `key:value`.
-  def handle_event("facet", %{"key" => key, "value" => value}, socket) do
+  # The value travels as phx-value-tag: LiveView also submits a button's own DOM `value`
+  # (an empty string) under the key "value", which would shadow it.
+  def handle_event("facet", %{"key" => key, "tag" => value}, socket) do
     term = %{neg: false, key: key, op: :eq, value: value}
 
     query =
@@ -419,7 +421,7 @@ defmodule ConveyorWeb.BuildsLive do
                   type="button"
                   phx-click="facet"
                   phx-value-key={f.key}
-                  phx-value-value={value}
+                  phx-value-tag={value}
                   id={"facet-#{:erlang.phash2({f.key, value})}"}
                   class={[
                     "flex w-full items-center justify-between gap-2 rounded px-1.5 py-0.5 text-left hover:bg-base-200",

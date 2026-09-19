@@ -186,6 +186,11 @@ defmodule Conveyor.Query do
 
   defp tag_dynamic(key, %{op: :exists}), do: dynamic([i], fragment("? \\? ?", i.tags, ^key))
 
+  # An empty value also matches builds without the tag, so a stale facet never returns
+  # an empty list for a value it claimed to count.
+  defp tag_dynamic(key, %{op: :eq, value: ""}),
+    do: dynamic([i], fragment("coalesce(?->>?, '') = ''", i.tags, ^key))
+
   defp tag_dynamic(key, %{op: :eq, value: v}),
     do: dynamic([i], fragment("lower(?->>?) = ?", i.tags, ^key, ^String.downcase(v)))
 
@@ -350,6 +355,7 @@ defmodule Conveyor.Query do
   defp typed_match?(_type, _actual, _term, _now), do: false
 
   defp tag_match?(nil, %{op: :neq}), do: true
+  defp tag_match?(nil, %{op: :eq, value: ""}), do: true
   defp tag_match?(nil, _term), do: false
   defp tag_match?(_actual, %{op: :exists}), do: true
 

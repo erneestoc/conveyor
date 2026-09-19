@@ -1,0 +1,45 @@
+name: Browser
+
+# Playwright against a server started from the checkout and seeded through the real
+# pipeline: the tests that only a real browser can run (LiveView JS, hooks, workers).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: conveyor_dev }
+        ports: ["5440:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with: { otp-version: "29", elixir-version: "1.20" }
+      - uses: actions/setup-node@v4
+        with: { node-version: "22" }
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: browser-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+      - run: mix deps.get
+      - run: mix setup
+      - run: mix conveyor.seed --replay 60 --days 3 --big-log 1
+      - name: Start Conveyor
+        run: |
+          PORT=4100 nohup mix phx.server > server.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:4100/health/ready && break; sleep 2; done
+      - run: npm ci --prefix e2e
+      - run: npx --prefix e2e playwright install --with-deps chromium
+      - run: npm test --prefix e2e
+        env: { BASE_URL: "http://localhost:4100", CI: "true" }
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with: { name: playwright-results, path: e2e/test-results }

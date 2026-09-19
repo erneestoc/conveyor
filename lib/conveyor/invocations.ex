@@ -246,6 +246,7 @@ defmodule Conveyor.Invocations do
 
     TagKey
     |> maybe_where(:project_id, project_id)
+    |> where([t], t.value != "")
     |> group_by([t], [t.key, t.value])
     |> select([t], {t.key, t.value, type(sum(t.count), :integer)})
     |> Repo.all()

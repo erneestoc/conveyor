@@ -205,7 +205,10 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
     Conveyor.Invocations.rebuild_tag_keys!(Conveyor.Projects.ensure_default_project!().id)
     {:ok, view, _} = live(conn, ~p"/")
 
-    for {key, value} <- [{"empty", ""}, {"star", "*"}, {"who", "John Doe"}] do
+    # Empty values are never offered as facets (they would match nothing useful).
+    refute has_element?(view, "#facet-#{:erlang.phash2({"empty", ""})}")
+
+    for {key, value} <- [{"star", "*"}, {"who", "John Doe"}] do
       id = "facet-#{:erlang.phash2({key, value})}"
       view |> element("##{id}") |> render_click()
       assert_patch(view)

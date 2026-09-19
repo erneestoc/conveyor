@@ -147,6 +147,8 @@ defmodule Conveyor.QueryTest do
     assert ids_for("tests>=5", invs) == [ok]
     assert ids_for("tests_failed<1", invs) == Enum.sort([ok, failed, running])
     assert ids_for("started>-24h", invs) == Enum.sort([ok, running])
+    assert ids_for("shard:\"\"", invs) == [running]
+    assert ids_for("-shard:\"\"", invs) == Enum.sort([ok, failed])
     assert ids_for("started<2026-09-17", invs) == [failed]
     assert ids_for("started>=2026-09-18T11:00:00Z", invs) == Enum.sort([ok, running])
     assert ids_for("ci:true", invs) == [failed]
