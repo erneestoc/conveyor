@@ -3,6 +3,8 @@
 // tooltips, click details, search, category filter and a critical-path toggle. Only the
 // visible time range is drawn and events narrower than a pixel are coalesced, so profiles
 // with hundreds of thousands of events stay smooth.
+import {build} from "../profile_worker"
+
 const ROW_H = 18
 const GUTTER = 220
 const AXIS_H = 22
@@ -49,18 +51,7 @@ export const ProfileTimeline = {
     this.raf = null
 
     this.setStatus("Loading profile…")
-    this.worker = new Worker(this.el.dataset.worker)
-    this.worker.onmessage = ({data}) => {
-      if (!data.ok) { this.setStatus(`Could not load the profile: ${data.error}`); return }
-      this.data = data
-      this.view = [data.minTs, Math.max(data.maxTs, data.minTs + 1)]
-      this.fillCategories()
-      this.setStatus(`${data.eventCount.toLocaleString()} events · ${data.threads.length} threads · ${fmtUs(data.maxTs - data.minTs)}`)
-      this.el.dataset.loaded = "true"
-      this.schedule()
-    }
-    this.worker.onerror = e => this.setStatus(`Could not load the profile: ${e.message || "worker error"}`)
-    this.worker.postMessage({url: this.el.dataset.url})
+    this.load()
 
     this.onWheel = e => this.wheel(e)
     this.onDown = e => this.dragStart(e)
@@ -92,6 +83,44 @@ export const ProfileTimeline = {
   },
 
   setStatus(text) { if (this.status) this.status.textContent = text },
+
+  // Parse in a Web Worker so a 100 MB profile never blocks the page; fall back to the main
+  // thread when workers are unavailable (or data-inline is set).
+  load() {
+    const url = this.el.dataset.url
+    if (this.el.dataset.inline === "true" || typeof Worker === "undefined") return this.loadInline(url)
+    try {
+      this.worker = new Worker(this.el.dataset.worker)
+    } catch (_e) {
+      return this.loadInline(url)
+    }
+    this.worker.onmessage = ({data}) => {
+      if (!data.ok) { this.setStatus(`Could not load the profile: ${data.error}`); return }
+      this.loaded(data)
+    }
+    this.worker.onerror = () => { this.worker.terminate(); this.worker = null; this.loadInline(url) }
+    this.worker.postMessage({url})
+  },
+
+  async loadInline(url) {
+    try {
+      const res = await fetch(url, {credentials: "same-origin"})
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const json = JSON.parse(await res.text())
+      this.loaded({...build(json.traceEvents || []), otherData: json.otherData || {}})
+    } catch (e) {
+      this.setStatus(`Could not load the profile: ${e.message || e}`)
+    }
+  },
+
+  loaded(data) {
+    this.data = data
+    this.view = [data.minTs, Math.max(data.maxTs, data.minTs + 1)]
+    this.fillCategories()
+    this.setStatus(`${data.eventCount.toLocaleString()} events · ${data.threads.length} threads · ${fmtUs(data.maxTs - data.minTs)}`)
+    this.el.dataset.loaded = "true"
+    this.schedule()
+  },
 
   fillCategories() {
     if (!this.category) return
@@ -193,7 +222,8 @@ export const ProfileTimeline = {
         ctx.globalAlpha = 0.7
         ctx.fillStyle = fg
         ctx.textAlign = "right"
-        ctx.fillText(`${c.name} (${key}) max ${max}`, GUTTER - 6, y0 + h - 4)
+        const label = `${c.name} ≤ ${Number.isInteger(max) ? max : max.toPrecision(3)}`
+        ctx.fillText(label.length > 30 ? label.slice(0, 29) + "…" : label, GUTTER - 6, y0 + h - 4)
         ctx.globalAlpha = 1
       })
     }

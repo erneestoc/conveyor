@@ -1,7 +1,7 @@
 // Web Worker: fetches a Bazel JSON profile (served with Content-Encoding: gzip, so the
 // browser inflates it), parses the trace events and hands the main thread compact typed
 // arrays: one lane per thread, events sorted by lane then start time, interned strings.
-self.onmessage = async ({data}) => {
+if (typeof self !== "undefined" && typeof window === "undefined") self.onmessage = async ({data}) => {
   try {
     const res = await fetch(data.url, {credentials: "same-origin"})
     if (!res.ok) throw new Error(`HTTP ${res.status}`)
