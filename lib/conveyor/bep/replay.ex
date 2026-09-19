@@ -55,8 +55,9 @@ defmodule Conveyor.Bep.Replay do
     events = rewrite_invocation_id(events, invocation_id)
     started_at = System.monotonic_time(:millisecond)
 
-    with {:ok, channel} <-
-           GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint) do
+    connect = fn -> GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint) end
+
+    with {:ok, channel} <- connect.() do
       try do
         run_connected(
           channel,
@@ -69,7 +70,8 @@ defmodule Conveyor.Bep.Replay do
           drop_after,
           metadata,
           started_at,
-          duplicate_every
+          duplicate_every,
+          connect
         )
       catch
         # A stream the server closed early (e.g. UNAUTHENTICATED) makes later sends exit.
@@ -91,7 +93,8 @@ defmodule Conveyor.Bep.Replay do
          drop_after,
          metadata,
          started_at,
-         duplicate_every
+         duplicate_every,
+         connect
        ) do
     {:ok, :placeholder}
     |> then(fn _ ->
@@ -103,7 +106,8 @@ defmodule Conveyor.Bep.Replay do
         project_id: project_id,
         stream_id: stream_id,
         delay: delay,
-        duplicate_every: duplicate_every
+        duplicate_every: duplicate_every,
+        connect: connect
       }
 
       with :ok <-
@@ -166,7 +170,17 @@ defmodule Conveyor.Bep.Replay do
     # everything: the server acknowledges already-committed sequence numbers immediately,
     # which exercises the same deduplication path Bazel relies on after a retry.
     :ok = send_stream(conn, events, 1, drop_after)
-    send_stream(conn, events, 1, nil)
+
+    # The resend dials a fresh connection, as Bazel does after losing one. The old
+    # connection may still hold frames queued for the cancelled stream (HTTP/2 flow
+    # control), and a new stream on it would wait behind them forever.
+    with {:ok, channel} <- conn.connect.() do
+      try do
+        send_stream(%{conn | channel: channel}, events, 1, nil)
+      after
+        GRPC.Stub.disconnect(channel)
+      end
+    end
   end
 
   # Sends events `from_seq..N` plus the stream-finished marker as N+1. With `drop_after`,
