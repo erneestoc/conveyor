@@ -119,3 +119,76 @@ defmodule ConveyorWeb.BuildsLiveTest do
     assert render(view) |> String.split("data-status=") |> length() > 60
   end
 end
+
+defmodule ConveyorWeb.BuildsLiveSearchTest do
+  use ConveyorWeb.LiveCase, async: false
+
+  setup do
+    ctx = context()
+
+    %{
+      ok_id: ingest_fixture!("clean_build_and_test", ctx),
+      failed_id: ingest_fixture!("build_failure", ctx)
+    }
+  end
+
+  test "search box, query errors and facets drive the list", %{
+    conn: conn,
+    ok_id: ok_id,
+    failed_id: failed_id
+  } do
+    {:ok, view, _} = live(conn, ~p"/")
+    assert has_element?(view, "#search-form")
+    assert has_element?(view, "#facets")
+
+    view |> form("#search-form", q: "command:test") |> render_submit()
+    assert_patch(view, ~p"/?q=command%3Atest")
+    assert has_element?(view, "#inv-#{ok_id}")
+    refute has_element?(view, "#inv-#{failed_id}")
+
+    view |> form("#search-form", q: "command:") |> render_submit()
+    assert has_element?(view, "#query-error")
+
+    {:ok, view, _} = live(conn, ~p"/?q=scenario%3Abuild_failure")
+    assert has_element?(view, "#inv-#{failed_id}")
+    refute has_element?(view, "#inv-#{ok_id}")
+
+    facet_id = "facet-#{:erlang.phash2({"scenario", "clean_build_and_test"})}"
+    view |> element("##{facet_id}") |> render_click()
+    assert_patch(view, ~p"/?q=scenario%3Abuild_failure+scenario%3Aclean_build_and_test")
+    refute has_element?(view, "#inv-#{ok_id}")
+
+    view |> element("##{facet_id}") |> render_click()
+    assert_patch(view, ~p"/?q=scenario%3Abuild_failure")
+
+    view |> element("#toggle-facets") |> render_click()
+    refute has_element?(view, "#facets")
+
+    # Live updates respect the query.
+    summary = %{
+      id: Conveyor.Bep.Replay.uuid(),
+      project_id: context().project_id,
+      status: "in_progress",
+      command: "build",
+      patterns: [],
+      tags: %{"scenario" => "other"},
+      started_at: DateTime.utc_now()
+    }
+
+    Phoenix.PubSub.broadcast(
+      Conveyor.PubSub,
+      Conveyor.Ingest.all_topic(),
+      {:invocation_updated, summary}
+    )
+
+    refute has_element?(view, "#inv-#{summary.id}")
+
+    Phoenix.PubSub.broadcast(
+      Conveyor.PubSub,
+      Conveyor.Ingest.all_topic(),
+      {:invocation_updated, %{summary | tags: %{"scenario" => "build_failure"}}}
+    )
+
+    assert has_element?(view, "#inv-#{summary.id}")
+  end
+end

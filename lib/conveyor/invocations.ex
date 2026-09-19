@@ -41,6 +41,7 @@ defmodule Conveyor.Invocations do
     |> maybe_where(:project_id, opts[:project_id])
     |> maybe_where(:status, opts[:status])
     |> maybe_statuses(opts[:statuses])
+    |> maybe_query(opts[:query])
     |> maybe_before(opts[:before])
     |> order_by([i], desc: i.started_at, desc: i.id)
     |> limit(^limit)
@@ -49,6 +50,10 @@ defmodule Conveyor.Invocations do
 
   defp maybe_where(query, _field, nil), do: query
   defp maybe_where(query, field, value), do: where(query, [i], field(i, ^field) == ^value)
+
+  defp maybe_query(query, nil), do: query
+  defp maybe_query(query, []), do: query
+  defp maybe_query(query, ast), do: where(query, ^Conveyor.Query.to_dynamic(ast))
 
   defp maybe_statuses(query, nil), do: query
   defp maybe_statuses(query, statuses), do: where(query, [i], i.status in ^statuses)
@@ -193,9 +198,42 @@ defmodule Conveyor.Invocations do
     )
   end
 
-  @doc "The partition day of an invocation: its start day, falling back to insertion day."
+  @doc """
+  Tag facets: every key with its most common values and counts, most used keys first.
+  `project_id` nil aggregates across projects.
+  """
+  @spec facets(integer() | nil, keyword()) :: [
+          %{key: String.t(), total: integer(), values: [{String.t(), integer()}]}
+        ]
+  def facets(project_id, opts \\ []) do
+    per_key = Keyword.get(opts, :values, 8)
+    max_keys = Keyword.get(opts, :keys, 30)
+
+    TagKey
+    |> maybe_where(:project_id, project_id)
+    |> group_by([t], [t.key, t.value])
+    |> select([t], {t.key, t.value, type(sum(t.count), :integer)})
+    |> Repo.all()
+    |> Enum.group_by(&elem(&1, 0), fn {_, v, c} -> {v, c} end)
+    |> Enum.map(fn {key, values} ->
+      sorted = Enum.sort_by(values, &elem(&1, 1), :desc)
+
+      %{
+        key: key,
+        total: values |> Enum.map(&elem(&1, 1)) |> Enum.sum(),
+        values: Enum.take(sorted, per_key),
+        more: max(length(sorted) - per_key, 0)
+      }
+    end)
+    |> Enum.sort_by(&{-&1.total, &1.key})
+    |> Enum.take(max_keys)
+  end
+
+  @doc """
+  The partition day of an invocation: the day its row was created. It must never change
+  once segments are written (`started_at` does change when the Started event arrives).
+  """
   @spec day(Invocation.t()) :: Date.t()
-  def day(%Invocation{started_at: %DateTime{} = at}), do: DateTime.to_date(at)
   def day(%Invocation{inserted_at: %DateTime{} = at}), do: DateTime.to_date(at)
   def day(%Invocation{}), do: Date.utc_today()
 
