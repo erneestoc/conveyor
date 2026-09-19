@@ -31,7 +31,8 @@ defmodule Conveyor.Invocations do
 
   @doc """
   Newest-first page of invocations. Options: `:project_id`, `:status`, `:statuses` (list),
-  `:limit` (default 50), `:before` (`{started_at, id}` cursor).
+  `:limit` (default 50), `:before` (`{started_at, id}` cursor), `:query` (a parsed
+  `Conveyor.Query` AST) with `:now` as the reference time for relative dates.
   """
   @spec list(keyword()) :: [Invocation.t()]
   def list(opts \\ []) do
@@ -41,7 +42,7 @@ defmodule Conveyor.Invocations do
     |> maybe_where(:project_id, opts[:project_id])
     |> maybe_where(:status, opts[:status])
     |> maybe_statuses(opts[:statuses])
-    |> maybe_query(opts[:query])
+    |> maybe_query(opts[:query], opts[:now] || DateTime.utc_now())
     |> maybe_before(opts[:before])
     |> order_by([i], desc: i.started_at, desc: i.id)
     |> limit(^limit)
@@ -51,9 +52,9 @@ defmodule Conveyor.Invocations do
   defp maybe_where(query, _field, nil), do: query
   defp maybe_where(query, field, value), do: where(query, [i], field(i, ^field) == ^value)
 
-  defp maybe_query(query, nil), do: query
-  defp maybe_query(query, []), do: query
-  defp maybe_query(query, ast), do: where(query, ^Conveyor.Query.to_dynamic(ast))
+  defp maybe_query(query, nil, _now), do: query
+  defp maybe_query(query, [], _now), do: query
+  defp maybe_query(query, ast, now), do: where(query, ^Conveyor.Query.to_dynamic(ast, now: now))
 
   defp maybe_statuses(query, nil), do: query
   defp maybe_statuses(query, statuses), do: where(query, [i], i.status in ^statuses)

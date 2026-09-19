@@ -70,7 +70,7 @@ defmodule Conveyor.QueryTest do
   # Every query is checked against the database and against the in-memory evaluator.
   defp ids_for(q, invs) do
     {:ok, ast} = Query.parse(q)
-    db = Invocations.list(query: ast, limit: 100) |> Enum.map(& &1.id) |> Enum.sort()
+    db = Invocations.list(query: ast, now: @now, limit: 100) |> Enum.map(& &1.id) |> Enum.sort()
 
     mem =
       invs |> Enum.filter(&Query.matches?(ast, &1, now: @now)) |> Enum.map(& &1.id) |> Enum.sort()
