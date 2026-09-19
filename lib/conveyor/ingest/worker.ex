@@ -472,10 +472,14 @@ defmodule Conveyor.Ingest.Worker do
     end
 
     if dirty.log != [] do
+      # Byte offset of these chunks in the stored log, so a viewer that loaded the log
+      # over HTTP can splice live appends exactly.
+      offset = max((state.norm.inv[:log_bytes] || 0) - IO.iodata_length(dirty.log), 0)
+
       Phoenix.PubSub.broadcast(
         Conveyor.PubSub,
         Ingest.log_topic(id),
-        {:log_chunks, Enum.reverse(dirty.log)}
+        {:log_chunks, Enum.reverse(dirty.log), offset}
       )
     end
 

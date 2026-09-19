@@ -173,27 +173,17 @@ defmodule ConveyorWeb.InvocationLive do
 
   # --- events --------------------------------------------------------------------------------------
 
+  # The viewer fetches the log itself over HTTP (streamed, any size) and keeps it in a
+  # Web Worker; the socket only carries live appends with their byte offsets.
   @impl true
-  # The whole log goes to the browser in one event; very large logs are cut to their tail so
-  # the page stays responsive (the download link always has everything).
-  @log_max_bytes 8 * 1024 * 1024
-
   def handle_event("log:load", _params, socket) do
     inv = socket.assigns.invocation
-    log = Invocations.log(inv)
-
-    {text, truncated} =
-      if byte_size(log) > @log_max_bytes do
-        {binary_part(log, byte_size(log) - @log_max_bytes, @log_max_bytes), true}
-      else
-        {log, false}
-      end
 
     {:noreply,
      push_event(socket, "log:reset", %{
-       text: text,
+       url: ~p"/invocation/#{inv.id}/download/log",
        live: not Status.final?(inv.status),
-       truncated: truncated
+       bytes: inv.log_bytes || 0
      })}
   end
 
@@ -340,8 +330,9 @@ defmodule ConveyorWeb.InvocationLive do
      )}
   end
 
-  def handle_info({:log_chunks, chunks}, socket) do
-    {:noreply, push_event(socket, "log:append", %{text: IO.iodata_to_binary(chunks)})}
+  def handle_info({:log_chunks, chunks, offset}, socket) do
+    {:noreply,
+     push_event(socket, "log:append", %{text: IO.iodata_to_binary(chunks), offset: offset})}
   end
 
   defp apply_targets(socket, []), do: socket
@@ -875,6 +866,7 @@ defmodule ConveyorWeb.InvocationLive do
       </div>
       <div
         data-log-viewport
+        data-worker={~p"/assets/js/log_worker.js"}
         class="relative h-[70vh] overflow-auto font-mono text-[12px] leading-[18px]"
       >
         <div data-log-spacer class="relative">

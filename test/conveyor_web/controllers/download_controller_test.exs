@@ -18,7 +18,9 @@ defmodule ConveyorWeb.DownloadControllerTest do
   test "downloads the log and the raw events", %{conn: conn, id: id} do
     conn = get(conn, ~p"/invocation/#{id}/download/log")
     assert response_content_type(conn, :text) =~ "text/plain"
-    assert response(conn, 200) =~ "FAIL"
+    body = response(conn, 200)
+    assert body =~ "FAIL"
+    assert get_resp_header(conn, "x-log-bytes") == [Integer.to_string(byte_size(body))]
 
     conn = get(build_conn(), ~p"/invocation/#{id}/download/events")
     assert response(conn, 200) |> Conveyor.Bep.Fixture.decode_all!() |> length() > 10

@@ -158,15 +158,30 @@ defmodule Conveyor.Invocations do
 
   @doc "The full build log as one string (stdout and stderr interleaved as received)."
   @spec log(Invocation.t()) :: String.t()
-  def log(%Invocation{id: id} = inv) do
-    from(s in LogSegment,
-      where: s.invocation_id == ^id and s.day == ^day(inv),
-      order_by: s.first_seq,
-      select: s.data
-    )
-    |> Repo.all()
-    |> Enum.map(&decompress/1)
-    |> IO.iodata_to_binary()
+  def log(%Invocation{} = inv), do: inv |> stream_log() |> Enum.to_list() |> IO.iodata_to_binary()
+
+  @doc """
+  The log as a lazy stream of decompressed segment binaries in order, a few segments per
+  query, so a multi-hundred-megabyte log is never held in memory at once. Pass the segment
+  metadata (`log_segments/1`) to stream exactly that snapshot.
+  """
+  @spec stream_log(Invocation.t(), [LogSegment.t()] | nil) :: Enumerable.t()
+  def stream_log(%Invocation{id: id} = inv, segments \\ nil) do
+    day = day(inv)
+    segments = segments || log_segments(inv)
+
+    segments
+    |> Stream.map(& &1.first_seq)
+    |> Stream.chunk_every(16)
+    |> Stream.flat_map(fn seqs ->
+      from(s in LogSegment,
+        where: s.invocation_id == ^id and s.day == ^day and s.first_seq in ^seqs,
+        order_by: s.first_seq,
+        select: s.data
+      )
+      |> Repo.all()
+      |> Enum.map(&decompress/1)
+    end)
   end
 
   @doc "Log segments metadata (offsets) for seeking without decompressing everything."

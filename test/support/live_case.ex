@@ -37,6 +37,8 @@ defmodule ConveyorWeb.LiveCase do
 
     :ok = Ingest.push_sync(ctx, Replay.ordered_event(stream_id, length(events) + 1, marker))
     :ok = Conveyor.IngestCase.await_worker_exit(id)
+    # Tag facets are written by the per-node counter, not by the batch itself.
+    Conveyor.Ingest.TagCounter.flush()
     id
   end
 

@@ -128,6 +128,7 @@ defmodule Conveyor.MixProject do
         "format",
         "sobelow --exit",
         "deps.audit",
+        "cmd node --test assets/test/*.test.mjs",
         "coveralls"
       ]
     ]

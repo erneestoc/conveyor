@@ -89,7 +89,7 @@ defmodule Conveyor.Ingest.WorkerTest do
 
     assert_received {:invocation_updated, %{id: ^id}}
     assert_received {:invocation_detail, %{invocation: %{id: ^id}}}
-    assert_received {:log_chunks, [_ | _]}
+    assert_received {:log_chunks, [_ | _], 0}
   end
 
   @tag :capture_log

@@ -72,6 +72,97 @@ defmodule Conveyor.Seed do
     ids
   end
 
+  @doc """
+  Ingests one CI build whose log is about `mb` megabytes of Bazel-like output (progress
+  bars rewritten with cursor movement, colours, warnings, long compiler lines), for
+  exercising the log viewer. Returns the invocation id.
+  """
+  @spec big_log(integer(), pos_integer(), keyword()) :: String.t()
+  def big_log(project_id, mb, opts \\ []) do
+    :rand.seed(:exsss, Keyword.get(opts, :seed, {7, 7, 7}))
+    project = Repo.get!(Conveyor.Projects.Project, project_id)
+    ctx = %Ingest.Context{project_id: project.id, project_slug: project.slug}
+    events = Fixture.read!(Path.join([File.cwd!(), @fixtures_dir, "clean_build_and_test.bep"]))
+    {head, tail} = Enum.split_while(events, &(not match?({:finished, _}, &1.payload)))
+
+    progress =
+      Stream.unfold(0, fn bytes ->
+        if bytes >= mb * 1024 * 1024,
+          do: nil,
+          else:
+            (
+              c = log_chunk()
+              {c, bytes + byte_size(c)}
+            )
+      end)
+      |> Stream.with_index(1)
+      |> Enum.map(fn {text, n} ->
+        %BuildEventStream.BuildEvent{
+          id: %BuildEventStream.BuildEventId{
+            id: {:progress, %BuildEventStream.BuildEventId.ProgressId{opaque_count: 100_000 + n}}
+          },
+          payload: {:progress, %BuildEventStream.Progress{stderr: text}}
+        }
+      end)
+
+    id = ingest!(ctx, head ++ progress ++ tail)
+    plan = %{plan(1) | ci?: true, user: "ci", host: "ci-runner-1", branch: "main", scale: 400.0}
+    shape!(id, plan)
+    Conveyor.Ingest.TagCounter.flush()
+    rebuild_tag_keys!(project.id)
+    id
+  end
+
+  @mnemonics ~w(Compiling Linking Testing Executing\ genrule Bundling Packaging)
+  @dirs ~w(src/server src/client/web lib/core lib/net third_party/absl third_party/grpc tools/build)
+
+  # ~64 KB of terminal output: a curses progress bar (later erased with cursor-up, the
+  # way Bazel does), interleaved with coloured INFO/WARNING lines and compiler chatter.
+  defp log_chunk do
+    total = 4_000 + :rand.uniform(6_000)
+
+    1..60
+    |> Enum.map(fn _ ->
+      done = :rand.uniform(total)
+
+      bar =
+        Enum.map_join(1..8, "", fn _ ->
+          "[#{done} / #{total}] #{Enum.random(@mnemonics)} #{path()}; #{:rand.uniform(30)}s remote\n"
+        end)
+
+      output =
+        case :rand.uniform(10) do
+          1 ->
+            "\e[33mWARNING:\e[0m #{path()}:#{:rand.uniform(900)}:#{:rand.uniform(80)}: unused variable 'tmp_#{:rand.uniform(99)}' [-Wunused-variable]\n"
+
+          2 ->
+            "\e[32mINFO:\e[0m From #{Enum.random(@mnemonics)} #{path()}:\n" <>
+              String.duplicate(
+                "  in file included from #{path()}:#{:rand.uniform(500)},\n",
+                :rand.uniform(4)
+              )
+
+          3 ->
+            "#{path()}: note: candidate template ignored: could not match '#{String.duplicate("std::vector<", 3)}T>>>' against '#{String.duplicate("absl::Span<", 2)}U>>' " <>
+              String.duplicate("(instantiated from #{path()}) ", 20) <> "\n"
+
+          4 ->
+            "\e[1mTarget //#{Enum.random(@dirs)}:#{Enum.random(~w(server client core net all))} up-to-date:\e[0m\n  bazel-bin/#{path()}\n"
+
+          _ ->
+            ""
+        end
+
+      # Erase the bar before the next update, as a curses terminal would.
+      bar <> "\e[8A\e[K" <> output
+    end)
+    |> IO.iodata_to_binary()
+  end
+
+  defp path do
+    "#{Enum.random(@dirs)}/#{Enum.random(~w(handler stream codec parser router scheduler cache index))}_#{:rand.uniform(40)}.#{Enum.random(~w(cc h go java ts))}"
+  end
+
   # Every random decision for one build, made up front so the ingest tasks stay simple.
   defp plan(days) do
     ci? = :rand.uniform() < 0.55

@@ -12,11 +12,19 @@ defmodule ConveyorWeb.DownloadController do
 
     case kind do
       "log" ->
+        # Streamed segment by segment; the log viewer fetches this too and uses the byte
+        # total to splice live appends without gaps or duplicates.
+        segments = Invocations.log_segments(inv)
+        bytes = segments |> Enum.map(& &1.byte_size) |> Enum.sum()
+
         conn
         |> put_resp_content_type("text/plain")
         |> put_resp_header("content-disposition", ~s(attachment; filename="#{inv.id}.log"))
         |> put_resp_header("x-content-type-options", "nosniff")
-        |> send_resp(200, Invocations.log(inv))
+        |> put_resp_header("x-log-bytes", Integer.to_string(bytes))
+        |> put_resp_header("cache-control", "no-store")
+        |> send_chunked(200)
+        |> send_chunks(Invocations.stream_log(inv, segments))
 
       "events" ->
         body =

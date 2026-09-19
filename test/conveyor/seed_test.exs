@@ -45,10 +45,34 @@ defmodule Conveyor.SeedTest do
     assert Enum.sum(for %{key: "team"} = f <- facets, do: f.count) == 6
   end
 
+  test "big_log ingests a build with a large curses-style log" do
+    project = Conveyor.Projects.ensure_default_project!()
+    id = Seed.big_log(project.id, 1)
+    inv = Repo.get!(Invocation, id)
+    assert inv.log_bytes >= 1024 * 1024 and inv.log_lines > 1000
+    assert inv.status == "succeeded" and inv.tags["ci"] == "true"
+    log = Invocations.log(inv)
+    assert log =~ "\e[8A" and log =~ "\e[33mWARNING:"
+    assert byte_size(log) == inv.log_bytes
+  end
+
   test "the mix task replays into the default project" do
     Mix.shell(Mix.Shell.Process)
     on_exit(fn -> Mix.shell(Mix.Shell.IO) end)
-    Mix.Tasks.Conveyor.Seed.run(["--replay", "3", "--days", "2", "--concurrency", "2"])
+
+    Mix.Tasks.Conveyor.Seed.run([
+      "--replay",
+      "3",
+      "--days",
+      "2",
+      "--concurrency",
+      "2",
+      "--big-log",
+      "1"
+    ])
+
+    assert_received {:mix_shell, :info, [msg]}
+    assert msg =~ "ingested a 1 MB log build"
     assert_received {:mix_shell, :info, [msg]}
     assert msg =~ "replayed 3 builds over 2 days"
   end

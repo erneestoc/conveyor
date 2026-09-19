@@ -66,16 +66,16 @@ defmodule ConveyorWeb.InvocationLiveTest do
     assert has_element?(view, "#download-log")
     assert {:ok, _} = Ecto.UUID.cast(id)
     render_hook(view, "log:load", %{})
-    assert_push_event(view, "log:reset", %{text: text, live: false, truncated: false})
-    assert text =~ "Build completed successfully"
+    assert_push_event(view, "log:reset", %{url: url, live: false, bytes: bytes})
+    assert url == "/invocation/#{id}/download/log" and bytes > 0
 
     Phoenix.PubSub.broadcast(
       Conveyor.PubSub,
       Ingest.log_topic(id),
-      {:log_chunks, ["more output\n"]}
+      {:log_chunks, ["more output\n"], bytes}
     )
 
-    assert_push_event(view, "log:append", %{text: "more output\n"})
+    assert_push_event(view, "log:append", %{text: "more output\n", offset: ^bytes})
   end
 
   test "live digests update the header and the open tab", %{conn: conn, ok_id: id} do

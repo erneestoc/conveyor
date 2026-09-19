@@ -11,6 +11,11 @@ defmodule Mix.Tasks.Conveyor.Seed do
 
       mix conveyor.seed --replay 2000 [--days 30] [--concurrency 32] [--project default]
 
+  `--big-log MB` adds one CI build with a log of about MB megabytes (progress bars,
+  colours, warnings) for exercising the log viewer; combine with `--replay`.
+
+      mix conveyor.seed --big-log 50
+
   `--invocations N` inserts synthetic rows directly (statuses, durations, users, tags, cache
   stats only; the builds have no events), for dashboard volume and load tests.
 
@@ -26,6 +31,7 @@ defmodule Mix.Tasks.Conveyor.Seed do
   @switches [
     invocations: :integer,
     replay: :integer,
+    big_log: :integer,
     concurrency: :integer,
     days: :integer,
     project: :string
@@ -52,11 +58,16 @@ defmodule Mix.Tasks.Conveyor.Seed do
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
     days = Keyword.get(opts, :days, 30)
 
-    if opts[:replay], do: start_app(), else: start_repo()
+    if opts[:replay] || opts[:big_log], do: start_app(), else: start_repo()
 
     project =
       Conveyor.Projects.get_project_by_slug(Keyword.get(opts, :project, "default")) ||
         Conveyor.Projects.ensure_default_project!()
+
+    if mb = opts[:big_log] do
+      id = Conveyor.Seed.big_log(project.id, mb)
+      Mix.shell().info("ingested a #{mb} MB log build #{id} into project #{project.slug}")
+    end
 
     if n = opts[:replay] do
       ids = Conveyor.Seed.replay(project.id, n, days, Keyword.take(opts, [:concurrency]))
@@ -64,7 +75,9 @@ defmodule Mix.Tasks.Conveyor.Seed do
       Mix.shell().info(
         "replayed #{length(ids)} builds over #{days} days into project #{project.slug}"
       )
-    else
+    end
+
+    if is_nil(opts[:replay]) and is_nil(opts[:big_log]) do
       n = Keyword.get(opts, :invocations, 1_000)
       {count, targets} = seed(project.id, n, days)
 
