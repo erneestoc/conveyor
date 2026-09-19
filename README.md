@@ -6,7 +6,7 @@ point `--bes_backend` at it and every build shows up with its log, timeline, tar
 tests, cache statistics and metrics, filterable by any tag you attach with
 `--build_metadata`.
 
-Status: **pre-alpha, under active development.** See [PLAN.md](PLAN.md) for the roadmap.
+Status: **pre-alpha, under active development.** See [PLAN.md](PLAN.md) for the roadmap and [HANDOFF.md](HANDOFF.md) for the current state and how to resume work.
 
 ## Development
 
