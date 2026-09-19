@@ -9,15 +9,19 @@ defmodule Conveyor.Artifacts.BytestreamClient do
   alias Google.Bytestream.ReadRequest
 
   @doc """
-  `endpoint` is the per-project cache endpoint configuration:
-  `%{"headers" => %{name => value}, "tls" => boolean}`.
-  Returns `{:ok, blob}` or `{:error, reason}`.
+  `endpoint` is the per-project cache endpoint configuration (see
+  `Conveyor.Projects.put_cache_endpoint/3`): where to connect (`"endpoint"`, default the
+  URI authority), how (`"tls"`: `false`/`"plaintext"`, `true`/`"system_roots"`, or a map
+  with `"mode"` `custom_ca`/`mtls` and `ca_file`/`client_cert_file`/`client_key_file`), and
+  which request metadata to send (`"headers"`, `"bearer_token"`). The URI never carries
+  any of that: it is only a locator.
   """
   @spec fetch(map(), Resource.t(), keyword()) :: {:ok, Blobs.Blob.t()} | {:error, term()}
   def fetch(endpoint, %Resource{} = ref, opts \\ []) do
-    port = ref.port || if(endpoint["tls"], do: 443, else: 80)
+    {host, port} = target(endpoint, ref)
 
-    with {:ok, channel} <- connect(ref.host, port, endpoint) do
+    with {:ok, ssl} <- ssl_options(endpoint, host),
+         {:ok, channel} <- connect(host, port, ssl) do
       try do
         read(channel, ref, endpoint, opts)
       after
@@ -26,29 +30,102 @@ defmodule Conveyor.Artifacts.BytestreamClient do
     end
   end
 
-  defp connect(host, port, endpoint) do
-    opts = [adapter: GRPC.Client.Adapters.Mint]
+  @doc "Host and port to dial: the configured endpoint override, else the URI authority."
+  def target(endpoint, %Resource{} = ref) do
+    case endpoint["endpoint"] do
+      value when is_binary(value) and value != "" ->
+        {host, port} = split_host_port(String.replace(value, ~r{^grpcs?://}, ""))
+        {host, port || default_port(endpoint)}
 
-    opts =
-      if endpoint["tls"] do
-        [
-          {:cred,
-           GRPC.Credential.new(
-             ssl: [
-               verify: :verify_peer,
-               cacerts: :public_key.cacerts_get(),
-               server_name_indication: String.to_charlist(host),
-               customize_hostname_check: [
-                 match_fun: :public_key.pkix_verify_hostname_match_fun(:https)
-               ]
-             ]
-           )}
-          | opts
-        ]
-      else
-        opts
-      end
+      _ ->
+        {ref.host, ref.port || default_port(endpoint)}
+    end
+  end
 
+  defp split_host_port(value) do
+    case String.split(value, ":") do
+      [host, port] -> {host, String.to_integer(port)}
+      [host] -> {host, nil}
+    end
+  end
+
+  defp default_port(endpoint), do: if(tls_mode(endpoint) == "plaintext", do: 80, else: 443)
+
+  @doc "TLS mode: plaintext, system_roots, custom_ca or mtls."
+  def tls_mode(endpoint) do
+    case endpoint["tls"] do
+      %{"mode" => mode} when mode in ~w(plaintext system_roots custom_ca mtls) -> mode
+      true -> "system_roots"
+      "system_roots" -> "system_roots"
+      _ -> "plaintext"
+    end
+  end
+
+  @doc "Erlang `:ssl` options for the endpoint, or `nil` for plaintext."
+  @spec ssl_options(map(), String.t()) :: {:ok, keyword() | nil} | {:error, term()}
+  def ssl_options(endpoint, host) do
+    tls = if is_map(endpoint["tls"]), do: endpoint["tls"], else: %{}
+
+    base = [
+      verify: :verify_peer,
+      server_name_indication: String.to_charlist(host),
+      customize_hostname_check: [match_fun: :public_key.pkix_verify_hostname_match_fun(:https)]
+    ]
+
+    case tls_mode(endpoint) do
+      "plaintext" ->
+        {:ok, nil}
+
+      "system_roots" ->
+        {:ok, [{:cacerts, :public_key.cacerts_get()} | base]}
+
+      "custom_ca" ->
+        with {:ok, ca} <- file_opt(tls, "ca_file"), do: {:ok, [{:cacertfile, ca} | base]}
+
+      "mtls" ->
+        with {:ok, ca} <- file_opt(tls, "ca_file"),
+             {:ok, cert} <- file_opt(tls, "client_cert_file"),
+             {:ok, key} <- file_opt(tls, "client_key_file") do
+          {:ok, [{:cacertfile, ca}, {:certfile, cert}, {:keyfile, key} | base]}
+        end
+    end
+  end
+
+  defp file_opt(tls, key) do
+    case tls[key] do
+      path when is_binary(path) and path != "" ->
+        if File.regular?(path),
+          do: {:ok, String.to_charlist(path)},
+          else: {:error, {:tls_file_missing, key, path}}
+
+      _ ->
+        {:error, {:tls_file_missing, key, nil}}
+    end
+  end
+
+  @doc "gRPC metadata for the endpoint: static headers plus an optional bearer token."
+  def metadata(endpoint) do
+    headers = Map.new(endpoint["headers"] || %{})
+
+    case endpoint["bearer_token"] do
+      token when is_binary(token) and token != "" ->
+        Map.put(headers, "authorization", "Bearer " <> token)
+
+      _ ->
+        headers
+    end
+  end
+
+  defp connect(host, port, nil), do: do_connect(host, port, adapter: GRPC.Client.Adapters.Mint)
+
+  defp connect(host, port, ssl),
+    do:
+      do_connect(host, port,
+        adapter: GRPC.Client.Adapters.Mint,
+        cred: GRPC.Credential.new(ssl: ssl)
+      )
+
+  defp do_connect(host, port, opts) do
     case GRPC.Stub.connect("#{host}:#{port}", opts) do
       {:ok, channel} -> {:ok, channel}
       {:error, reason} -> {:error, {:connect, reason}}
@@ -57,7 +134,7 @@ defmodule Conveyor.Artifacts.BytestreamClient do
 
   defp read(channel, ref, endpoint, opts) do
     req = %ReadRequest{resource_name: ref.resource}
-    metadata = Map.new(endpoint["headers"] || %{})
+    metadata = metadata(endpoint)
 
     case Stub.read(channel, req,
            metadata: metadata,

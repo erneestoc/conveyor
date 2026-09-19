@@ -120,9 +120,17 @@ defmodule ConveyorWeb.SettingsLive do
         do: %{},
         else: %{attrs["header_name"] => attrs["header_value"] || ""}
 
+    tls =
+      Map.merge(
+        %{"mode" => attrs["tls_mode"] || "system_roots"},
+        Map.take(attrs, ~w(ca_file client_cert_file client_key_file))
+      )
+
     case Projects.put_cache_endpoint(project, attrs["host"] || "", %{
            "headers" => headers,
-           "tls" => attrs["tls"] == "true"
+           "tls" => tls,
+           "endpoint" => attrs["endpoint"],
+           "bearer_token" => attrs["bearer_token"]
          }) do
       {:ok, _} ->
         audit(socket, "cache_endpoint.put",
@@ -136,6 +144,10 @@ defmodule ConveyorWeb.SettingsLive do
       {:error, :invalid_host} ->
         {:noreply,
          put_flash(socket, :error, "Cache endpoint host must look like host or host:port")}
+
+      {:error, :invalid_endpoint} ->
+        {:noreply,
+         put_flash(socket, :error, "Endpoint override must look like [grpcs://]host[:port]")}
 
       {:error, _changeset} ->
         {:noreply, put_flash(socket, :error, "Could not save the cache endpoint")}
@@ -370,9 +382,16 @@ defmodule ConveyorWeb.SettingsLive do
                 id={"cache-endpoint-#{project.id}-#{String.replace(host, ~r/[^a-zA-Z0-9]/, "-")}"}
               >
                 <td class="py-1 font-mono">{host}</td>
-                <td class="py-1">{if endpoint["tls"], do: "TLS", else: "plaintext"}</td>
+                <td class="py-1">
+                  {Conveyor.Artifacts.BytestreamClient.tls_mode(endpoint)}{if endpoint["endpoint"],
+                    do: " → #{endpoint["endpoint"]}"}
+                </td>
                 <td class="py-1 font-mono text-base-content/60">
-                  {Enum.map_join(endpoint["headers"] || %{}, " ", fn {k, _} -> "#{k}=••••" end)}
+                  {Enum.map_join(endpoint["headers"] || %{}, " ", fn {k, _} -> "#{k}=••••" end)}{if endpoint[
+                                                                                                      "bearer_token"
+                                                                                                    ],
+                                                                                                    do:
+                                                                                                      " bearer=••••"}
                 </td>
                 <td class="py-1 text-right">
                   <button
@@ -416,8 +435,55 @@ defmodule ConveyorWeb.SettingsLive do
                 class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
               />
             </label>
-            <label class="flex items-center gap-1 pb-1">
-              <input type="checkbox" name="endpoint[tls]" value="true" checked /> TLS
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Bearer token (optional)</span>
+              <input
+                name="endpoint[bearer_token]"
+                type="password"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Connect to (optional override)</span>
+              <input
+                name="endpoint[endpoint]"
+                placeholder="grpcs://cas.internal:443"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">TLS</span>
+              <select
+                name="endpoint[tls_mode]"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1"
+              >
+                <option value="system_roots">system roots</option>
+                <option value="custom_ca">custom CA</option>
+                <option value="mtls">mTLS (client certificate)</option>
+                <option value="plaintext">plaintext</option>
+              </select>
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">CA file (custom CA / mTLS)</span>
+              <input
+                name="endpoint[ca_file]"
+                placeholder="/etc/conveyor/secrets/cas-ca.crt"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Client cert file (mTLS)</span>
+              <input
+                name="endpoint[client_cert_file]"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Client key file (mTLS)</span>
+              <input
+                name="endpoint[client_key_file]"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
             </label>
             <.button variant="primary">Save endpoint</.button>
           </form>

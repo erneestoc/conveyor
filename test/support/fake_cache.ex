@@ -53,16 +53,79 @@ defmodule Conveyor.FakeCache do
     run(Conveyor.FakeCache.Server)
   end
 
-  @doc "Starts the fake cache; returns its port. Blobs are registered with `serve/2`."
-  def start do
-    {:ok, _} = Agent.start_link(fn -> %{} end, name: __MODULE__)
+  @doc """
+  Starts the fake cache; returns its port. `tls: [certfile:, keyfile:, cacertfile:]` starts
+  it with TLS requiring a client certificate (mTLS), like a NativeLink listener.
+  """
+  def start(opts \\ []) do
+    unless Process.whereis(__MODULE__),
+      do: {:ok, _} = Agent.start_link(fn -> %{} end, name: __MODULE__)
+
     port = Conveyor.GrpcCase.free_port()
 
+    server_opts =
+      case Keyword.get(opts, :tls) do
+        nil ->
+          []
+
+        ssl ->
+          [
+            adapter_opts: [
+              cred:
+                GRPC.Credential.new(
+                  ssl: ssl ++ [verify: :verify_peer, fail_if_no_peer_cert: true]
+                )
+            ]
+          ]
+      end
+
     {:ok, _} =
-      GRPC.Server.Supervisor.start_link(endpoint: Endpoint, port: port, start_server: true)
+      GRPC.Server.Supervisor.start_link(
+        [endpoint: Endpoint, port: port, start_server: true] ++ server_opts
+      )
 
     port
   end
+
+  @doc "Writes an OTP-generated CA, server and client certificate set to PEM files."
+  def test_certs(dir) do
+    File.mkdir_p!(dir)
+
+    %{server_config: server, client_config: client} =
+      :public_key.pkix_test_data(%{
+        server_chain: %{
+          root: [key: {:rsa, 2048, 65537}],
+          intermediates: [],
+          peer: [key: {:rsa, 2048, 65537}, extensions: [san()]]
+        },
+        client_chain: %{
+          root: [key: {:rsa, 2048, 65537}],
+          intermediates: [],
+          peer: [key: {:rsa, 2048, 65537}]
+        }
+      })
+
+    write = fn name, entries ->
+      path = Path.join(dir, name)
+      File.write!(path, :public_key.pem_encode(entries))
+      path
+    end
+
+    key_entry = fn {type, der} -> {type, der, :not_encrypted} end
+
+    %{
+      server_cert: write.("server.crt", [{:Certificate, server[:cert], :not_encrypted}]),
+      server_key: write.("server.key", [key_entry.(server[:key])]),
+      server_ca:
+        write.("server-ca.crt", Enum.map(server[:cacerts], &{:Certificate, &1, :not_encrypted})),
+      client_cert: write.("client.crt", [{:Certificate, client[:cert], :not_encrypted}]),
+      client_key: write.("client.key", [key_entry.(client[:key])]),
+      client_ca:
+        write.("client-ca.crt", Enum.map(client[:cacerts], &{:Certificate, &1, :not_encrypted}))
+    }
+  end
+
+  defp san, do: {:Extension, {2, 5, 29, 17}, false, [iPAddress: <<127, 0, 0, 1>>]}
 
   @doc "Serves `data` for the read resource `blobs/<hash>/<size>` (hash defaults to the real digest)."
   def serve(data, hash \\ nil) do

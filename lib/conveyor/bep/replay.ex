@@ -144,6 +144,12 @@ defmodule Conveyor.Bep.Replay do
     ordered_event(stream_id, seq, {:bazel_event, any})
   end
 
+  # A pre-encoded event (see `pre_encode/1`): no protobuf work per replay.
+  def ordered_event(stream_id, seq, {:encoded, bytes}) when is_binary(bytes) do
+    any = %Google.Protobuf.Any{type_url: @bep_type_url, value: bytes}
+    ordered_event(stream_id, seq, {:bazel_event, any})
+  end
+
   def ordered_event(stream_id, seq, {kind, payload}) do
     %V1.OrderedBuildEvent{
       stream_id: stream_id,
@@ -265,6 +271,20 @@ defmodule Conveyor.Bep.Replay do
       nil -> %{}
       key -> %{"x-api-key" => key}
     end
+  end
+
+  @doc """
+  Encodes every event once so that replays cost no protobuf encoding. The Started and
+  Finished events stay as structs: Started is rewritten with the replay's invocation id
+  and Finished is inspected for the build status.
+  """
+  @spec pre_encode([BepEvent.t()]) :: [BepEvent.t() | {:encoded, binary()}]
+  def pre_encode(events) do
+    Enum.map(events, fn
+      %BepEvent{payload: {:started, _}} = ev -> ev
+      %BepEvent{payload: {:finished, _}} = ev -> ev
+      %BepEvent{} = ev -> {:encoded, BepEvent.encode(ev)}
+    end)
   end
 
   # Bazel puts the invocation id in the Started payload; keep the fixture consistent with

@@ -203,22 +203,51 @@ defmodule Conveyor.Projects do
           {:ok, Project.t()} | {:error, Ecto.Changeset.t() | :invalid_host}
   def put_cache_endpoint(%Project{} = project, host, attrs) do
     host = String.trim(host)
+    endpoint_override = String.trim(attrs["endpoint"] || "")
 
-    if Regex.match?(~r/^[a-z0-9.\-]+(:\d{1,5})?$/i, host) do
-      headers =
-        attrs
-        |> Map.get("headers", %{})
-        |> Enum.reject(fn {k, _} -> k == "" end)
-        |> Map.new()
+    cond do
+      not Regex.match?(~r/^[a-z0-9.\-]+(:\d{1,5})?$/i, host) ->
+        {:error, :invalid_host}
 
-      endpoint = %{"headers" => headers, "tls" => Map.get(attrs, "tls", false) in [true, "true"]}
-      endpoints = Map.put(cache_endpoints(project), host, endpoint)
+      endpoint_override != "" and
+          not Regex.match?(~r|^(grpcs?://)?[a-z0-9.\-]+(:\d{1,5})?$|i, endpoint_override) ->
+        {:error, :invalid_endpoint}
 
-      update_project(project, %{settings: Map.put(project.settings, "cache_endpoints", endpoints)})
-    else
-      {:error, :invalid_host}
+      true ->
+        headers =
+          attrs
+          |> Map.get("headers", %{})
+          |> Enum.reject(fn {k, _} -> k == "" end)
+          |> Map.new()
+
+        endpoint =
+          %{"headers" => headers, "tls" => normalize_tls(Map.get(attrs, "tls", false))}
+          |> put_present("endpoint", endpoint_override)
+          |> put_present("bearer_token", String.trim(attrs["bearer_token"] || ""))
+
+        endpoints = Map.put(cache_endpoints(project), host, endpoint)
+
+        update_project(project, %{
+          settings: Map.put(project.settings, "cache_endpoints", endpoints)
+        })
     end
   end
+
+  # true/false stay booleans (system roots / plaintext); a map carries the mode and the
+  # secret file paths for a custom CA or mTLS.
+  defp normalize_tls(%{"mode" => mode} = tls) when mode in ~w(custom_ca mtls) do
+    tls
+    |> Map.take(~w(mode ca_file client_cert_file client_key_file))
+    |> Enum.reject(fn {_, v} -> v in [nil, ""] end)
+    |> Map.new()
+  end
+
+  defp normalize_tls(%{"mode" => "system_roots"}), do: true
+  defp normalize_tls(%{"mode" => _}), do: false
+  defp normalize_tls(value), do: value in [true, "true"]
+
+  defp put_present(map, _key, ""), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 
   @spec delete_cache_endpoint(Project.t(), String.t()) ::
           {:ok, Project.t()} | {:error, Ecto.Changeset.t()}

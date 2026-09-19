@@ -3,6 +3,13 @@ defmodule ConveyorWeb.MetricsControllerTest do
 
   test "exposes Prometheus metrics, optionally behind a token", %{conn: conn} do
     :telemetry.execute([:conveyor, :ingest, :ack], %{latency_us: 1234, count: 1}, %{})
+
+    :telemetry.execute(
+      [:conveyor, :ingest, :writer, :flush],
+      %{duration: 1_000_000, batches: 1, events: 5},
+      %{shard: 0}
+    )
+
     body = conn |> get(~p"/metrics") |> response(200)
     assert body =~ "conveyor_ingest_ack_count"
     assert body =~ "conveyor_ingest_ack_latency_us_bucket"

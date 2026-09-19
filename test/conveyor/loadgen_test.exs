@@ -68,6 +68,22 @@ defmodule Conveyor.LoadgenTest do
     for %{id: id} <- quick.invocations, do: :ok = await_worker_exit(id)
   end
 
+  test "pre-encoded fixtures replay identically" do
+    events =
+      Conveyor.Bep.Fixture.read!(
+        Path.join([File.cwd!(), "test/fixtures/bep", "analysis_failure.bep"])
+      )
+
+    pre = Conveyor.Bep.Replay.pre_encode(events)
+    assert Enum.count(pre, &match?({:encoded, _}, &1)) == length(events) - 2
+    sid = %Google.Devtools.Build.V1.StreamId{build_id: "b", invocation_id: "i", component: :TOOL}
+
+    for {a, b} <- Enum.zip(events, pre) do
+      assert Conveyor.Bep.Replay.ordered_event(sid, 1, a).event.event ==
+               Conveyor.Bep.Replay.ordered_event(sid, 1, b).event.event
+    end
+  end
+
   test "reports failures without raising", %{key: key} do
     report =
       Loadgen.run(

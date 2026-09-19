@@ -38,7 +38,7 @@ defmodule Conveyor.Loadgen do
     duration_ms = Keyword.get(opts, :duration_ms)
     jitter = Keyword.get(opts, :jitter_ms, 0)
     on_build = Keyword.get(opts, :on_build, fn _ -> :ok end)
-    events_by_file = Map.new(fixtures, &{&1, Fixture.read!(&1)})
+    events_by_file = Map.new(fixtures, &{&1, &1 |> Fixture.read!() |> Replay.pre_encode()})
     deadline = duration_ms && System.monotonic_time(:millisecond) + duration_ms
     started = System.monotonic_time(:millisecond)
 

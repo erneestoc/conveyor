@@ -82,7 +82,10 @@ defmodule ConveyorWeb.SettingsLiveTest do
         host: "cache.example.com:443",
         header_name: "x-api-key",
         header_value: "s3cret",
-        tls: "true"
+        tls_mode: "custom_ca",
+        ca_file: "/etc/conveyor/ca.crt",
+        endpoint: "grpcs://cas.internal:443",
+        bearer_token: "zq9bearer"
       }
     )
     |> render_submit()
@@ -92,8 +95,26 @@ defmodule ConveyorWeb.SettingsLiveTest do
     assert html =~ "x-api-key=••••"
     refute html =~ "s3cret"
 
-    assert %{"cache.example.com:443" => %{"headers" => %{"x-api-key" => "s3cret"}, "tls" => true}} =
-             Projects.cache_endpoints(Projects.get_project!(project.id))
+    assert html =~ "custom_ca → grpcs://cas.internal:443"
+    assert html =~ "bearer=••••"
+    refute html =~ "zq9bearer"
+
+    assert %{
+             "cache.example.com:443" => %{
+               "headers" => %{"x-api-key" => "s3cret"},
+               "tls" => %{"mode" => "custom_ca", "ca_file" => "/etc/conveyor/ca.crt"},
+               "endpoint" => "grpcs://cas.internal:443",
+               "bearer_token" => "zq9bearer"
+             }
+           } = Projects.cache_endpoints(Projects.get_project!(project.id))
+
+    view
+    |> form("#cache-endpoint-form-#{project.id}",
+      endpoint: %{host: "ok.example.com", endpoint: "http://bad/x"}
+    )
+    |> render_submit()
+
+    assert render(view) =~ "Endpoint override must look like"
 
     view
     |> element("#cache-endpoint-#{project.id}-cache-example-com-443 button", "Remove")
