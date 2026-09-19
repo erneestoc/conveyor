@@ -27,6 +27,13 @@ defmodule ConveyorWeb.UploadController do
       artifact = Artifacts.attach(inv, name, blob, "upload")
       if Artifacts.profile_name?(name), do: Artifacts.profile_available(inv, blob, name)
 
+      Conveyor.Audit.log(key, "upload.artifact",
+        subject: {"invocation", inv.id},
+        project_id: inv.project_id,
+        ip: Conveyor.Audit.ip(conn),
+        metadata: %{"name" => name, "size" => blob.size}
+      )
+
       conn
       |> put_status(201)
       |> json(%{
@@ -50,6 +57,13 @@ defmodule ConveyorWeb.UploadController do
          {:ok, events} <- decode_events(body),
          :ok <- ids_match(uuid, events),
          {:ok, count} <- ingest(key, uuid, events) do
+      Conveyor.Audit.log(key, "upload.bep",
+        subject: {"invocation", uuid},
+        project_id: key.project_id,
+        ip: Conveyor.Audit.ip(conn),
+        metadata: %{"events" => count}
+      )
+
       conn
       |> put_status(202)
       |> json(%{invocation_id: uuid, events: count, url: url(~p"/invocation/#{uuid}")})

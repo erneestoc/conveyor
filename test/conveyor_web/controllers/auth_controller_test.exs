@@ -143,6 +143,11 @@ defmodule ConveyorWeb.AuthControllerTest do
     conn = delete(conn, ~p"/auth/logout")
     assert redirected_to(conn) == "/auth/login"
     assert {:error, {:redirect, _}} = live(conn, ~p"/")
+
+    actions = Conveyor.Audit.recent(20) |> Enum.map(& &1.action)
+
+    assert "auth.login" in actions and "auth.logout" in actions and
+             "project.allowed_groups" in actions
   end
 
   test "oidc failures are reported on the login page", %{

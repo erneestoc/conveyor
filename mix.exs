@@ -22,7 +22,7 @@ defmodule Conveyor.MixProject do
   def application do
     [
       mod: {Conveyor.Application, []},
-      extra_applications: [:logger, :runtime_tools, :inets, :ssl]
+      extra_applications: [:logger, :runtime_tools, :inets, :ssl, :xmerl]
     ]
   end
 

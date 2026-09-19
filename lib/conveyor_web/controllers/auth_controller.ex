@@ -7,6 +7,7 @@ defmodule ConveyorWeb.AuthController do
 
   alias Assent.Strategy.OIDC
   alias Conveyor.Accounts
+  alias Conveyor.Audit
   alias ConveyorWeb.Plugs.Auth, as: AuthPlug
 
   def login(conn, _params) do
@@ -22,6 +23,7 @@ defmodule ConveyorWeb.AuthController do
     expected = Accounts.admin_token()
 
     if is_binary(expected) and Plug.Crypto.secure_compare(token, expected) do
+      Audit.log("admin-token", "auth.admin_unlock", ip: Audit.ip(conn))
       {return_to, conn} = pop_return_to(conn, ~p"/settings")
 
       conn
@@ -30,6 +32,7 @@ defmodule ConveyorWeb.AuthController do
       |> put_flash(:info, "Settings unlocked")
       |> redirect(to: return_to)
     else
+      Audit.log("anonymous", "auth.admin_unlock_failed", ip: Audit.ip(conn))
       conn |> put_flash(:error, "Invalid admin token") |> redirect(to: ~p"/auth/login")
     end
   end
@@ -57,6 +60,12 @@ defmodule ConveyorWeb.AuthController do
     with {:ok, _state} <- Map.fetch(session_params, :state) |> in_progress(),
          {:ok, %{user: claims}} <- OIDC.callback(config, params),
          {:ok, user} <- Accounts.upsert_from_claims(claims) do
+      Audit.log(user.email, "auth.login",
+        subject: {"user", user.id},
+        ip: Audit.ip(conn),
+        metadata: %{"role" => user.role}
+      )
+
       {return_to, conn} = pop_return_to(conn, ~p"/")
 
       conn
@@ -71,6 +80,8 @@ defmodule ConveyorWeb.AuthController do
   end
 
   def logout(conn, _params) do
+    Audit.log(conn.assigns.current_scope, "auth.logout", ip: Audit.ip(conn))
+
     conn
     |> configure_session(drop: true)
     |> redirect(to: if(Accounts.mode() == :oidc, do: ~p"/auth/login", else: ~p"/"))
@@ -80,6 +91,11 @@ defmodule ConveyorWeb.AuthController do
   defp in_progress(:error), do: {:error, "no sign-in in progress (session expired?); start again"}
 
   defp failed(conn, reason) do
+    Audit.log("anonymous", "auth.login_failed",
+      ip: Audit.ip(conn),
+      metadata: %{"reason" => reason}
+    )
+
     conn |> put_flash(:error, "Sign-in failed: #{reason}") |> redirect(to: ~p"/auth/login")
   end
 

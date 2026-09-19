@@ -7,6 +7,7 @@ defmodule ConveyorWeb.SettingsLive do
 
   import ConveyorWeb.BuildComponents
 
+  alias Conveyor.Audit
   alias Conveyor.Projects
   alias Conveyor.Projects.{ApiKey, Project}
   alias ConveyorWeb.Format
@@ -26,13 +27,21 @@ defmodule ConveyorWeb.SettingsLive do
   defp reload(socket) do
     projects = Projects.list_projects()
     keys = Map.new(projects, &{&1.id, Projects.list_api_keys(&1)})
-    assign(socket, projects: projects, keys: keys, expiring: Projects.expiring_api_keys(14))
+
+    assign(socket,
+      projects: projects,
+      keys: keys,
+      expiring: Projects.expiring_api_keys(14),
+      audit: Audit.recent(50)
+    )
   end
 
   @impl true
   def handle_event("create_project", %{"project" => attrs}, socket) do
     case Projects.create_project(attrs) do
       {:ok, project} ->
+        audit(socket, "project.create", subject: {"project", project.id}, project_id: project.id)
+
         {:noreply,
          socket
          |> put_flash(:info, "Project #{project.name} created")
@@ -45,7 +54,8 @@ defmodule ConveyorWeb.SettingsLive do
   end
 
   def handle_event("archive_project", %{"id" => id}, socket) do
-    {:ok, _} = id |> Projects.get_project!() |> Projects.archive_project()
+    {:ok, project} = id |> Projects.get_project!() |> Projects.archive_project()
+    audit(socket, "project.archive", subject: {"project", project.id}, project_id: project.id)
     {:noreply, socket |> put_flash(:info, "Project archived") |> reload()}
   end
 
@@ -57,6 +67,12 @@ defmodule ConveyorWeb.SettingsLive do
 
     case Projects.create_api_key(project, attrs) do
       {:ok, key, plaintext} ->
+        audit(socket, "api_key.create",
+          subject: {"api_key", key.key_id},
+          project_id: project.id,
+          metadata: %{"name" => key.name, "scopes" => key.scopes}
+        )
+
         {:noreply,
          socket
          |> assign(
@@ -75,6 +91,12 @@ defmodule ConveyorWeb.SettingsLive do
     {:ok, successor, plaintext} = Projects.rotate_api_key(key)
     project = Projects.get_project!(key.project_id)
 
+    audit(socket, "api_key.rotate",
+      subject: {"api_key", key.key_id},
+      project_id: project.id,
+      metadata: %{"successor" => successor.key_id}
+    )
+
     {:noreply,
      socket
      |> assign(new_key: %{key: successor, plaintext: plaintext, project: project})
@@ -83,7 +105,8 @@ defmodule ConveyorWeb.SettingsLive do
   end
 
   def handle_event("revoke_key", %{"id" => id}, socket) do
-    {:ok, _} = id |> Projects.get_api_key!() |> Projects.revoke_api_key()
+    {:ok, key} = id |> Projects.get_api_key!() |> Projects.revoke_api_key()
+    audit(socket, "api_key.revoke", subject: {"api_key", key.key_id}, project_id: key.project_id)
     {:noreply, socket |> put_flash(:info, "Key revoked") |> reload()}
   end
 
@@ -102,6 +125,12 @@ defmodule ConveyorWeb.SettingsLive do
            "tls" => attrs["tls"] == "true"
          }) do
       {:ok, _} ->
+        audit(socket, "cache_endpoint.put",
+          subject: {"project", project.id},
+          project_id: project.id,
+          metadata: %{"host" => attrs["host"], "headers" => Map.keys(headers)}
+        )
+
         {:noreply, socket |> put_flash(:info, "Cache endpoint saved") |> reload()}
 
       {:error, :invalid_host} ->
@@ -118,18 +147,33 @@ defmodule ConveyorWeb.SettingsLive do
         %{"project_id" => project_id, "groups" => groups},
         socket
       ) do
-    {:ok, _} =
+    {:ok, project} =
       project_id
       |> Projects.get_project!()
       |> Projects.put_allowed_groups(String.split(groups || "", ","))
+
+    audit(socket, "project.allowed_groups",
+      subject: {"project", project.id},
+      project_id: project.id,
+      metadata: %{"groups" => Projects.allowed_groups(project)}
+    )
 
     {:noreply, socket |> put_flash(:info, "Project access updated") |> reload()}
   end
 
   def handle_event("delete_cache_endpoint", %{"project_id" => project_id, "host" => host}, socket) do
-    {:ok, _} = project_id |> Projects.get_project!() |> Projects.delete_cache_endpoint(host)
+    {:ok, project} = project_id |> Projects.get_project!() |> Projects.delete_cache_endpoint(host)
+
+    audit(socket, "cache_endpoint.delete",
+      subject: {"project", project.id},
+      project_id: project.id,
+      metadata: %{"host" => host}
+    )
+
     {:noreply, socket |> put_flash(:info, "Cache endpoint removed") |> reload()}
   end
+
+  defp audit(socket, action, opts), do: Audit.log(socket.assigns.current_scope, action, opts)
 
   # "ci=true, team=infra" → %{"ci" => "true", "team" => "infra"}
   defp parse_tags(string) when is_binary(string) do
@@ -378,6 +422,33 @@ defmodule ConveyorWeb.SettingsLive do
             <.button variant="primary">Save endpoint</.button>
           </form>
         </div>
+      </section>
+
+      <section id="audit-log" class="mb-4 rounded-md border border-base-300 p-4">
+        <h2 class="text-sm font-semibold">Audit log</h2>
+        <p class="text-[11px] text-base-content/60">
+          Sign-ins, key and project changes, uploads. Latest 50.
+        </p>
+        <table class="mt-2 w-full text-xs">
+          <tbody class="divide-y divide-base-300/60">
+            <tr :for={e <- @audit} id={"audit-#{e.id}"}>
+              <td class="py-1 whitespace-nowrap text-base-content/60">
+                {Format.relative(e.inserted_at, DateTime.utc_now())}
+              </td>
+              <td class="py-1 font-mono">{e.actor}</td>
+              <td class="py-1 font-mono font-medium">{e.action}</td>
+              <td class="py-1 font-mono text-base-content/70">
+                {e.subject_type}{if e.subject_id, do: " #{e.subject_id}"}
+              </td>
+              <td class="py-1 font-mono text-base-content/50">
+                {if e.metadata != %{}, do: Jason.encode!(e.metadata)}
+              </td>
+            </tr>
+            <tr :if={@audit == []}>
+              <td class="py-2 text-base-content/50">Nothing yet.</td>
+            </tr>
+          </tbody>
+        </table>
       </section>
 
       <section id="new-project" class="rounded-md border border-base-300 p-4">

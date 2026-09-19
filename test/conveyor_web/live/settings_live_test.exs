@@ -102,4 +102,18 @@ defmodule ConveyorWeb.SettingsLiveTest do
     refute has_element?(view, "#cache-endpoint-#{project.id}-cache-example-com-443")
     assert Projects.cache_endpoints(Projects.get_project!(project.id)) == %{}
   end
+
+  test "settings actions are audited", %{conn: conn, project: project} do
+    {:ok, view, _} = live(conn, ~p"/settings")
+    assert has_element?(view, "#audit-log", "Nothing yet")
+
+    view
+    |> form("#key-form-#{project.id}", api_key: %{name: "audited", default_tags: ""})
+    |> render_submit()
+
+    assert [%{action: "api_key.create", actor: "anonymous", metadata: %{"name" => "audited"}}] =
+             Conveyor.Audit.recent(1)
+
+    assert has_element?(view, "#audit-log td", "api_key.create")
+  end
 end
