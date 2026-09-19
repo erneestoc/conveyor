@@ -71,6 +71,9 @@ defmodule Conveyor.Query.Parser do
   defp tokenize(<<?\\, ?", rest::binary>>, tokens, current, ?"),
     do: tokenize(rest, tokens, current <> "\\\"", ?")
 
+  defp tokenize(<<?\\, ?\\, rest::binary>>, tokens, current, ?"),
+    do: tokenize(rest, tokens, current <> "\\\\", ?")
+
   defp tokenize(<<?(, rest::binary>>, tokens, current, nil),
     do: tokenize(rest, tokens, current <> "(", ?()
 
@@ -158,7 +161,7 @@ defmodule Conveyor.Query.Parser do
 
     if String.starts_with?(value, "\"") and String.ends_with?(value, "\"") and
          byte_size(value) >= 2 do
-      value |> binary_part(1, byte_size(value) - 2) |> String.replace("\\\"", "\"")
+      value |> binary_part(1, byte_size(value) - 2) |> String.replace(~r/\\(["\\])/, "\\1")
     else
       value
     end
@@ -193,9 +196,9 @@ defmodule Conveyor.Query.Parser do
   # (the exists operator), values with whitespace, quotes or parentheses, and values
   # starting with an operator character.
   defp quote_value(v) when is_binary(v) do
-    if v == "" or v == "*" or String.contains?(v, [" ", "\t", "\"", "(", ")"]) or
+    if v == "" or v == "*" or String.contains?(v, [" ", "\t", "\"", "(", ")", "\\"]) or
          String.starts_with?(v, ["!", "<", ">", "=", "~", ":"]),
-       do: "\"" <> String.replace(v, "\"", "\\\"") <> "\"",
+       do: "\"" <> String.replace(v, ~r/(["\\])/, "\\\\\\1") <> "\"",
        else: v
   end
 end
