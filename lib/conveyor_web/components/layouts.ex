@@ -77,6 +77,17 @@ defmodule ConveyorWeb.Layouts do
           </nav>
 
           <div class="ml-auto flex items-center gap-3">
+            <.link
+              navigate={~p"/settings"}
+              class={[
+                "rounded px-2 py-1 text-sm hover:bg-base-200",
+                @current_path == "/settings" && "bg-base-200 font-medium"
+              ]}
+              id="nav-settings"
+              title="Projects and API keys"
+            >
+              <.icon name="hero-cog-6-tooth-micro" class="size-4" />
+            </.link>
             <.theme_toggle />
           </div>
         </div>

@@ -20,6 +20,7 @@ defmodule ConveyorWeb.Router do
     live "/", BuildsLive, :all
     live "/dashboard", DashboardLive, :all
     live "/tests", TestsLive, :all
+    live "/settings", SettingsLive, :index
     live "/p/:slug", BuildsLive, :project
     live "/p/:slug/dashboard", DashboardLive, :project
     live "/p/:slug/tests", TestsLive, :project
