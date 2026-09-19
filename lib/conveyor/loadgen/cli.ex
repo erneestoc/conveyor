@@ -5,7 +5,7 @@ defmodule Conveyor.Loadgen.CLI do
       bes_loadgen --hosts localhost:1985,localhost:1986 --api-key KEY \\
         --fixtures 'test/fixtures/bep/*.bep' --streams 200 --builds 2000 \\
         [--duration-s 300] [--delay-ms 0] [--jitter-ms 100] [--drop-after 20] \\
-        [--duplicate-every 10] [--report out.json] [--verify]
+        [--duplicate-every 10] [--retries 3] [--report out.json] [--verify]
 
   Exit status is non-zero when any build failed or any ack went missing.
   """
@@ -21,6 +21,7 @@ defmodule Conveyor.Loadgen.CLI do
     jitter_ms: :integer,
     drop_after: :integer,
     duplicate_every: :integer,
+    retries: :integer,
     report: :string,
     verify: :boolean,
     help: :boolean
@@ -48,6 +49,7 @@ defmodule Conveyor.Loadgen.CLI do
       jitter_ms: opts[:jitter_ms] || 0,
       drop_after: opts[:drop_after],
       duplicate_every: opts[:duplicate_every],
+      retries: opts[:retries] || 0,
       api_key: opts[:api_key]
     ]
   end

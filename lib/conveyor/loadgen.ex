@@ -37,6 +37,7 @@ defmodule Conveyor.Loadgen do
     builds = Keyword.get(opts, :builds, streams * 5)
     duration_ms = Keyword.get(opts, :duration_ms)
     jitter = Keyword.get(opts, :jitter_ms, 0)
+    retries = Keyword.get(opts, :retries, 0)
     on_build = Keyword.get(opts, :on_build, fn _ -> :ok end)
     events_by_file = Map.new(fixtures, &{&1, &1 |> Fixture.read!() |> Replay.pre_encode()})
     deadline = duration_ms && System.monotonic_time(:millisecond) + duration_ms
@@ -47,15 +48,12 @@ defmodule Conveyor.Loadgen do
       |> Task.async_stream(
         fn {i, file} ->
           if jitter > 0, do: Process.sleep(:rand.uniform(jitter))
-          {host, port} = Enum.at(hosts, rem(i, length(hosts)))
 
           replay_opts =
-            [host: host, port: port]
-            |> Keyword.merge(
-              Keyword.take(opts, [:api_key, :delay_ms, :drop_after, :duplicate_every])
-            )
+            Keyword.take(opts, [:api_key, :delay_ms, :drop_after, :duplicate_every]) ++
+              [invocation_id: Replay.uuid(), build_id: Replay.uuid()]
 
-          result = Replay.run(events_by_file[file], replay_opts)
+          result = run_with_retries(events_by_file[file], replay_opts, hosts, i, retries)
           on_build.(result)
           {file, result}
         end,
@@ -67,6 +65,25 @@ defmodule Conveyor.Loadgen do
 
     elapsed_ms = max(System.monotonic_time(:millisecond) - started, 1)
     summarize(results, elapsed_ms, streams)
+  end
+
+  # Like Bazel after a failed upload: retry the same invocation (same ids, full resend, the
+  # server acks what it already has) against the next host, with a short backoff. A build
+  # whose node died mid-stream therefore finishes on another node.
+  defp run_with_retries(events, replay_opts, hosts, i, retries, attempt \\ 0) do
+    {host, port} = Enum.at(hosts, rem(i + attempt, length(hosts)))
+
+    case Replay.run(events, [host: host, port: port] ++ replay_opts) do
+      {:ok, result} ->
+        {:ok, Map.put(result, :attempts, attempt + 1)}
+
+      {:error, _reason} when attempt < retries ->
+        Process.sleep(200 * (attempt + 1))
+        run_with_retries(events, replay_opts, hosts, i, retries, attempt + 1)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   # Cycles through the fixtures; with a deadline the plan is lazy and stops when time is up.
@@ -111,6 +128,7 @@ defmodule Conveyor.Loadgen do
       builds_failed: length(failed),
       failures: Enum.take(failed, 20),
       events: events,
+      retried_builds: Enum.count(ok, &(Map.get(&1, :attempts, 1) > 1)),
       missing_acks: missing,
       elapsed_ms: elapsed_ms,
       events_per_second: Float.round(events * 1000 / elapsed_ms, 1),
@@ -147,7 +165,7 @@ defmodule Conveyor.Loadgen do
 
     """
     builds     #{report.builds_ok}/#{report.builds_total} ok (#{report.builds_failed} failed), #{report.builds_per_minute} builds/min over #{report.streams} streams
-    events     #{report.events} sent, #{report.missing_acks} missing acks, #{report.events_per_second} events/s, #{report.elapsed_ms} ms wall
+    events     #{report.events} sent, #{report.missing_acks} missing acks, #{report.events_per_second} events/s, #{report.elapsed_ms} ms wall, #{report.retried_builds} builds retried
     ack ms     p50 #{lat.p50}  p90 #{lat.p90}  p99 #{lat.p99}  max #{lat.max}  (client-observed, n=#{lat.count})
     build ms   p50 #{dur.p50}  p90 #{dur.p90}  p99 #{dur.p99}  max #{dur.max}
     #{Enum.map_join(report.failures, "\\n", &"  FAILED #{&1.file}: #{&1.reason}")}

@@ -68,6 +68,41 @@ defmodule Conveyor.LoadgenTest do
     for %{id: id} <- quick.invocations, do: :ok = await_worker_exit(id)
   end
 
+  test "retries a build on another host with the same invocation id", %{
+    grpc_port: port,
+    key: key
+  } do
+    # The first host does not exist; the retry lands on the real server and the build
+    # completes with every event acked once.
+    report =
+      Loadgen.run(
+        fixtures: [Path.join([File.cwd!(), "test/fixtures/bep", "analysis_failure.bep"])],
+        hosts: ["127.0.0.1:1", "127.0.0.1:#{port}"],
+        api_key: key,
+        streams: 1,
+        builds: 1,
+        retries: 2
+      )
+
+    assert %{builds_ok: 1, builds_failed: 0, missing_acks: 0, retried_builds: 1} = report
+    [%{id: id, sent: sent}] = report.invocations
+    :ok = await_worker_exit(id)
+    assert :ok = Verify.check(id, sent - 1)
+    assert Loadgen.format(report) =~ "1 builds retried"
+
+    # Without retries the dead host is a failed build.
+    report =
+      Loadgen.run(
+        fixtures: [Path.join([File.cwd!(), "test/fixtures/bep", "analysis_failure.bep"])],
+        hosts: ["127.0.0.1:1"],
+        api_key: key,
+        streams: 1,
+        builds: 1
+      )
+
+    assert %{builds_failed: 1, retried_builds: 0} = report
+  end
+
   test "pre-encoded fixtures replay identically" do
     events =
       Conveyor.Bep.Fixture.read!(

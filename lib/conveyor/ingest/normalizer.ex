@@ -117,29 +117,10 @@ defmodule Conveyor.Ingest.Normalizer do
     {set_option(state, "unstructured", cl.args), batch}
   end
 
-  defp handle(
-         :structured_command_line,
-         %{payload: {:structured_command_line, cl}},
-         _seq,
-         state,
-         batch
-       ) do
-    sections =
-      Enum.map(cl.sections, fn section ->
-        case section.section_type do
-          {:chunk_list, %{chunk: chunks}} ->
-            %{"label" => section.section_label, "chunks" => chunks}
-
-          {:option_list, %{option: options}} ->
-            %{"label" => section.section_label, "options" => Enum.map(options, &option_map/1)}
-
-          _ ->
-            %{"label" => section.section_label}
-        end
-      end)
-
-    {set_option(state, "structured." <> cl.command_line_label, sections), batch}
-  end
+  # The structured command lines (canonical and original, ~70 KB per build together) are
+  # not shown anywhere; they stay in the raw event stream and are not copied into
+  # invocations.options (M7 storage measurement: they were ~85 % of the column).
+  defp handle(:structured_command_line, _event, _seq, state, batch), do: {state, batch}
 
   defp handle(:options_parsed, %{payload: {:options_parsed, op}}, _seq, state, batch) do
     parsed = %{
@@ -538,15 +519,6 @@ defmodule Conveyor.Ingest.Normalizer do
 
   defp increment(state, field) when field in @counter_fields do
     set(state, %{field => (state.inv[field] || 0) + 1})
-  end
-
-  defp option_map(o) do
-    %{
-      "name" => o.option_name,
-      "value" => o.option_value,
-      "combined" => o.combined_form,
-      "effect_tags" => Enum.map(o.effect_tags, &to_string/1)
-    }
   end
 
   # Enforces the per-invocation log byte limit: the chunk that crosses it is cut and a
