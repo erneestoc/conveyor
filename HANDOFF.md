@@ -80,6 +80,7 @@ lib/conveyor/
   ingest/batch.ex       rows for one commit; event/log segment rows (zstd via :zstd from OTP)
   ingest/writer.ex      group commit per shard, per-batch fallback, Fenced (CAS on last_event_seq), Retry
   ingest/writer_pool.ex shards by phash2(invocation_id)
+  ingest/tag_counter.ex per-node coalescing of tag_keys counts (one sorted upsert per second; flush on shutdown)
   ingest/scrub.ex       redacts header flags, URL creds, token=, Bearer in command lines/logs (rewrites raw protobuf)
   ingest/tags.ex        merge order derived < workspace_status < keywords < api_key < build_metadata; ignores volatile keys
   ingest/status.ex      exit code → status, categories
