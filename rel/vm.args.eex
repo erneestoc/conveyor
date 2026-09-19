@@ -1,0 +1,12 @@
+## Erlang VM flags for the Conveyor release.
+##
+## Schedulers do not busy-wait: at 1,000 idle-ish BES streams the BEAM showed >100 % OS
+## CPU with under 1 % real scheduler utilization (M7 measurement). Spinning wastes cloud
+## vCPUs and fools CPU-based autoscalers (the Kubernetes HPA scales on CPU); the latency
+## cost is microseconds against a 250 ms ack budget.
++sbwt none
++sbwtdcpu none
++sbwtdio none
+
+## Bazel opens one HTTP/2 connection per build; leave headroom for many.
++Q 1048576

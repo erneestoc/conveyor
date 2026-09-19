@@ -170,7 +170,9 @@ defmodule Conveyor.Bep.Replay do
   end
 
   # Sends events `from_seq..N` plus the stream-finished marker as N+1. With `drop_after`,
-  # cancels the stream after that many events instead and returns the acks received so far.
+  # cancels the stream after that many events instead. Acks are read while events are
+  # still being sent, as Bazel does, so client-observed latency stays honest when events
+  # are paced (`delay_ms`).
   defp send_stream(conn, events, from_seq, drop_after) do
     stream = Stub.publish_build_tool_event_stream(conn.channel, metadata: conn.metadata)
     total = length(events)
@@ -181,43 +183,61 @@ defmodule Conveyor.Bep.Replay do
       |> Enum.drop(from_seq - 1)
       |> then(&if(drop_after, do: Enum.take(&1, drop_after), else: &1))
 
-    sent_at =
-      Enum.reduce(to_send, %{}, fn {event, seq}, sent_at ->
-        if conn.delay > 0, do: Process.sleep(conn.delay)
-        req = request(conn.project_id, ordered_event(conn.stream_id, seq, event))
-        GRPC.Stub.send_request(stream, req)
-
-        # Bazel resends an event it believes unacknowledged; the server must ack duplicates
-        # without storing them twice.
-        if conn.duplicate_every && rem(seq, conn.duplicate_every) == 0,
-          do: GRPC.Stub.send_request(stream, req)
-
-        Map.put_new(sent_at, seq, System.monotonic_time(:microsecond))
-      end)
-
     if drop_after do
+      Enum.each(to_send, fn {event, seq} -> send_one(conn, stream, seq, event) end)
       GRPC.Stub.cancel(stream)
       :ok
     else
-      finished =
-        {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+      parent = self()
 
-      final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
-      GRPC.Stub.send_request(stream, final, end_stream: true)
-      sent_at = Map.put(sent_at, total + 1, System.monotonic_time(:microsecond))
+      sender =
+        spawn_link(fn ->
+          Enum.each(to_send, fn {event, seq} ->
+            if conn.delay > 0, do: Process.sleep(conn.delay)
+            send(parent, {:sent, seq, System.monotonic_time(:microsecond)})
+            send_one(conn, stream, seq, event)
+          end)
 
-      with {:ok, replies} <- GRPC.Stub.recv(stream) do
-        collect_acks(replies, sent_at)
-      end
+          finished =
+            {:component_stream_finished,
+             %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+
+          final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
+          send(parent, {:sent, total + 1, System.monotonic_time(:microsecond)})
+          GRPC.Stub.send_request(stream, final, end_stream: true)
+        end)
+
+      result =
+        with {:ok, replies} <- GRPC.Stub.recv(stream) do
+          collect_acks(replies)
+        end
+
+      Process.unlink(sender)
+      Process.exit(sender, :kill)
+      result
     end
+  end
+
+  defp send_one(conn, stream, seq, event) do
+    req = request(conn.project_id, ordered_event(conn.stream_id, seq, event))
+    GRPC.Stub.send_request(stream, req)
+
+    # Bazel resends an event it believes unacknowledged; the server must ack duplicates
+    # without storing them twice.
+    if conn.duplicate_every && rem(seq, conn.duplicate_every) == 0,
+      do: GRPC.Stub.send_request(stream, req)
+
+    :ok
   end
 
   # Returns the acked sequence numbers in order and the client-observed latency of each
   # first ack (send → ack, milliseconds).
-  defp collect_acks(replies, sent_at) do
-    Enum.reduce_while(replies, {:ok, [], []}, fn
-      {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}}, {:ok, acks, lat} ->
+  defp collect_acks(replies) do
+    Enum.reduce_while(replies, {:ok, [], [], %{}}, fn
+      {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}},
+      {:ok, acks, lat, sent_at} ->
         now = System.monotonic_time(:microsecond)
+        sent_at = drain_sent(sent_at)
 
         lat =
           case Map.get(sent_at, seq) do
@@ -225,14 +245,24 @@ defmodule Conveyor.Bep.Replay do
             t0 -> [(now - t0) / 1000 | lat]
           end
 
-        {:cont, {:ok, [seq | acks], lat}}
+        {:cont, {:ok, [seq | acks], lat, sent_at}}
 
       {:error, reason}, _ ->
         {:halt, {:error, reason}}
     end)
     |> case do
-      {:ok, acks, lat} -> {:ok, {Enum.reverse(acks), Enum.reverse(lat)}}
+      {:ok, acks, lat, _} -> {:ok, {Enum.reverse(acks), Enum.reverse(lat)}}
       error -> error
+    end
+  end
+
+  # Send timestamps arrive from the sender process; the first one per sequence number
+  # wins (a duplicate resend must not shorten the measured latency).
+  defp drain_sent(sent_at) do
+    receive do
+      {:sent, seq, t0} -> drain_sent(Map.put_new(sent_at, seq, t0))
+    after
+      0 -> sent_at
     end
   end
 
