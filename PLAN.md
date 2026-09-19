@@ -604,7 +604,7 @@ bes/
 4. ~~Blob store~~ — **decided: both**; disk default for single node, S3 required for multi-node.
 5. **Projects as the top level** in v1 (recommended) vs. adding organizations above them now.
 8. **Reference hardware** for the §13.1 envelope (cloud VM type) so load-test numbers are reproducible. ~~Target platform for the multi-node example~~ — **decided: both Kubernetes and EC2 auto-scaling group**, shipped together in M7 (§13.3).
-9. **Raw event retention default**: 7 days vs 14 (storage cost at the envelope, §13.1 item 7).
+9. ~~Raw event retention default: 7 days vs 14~~ — **decided 2026-09-19: 14 days** (`RETENTION_RAW_DAYS=14`; builds themselves keep `RETENTION_DAYS`, to be shipped in M8 with the partition-drop job).
 6. **Bazel version floor** (suggest 7.x+; 6.x mostly works but lacks some metrics fields).
 7. **Two ports** (gRPC 1985 + web 4000) vs. one multiplexed port (adds complexity with Cowboy/Bandit; recommend two).
 

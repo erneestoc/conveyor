@@ -151,7 +151,7 @@ Dockerfile (release, non-root), `docker-compose.yml` (app + Postgres), `Conveyor
 2. Bazel version floor (suggest 7.x+).
    (M6 chose: open mode by default with ADMIN_TOKEN; OIDC generic, not provider-specific.)
 3. Reference hardware for the load-test envelope.
-4. Raw event retention default: 7 vs 14 days.
+4. ~~Raw event retention default: 7 vs 14 days~~ decided: 14 days (implement `RETENTION_RAW_DAYS` default 14 in M8; docs/production.md already names the knobs).
 5. Two ports (1985 gRPC, 4000 web) vs one multiplexed port — recommended two.
 (Decided: Oban; blob store both adapters; Kubernetes + EC2 ASG examples both.)
 
