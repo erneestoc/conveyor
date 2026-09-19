@@ -16,7 +16,7 @@ defmodule Conveyor.Grpc.AuthInterceptor do
 
   @impl true
   def call(req, stream, next, _opts) do
-    case authenticate(GRPC.Stream.get_headers(stream)) do
+    case authenticate(GRPC.Stream.get_headers(stream), scopes_for(stream.service_name)) do
       {:ok, ctx} ->
         next.(req, %{stream | local: Map.put(stream.local || %{}, :ctx, ctx)})
 
@@ -25,9 +25,15 @@ defmodule Conveyor.Grpc.AuthInterceptor do
     end
   end
 
+  @bes_service "google.devtools.build.v1.PublishBuildEvent"
+
+  @doc "Scopes that grant access to a gRPC service: BES needs `ingest`; the CAS sink accepts `upload` too."
+  def scopes_for(@bes_service), do: ["ingest"]
+  def scopes_for(_), do: ["ingest", "upload"]
+
   @doc "Builds the ingest context from request headers according to the configured auth mode."
-  @spec authenticate(map()) :: {:ok, Context.t()} | {:error, atom(), String.t()}
-  def authenticate(headers) do
+  @spec authenticate(map(), [String.t()]) :: {:ok, Context.t()} | {:error, atom(), String.t()}
+  def authenticate(headers, scopes \\ ["ingest"]) do
     case Conveyor.Ingest.config(:auth, :api_key) do
       :none ->
         project = default_project()
@@ -36,7 +42,7 @@ defmodule Conveyor.Grpc.AuthInterceptor do
       :api_key ->
         with {:ok, plaintext} <- extract(headers),
              {:ok, key} <- Projects.verify_api_key(plaintext),
-             true <- "ingest" in key.scopes || {:error, :scope} do
+             true <- Enum.any?(scopes, &(&1 in key.scopes)) || {:error, :scope} do
           Projects.touch_api_key(key, nil)
 
           {:ok,
@@ -63,7 +69,7 @@ defmodule Conveyor.Grpc.AuthInterceptor do
             {:error, :permission_denied, "API key has expired"}
 
           {:error, :scope} ->
-            {:error, :permission_denied, "API key lacks the ingest scope"}
+            {:error, :permission_denied, "API key lacks the #{Enum.join(scopes, " or ")} scope"}
         end
     end
   end

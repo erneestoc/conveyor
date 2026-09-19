@@ -281,9 +281,12 @@ defmodule Conveyor.Ingest.Worker do
       |> unblock()
 
     state =
-      if batch.finalize,
-        do: %{state | finalized: true} |> mark_dirty(:summary) |> start_linger(),
-        else: state
+      if batch.finalize do
+        Conveyor.Artifacts.on_finalized(state.invocation_id)
+        %{state | finalized: true} |> mark_dirty(:summary) |> start_linger()
+      else
+        state
+      end
 
     {:noreply, state}
   end

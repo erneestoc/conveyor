@@ -38,7 +38,7 @@ config :phoenix,
   sort_verified_routes_query_params: true
 
 # Tests start the gRPC server on demand with a random port.
-config :conveyor, Conveyor.Grpc, port: 0, start_server: false
+config :conveyor, Conveyor.Grpc, port: 0, start_server: false, cas_sink: true, cas_ttl_days: 1
 
 config :conveyor, Conveyor.Ingest,
   auth: :api_key,

@@ -77,8 +77,25 @@ defmodule Conveyor.Blobs do
         end
 
       true ->
-        # Unknown digest for a stream: buffer it (callers with large streams pass :digest).
-        put(content |> Enum.to_list() |> IO.iodata_to_binary(), opts)
+        # Unknown digest for a stream: spool it to a local file while hashing, then store
+        # it under the digest. Memory stays bounded whatever the upload size.
+        spool(content, opts)
+    end
+  end
+
+  defp spool(content, opts) do
+    tmp = Path.join(System.tmp_dir!(), "conveyor-spool-#{System.unique_integer([:positive])}")
+    {hashed, counter} = hashing(content)
+
+    try do
+      hashed |> Stream.into(File.stream!(tmp, 64 * 1024)) |> Stream.run()
+      {digest, size} = Agent.get(counter, & &1)
+      store(digest, File.stream!(tmp, 64 * 1024), size, opts)
+    rescue
+      e -> {:error, e}
+    after
+      Agent.stop(counter)
+      File.rm(tmp)
     end
   end
 

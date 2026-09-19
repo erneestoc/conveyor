@@ -179,6 +179,43 @@ defmodule Conveyor.Projects do
     :ok
   end
 
+  @doc """
+  Configures a remote cache endpoint (`host` or `host:port`) for artifact fetching:
+  request headers (for example `x-api-key`) and whether to use TLS. Only configured
+  hosts are ever contacted.
+  """
+  @spec put_cache_endpoint(Project.t(), String.t(), map()) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t() | :invalid_host}
+  def put_cache_endpoint(%Project{} = project, host, attrs) do
+    host = String.trim(host)
+
+    if Regex.match?(~r/^[a-z0-9.\-]+(:\d{1,5})?$/i, host) do
+      headers =
+        attrs
+        |> Map.get("headers", %{})
+        |> Enum.reject(fn {k, _} -> k == "" end)
+        |> Map.new()
+
+      endpoint = %{"headers" => headers, "tls" => Map.get(attrs, "tls", false) in [true, "true"]}
+      endpoints = Map.put(cache_endpoints(project), host, endpoint)
+
+      update_project(project, %{settings: Map.put(project.settings, "cache_endpoints", endpoints)})
+    else
+      {:error, :invalid_host}
+    end
+  end
+
+  @spec delete_cache_endpoint(Project.t(), String.t()) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
+  def delete_cache_endpoint(%Project{} = project, host) do
+    endpoints = Map.delete(cache_endpoints(project), host)
+    update_project(project, %{settings: Map.put(project.settings, "cache_endpoints", endpoints)})
+  end
+
+  @spec cache_endpoints(Project.t()) :: %{String.t() => map()}
+  def cache_endpoints(%Project{settings: settings}),
+    do: Map.get(settings || %{}, "cache_endpoints", %{})
+
   @doc "Keys expiring within `days` days (for the settings page and alerting)."
   @spec expiring_api_keys(pos_integer()) :: [ApiKey.t()]
   def expiring_api_keys(days \\ 7) do

@@ -65,6 +65,22 @@ defmodule Conveyor.Grpc.AuthInterceptorTest do
     assert msg =~ "scope"
   end
 
+  test "scopes depend on the service", %{project: project} do
+    {:ok, _, upload_key} = Projects.create_api_key(project, %{name: "u", scopes: ["upload"]})
+    assert AuthInterceptor.scopes_for("google.devtools.build.v1.PublishBuildEvent") == ["ingest"]
+    assert AuthInterceptor.scopes_for("google.bytestream.ByteStream") == ["ingest", "upload"]
+
+    assert {:error, :permission_denied, msg} =
+             AuthInterceptor.authenticate(%{"x-api-key" => upload_key})
+
+    assert msg =~ "ingest scope"
+
+    assert {:ok, %{project_id: id}} =
+             AuthInterceptor.authenticate(%{"x-api-key" => upload_key}, ["ingest", "upload"])
+
+    assert id == project.id
+  end
+
   test "open mode maps everything to the default project", %{previous: previous} do
     Application.put_env(:conveyor, Conveyor.Ingest, Keyword.put(previous, :auth, :none))
     :persistent_term.erase({AuthInterceptor, :default_project})

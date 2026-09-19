@@ -89,6 +89,35 @@ defmodule ConveyorWeb.SettingsLive do
 
   def handle_event("dismiss_key", _params, socket), do: {:noreply, assign(socket, new_key: nil)}
 
+  def handle_event("put_cache_endpoint", %{"endpoint" => attrs}, socket) do
+    project = Projects.get_project!(attrs["project_id"])
+
+    headers =
+      if attrs["header_name"] in [nil, ""],
+        do: %{},
+        else: %{attrs["header_name"] => attrs["header_value"] || ""}
+
+    case Projects.put_cache_endpoint(project, attrs["host"] || "", %{
+           "headers" => headers,
+           "tls" => attrs["tls"] == "true"
+         }) do
+      {:ok, _} ->
+        {:noreply, socket |> put_flash(:info, "Cache endpoint saved") |> reload()}
+
+      {:error, :invalid_host} ->
+        {:noreply,
+         put_flash(socket, :error, "Cache endpoint host must look like host or host:port")}
+
+      {:error, _changeset} ->
+        {:noreply, put_flash(socket, :error, "Could not save the cache endpoint")}
+    end
+  end
+
+  def handle_event("delete_cache_endpoint", %{"project_id" => project_id, "host" => host}, socket) do
+    {:ok, _} = project_id |> Projects.get_project!() |> Projects.delete_cache_endpoint(host)
+    {:noreply, socket |> put_flash(:info, "Cache endpoint removed") |> reload()}
+  end
+
   # "ci=true, team=infra" → %{"ci" => "true", "team" => "infra"}
   defp parse_tags(string) when is_binary(string) do
     string
@@ -247,6 +276,74 @@ defmodule ConveyorWeb.SettingsLive do
           />
           <.button variant="primary">Create key</.button>
         </.form>
+
+        <div id={"cache-endpoints-#{project.id}"} class="mt-4 border-t border-base-300/60 pt-3">
+          <h3 class="text-xs font-semibold">Remote cache endpoints</h3>
+          <p class="text-[11px] text-base-content/60">
+            Hosts Conveyor may contact to fetch profiles and test logs referenced as
+            <code class="font-mono">bytestream://</code>
+            URIs, with the headers your <code class="font-mono">--remote_header</code>
+            flags carry. Nothing else is ever dialled.
+          </p>
+          <table :if={Projects.cache_endpoints(project) != %{}} class="mt-2 w-full text-xs">
+            <tbody class="divide-y divide-base-300/60">
+              <tr
+                :for={{host, endpoint} <- Enum.sort(Projects.cache_endpoints(project))}
+                id={"cache-endpoint-#{project.id}-#{String.replace(host, ~r/[^a-zA-Z0-9]/, "-")}"}
+              >
+                <td class="py-1 font-mono">{host}</td>
+                <td class="py-1">{if endpoint["tls"], do: "TLS", else: "plaintext"}</td>
+                <td class="py-1 font-mono text-base-content/60">
+                  {Enum.map_join(endpoint["headers"] || %{}, " ", fn {k, _} -> "#{k}=••••" end)}
+                </td>
+                <td class="py-1 text-right">
+                  <button
+                    type="button"
+                    phx-click="delete_cache_endpoint"
+                    phx-value-project_id={project.id}
+                    phx-value-host={host}
+                    class="text-rose-600 hover:underline dark:text-rose-400"
+                  >Remove</button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <form
+            id={"cache-endpoint-form-#{project.id}"}
+            phx-submit="put_cache_endpoint"
+            class="mt-2 flex flex-wrap items-end gap-2 text-xs"
+          >
+            <input type="hidden" name="endpoint[project_id]" value={project.id} />
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Host[:port]</span>
+              <input
+                name="endpoint[host]"
+                placeholder="cache.example.com:443"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Header</span>
+              <input
+                name="endpoint[header_name]"
+                placeholder="x-api-key"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Value</span>
+              <input
+                name="endpoint[header_value]"
+                type="password"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <label class="flex items-center gap-1 pb-1">
+              <input type="checkbox" name="endpoint[tls]" value="true" checked /> TLS
+            </label>
+            <.button variant="primary">Save endpoint</.button>
+          </form>
+        </div>
       </section>
 
       <section id="new-project" class="rounded-md border border-base-300 p-4">

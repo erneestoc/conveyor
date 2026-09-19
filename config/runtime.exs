@@ -76,6 +76,14 @@ if config_env() == :prod do
 
   config :conveyor, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  config :conveyor, Conveyor.Grpc,
+    port: String.to_integer(System.get_env("GRPC_PORT", "1985")),
+    cas_sink: System.get_env("CAS_SINK_ENABLED") in ~w(true 1),
+    cas_ttl_days: String.to_integer(System.get_env("CAS_TTL_DAYS", "14"))
+
+  config :conveyor, Conveyor.Artifacts,
+    max_bytes: String.to_integer(System.get_env("ARTIFACT_MAX_MB", "512")) * 1024 * 1024
+
   # Blob store: BLOB_STORE=disk (default, BLOB_DIR) or s3 (required when clustered).
   case System.get_env("BLOB_STORE", "disk") do
     "s3" ->

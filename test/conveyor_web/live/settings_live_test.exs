@@ -64,4 +64,42 @@ defmodule ConveyorWeb.SettingsLiveTest do
     refute has_element?(view, "#project-#{payments.id}")
     assert has_element?(view, "#nav-settings")
   end
+
+  test "remote cache endpoints can be added and removed", %{conn: conn, project: project} do
+    {:ok, view, _} = live(conn, ~p"/settings")
+
+    view
+    |> form("#cache-endpoint-form-#{project.id}",
+      endpoint: %{host: "bad host", header_name: "", header_value: ""}
+    )
+    |> render_submit()
+
+    assert render(view) =~ "must look like host or host:port"
+
+    view
+    |> form("#cache-endpoint-form-#{project.id}",
+      endpoint: %{
+        host: "cache.example.com:443",
+        header_name: "x-api-key",
+        header_value: "s3cret",
+        tls: "true"
+      }
+    )
+    |> render_submit()
+
+    html = render(view)
+    assert has_element?(view, "#cache-endpoint-#{project.id}-cache-example-com-443")
+    assert html =~ "x-api-key=••••"
+    refute html =~ "s3cret"
+
+    assert %{"cache.example.com:443" => %{"headers" => %{"x-api-key" => "s3cret"}, "tls" => true}} =
+             Projects.cache_endpoints(Projects.get_project!(project.id))
+
+    view
+    |> element("#cache-endpoint-#{project.id}-cache-example-com-443 button", "Remove")
+    |> render_click()
+
+    refute has_element?(view, "#cache-endpoint-#{project.id}-cache-example-com-443")
+    assert Projects.cache_endpoints(Projects.get_project!(project.id)) == %{}
+  end
 end

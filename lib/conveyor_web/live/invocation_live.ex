@@ -210,6 +210,10 @@ defmodule ConveyorWeb.InvocationLive do
     {:noreply, socket}
   end
 
+  def handle_info({:artifacts_changed, id}, socket) do
+    {:noreply, assign(socket, invocation: Conveyor.Invocations.get!(id))}
+  end
+
   def handle_info({:log_chunks, chunks}, socket) do
     {:noreply, push_event(socket, "log:append", %{text: IO.iodata_to_binary(chunks)})}
   end

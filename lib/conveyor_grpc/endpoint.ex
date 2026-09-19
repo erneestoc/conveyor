@@ -5,4 +5,5 @@ defmodule Conveyor.Grpc.Endpoint do
   intercept(GRPC.Server.Interceptors.Logger, level: :debug)
   intercept Conveyor.Grpc.AuthInterceptor
   run(Conveyor.Grpc.PublishBuildEventServer)
+  run(Conveyor.Grpc.ByteStreamServer)
 end

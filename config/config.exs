@@ -35,7 +35,15 @@ config :conveyor, Oban,
   ]
 
 # BES gRPC listener (Bazel's --bes_backend target)
-config :conveyor, Conveyor.Grpc, port: 1985, start_server: true
+config :conveyor, Conveyor.Grpc,
+  port: 1985,
+  start_server: true,
+  # Built-in remote cache sink (ByteStream Write + CAS) so Bazel can upload BEP files here
+  cas_sink: false,
+  cas_ttl_days: 14
+
+# Artifact fetching (profiles, test logs) from remote caches
+config :conveyor, Conveyor.Artifacts, max_bytes: 512 * 1024 * 1024
 
 config :conveyor, ConveyorWeb.Endpoint,
   url: [host: "localhost"],
