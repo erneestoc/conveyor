@@ -2,11 +2,12 @@ defmodule Conveyor.Ingest.Scrub do
   @moduledoc """
   Removes credentials from BEP events before they are persisted.
 
-  Bazel echoes its command line (including `--bes_header=x-api-key=...` and
-  `--remote_header=...`) into `UnstructuredCommandLine`, `StructuredCommandLine`,
-  `OptionsParsed`, `BuildStarted.options_description` and the progress log. Those values
-  are rewritten to `<redacted>` in the decoded event, and the caller stores the
-  re-encoded bytes, so no secret reaches the database.
+  Bazel echoes its command line (including `--bes_header=x-api-key=...`,
+  `--remote_header=...` and the whole client environment as `--client_env=NAME=VALUE`)
+  into `UnstructuredCommandLine`, `StructuredCommandLine`, `OptionsParsed`,
+  `BuildStarted.options_description` and the progress log. Those values are rewritten to
+  `<redacted>` in the decoded event, and the caller stores the re-encoded bytes, so no
+  secret reaches the database.
   """
 
   alias BuildEventStream.BuildEvent, as: BepEvent
@@ -18,6 +19,10 @@ defmodule Conveyor.Ingest.Scrub do
   @url_cred_re ~r{(://)[^/@\s:]+:[^/@\s]+@}
   @generic_re ~r/((?:token|secret|password|passwd|api[_-]?key|authorization)=)([^\s&"']+)/i
   @bearer_re ~r/(Bearer\s+)[A-Za-z0-9\-._~+\/]+=*/i
+  # Environment variables Bazel copies into the command line (`--client_env=NAME=VALUE`,
+  # `--action_env`, `--test_env`, `--repo_env`) and bare `NAME=VALUE` option values whose
+  # name says it holds a credential: AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, NPM_AUTH, ...
+  @env_re ~r/(\b[A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|ACCESS_KEY|API_KEY|APIKEY|AUTH)[A-Za-z0-9_]*=)([^\s"']+)/i
 
   @doc "Scrubs one string."
   @spec text(String.t() | nil) :: String.t() | nil
@@ -29,6 +34,7 @@ defmodule Conveyor.Ingest.Scrub do
     |> then(&Regex.replace(@url_cred_re, &1, "\\1#{@redacted}@"))
     |> then(&Regex.replace(@generic_re, &1, "\\1#{@redacted}"))
     |> then(&Regex.replace(@bearer_re, &1, "\\1#{@redacted}"))
+    |> then(&Regex.replace(@env_re, &1, "\\1#{@redacted}"))
   end
 
   @doc "Scrubs a list of strings (command line arguments)."

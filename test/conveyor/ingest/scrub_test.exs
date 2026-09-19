@@ -25,6 +25,22 @@ defmodule Conveyor.Ingest.ScrubTest do
     assert Scrub.text(nil) == nil
   end
 
+  test "redacts credential-like environment variables Bazel copies into the command line" do
+    assert Scrub.text("--client_env=AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG") ==
+             "--client_env=AWS_SECRET_ACCESS_KEY=<redacted>"
+
+    assert Scrub.text("AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE") == "AWS_ACCESS_KEY_ID=<redacted>"
+
+    assert Scrub.text("--action_env=GITHUB_TOKEN=ghp_abc --test_env=npm_auth_token=x") ==
+             "--action_env=GITHUB_TOKEN=<redacted> --test_env=npm_auth_token=<redacted>"
+
+    assert Scrub.text("--repo_env=DB_PASSWORD=hunter2 --client_env=PATH=/usr/bin:/bin") ==
+             "--repo_env=DB_PASSWORD=<redacted> --client_env=PATH=/usr/bin:/bin"
+
+    assert Scrub.text("--build_metadata=USER=alice --client_env=HOME=/Users/alice") ==
+             "--build_metadata=USER=alice --client_env=HOME=/Users/alice"
+  end
+
   test "scrubs every command-line carrying payload and reports whether it changed" do
     secret = "--bes_header=x-api-key=conveyor_k_s3cret"
 
