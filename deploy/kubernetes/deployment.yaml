@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: conveyor
+  namespace: conveyor
+spec:
+  replicas: 3
+  selector:
+    matchLabels: { app: conveyor }
+  strategy:
+    rollingUpdate: { maxSurge: 1, maxUnavailable: 0 }
+  template:
+    metadata:
+      labels: { app: conveyor }
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "4000"
+        prometheus.io/path: /metrics
+    spec:
+      terminationGracePeriodSeconds: 60
+      serviceAccountName: default
+      containers:
+        - name: conveyor
+          image: ghcr.io/example/conveyor:0.1.0
+          ports:
+            - { name: http, containerPort: 4000 }
+            - { name: grpc, containerPort: 1985 }
+            - { name: epmd, containerPort: 4369 }
+            - { name: dist, containerPort: 9100 }
+          envFrom:
+            - configMapRef: { name: conveyor }
+            - secretRef: { name: conveyor }
+          env:
+            - name: POD_IP
+              valueFrom: { fieldRef: { fieldPath: status.podIP } }
+            - name: AWS_REGION
+              value: us-east-1
+          readinessProbe:
+            httpGet: { path: /health/ready, port: http }
+            periodSeconds: 5
+            failureThreshold: 2
+          livenessProbe:
+            httpGet: { path: /health/live, port: http }
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            # Let endpoints propagate the readiness change before SIGTERM arrives.
+            preStop:
+              exec: { command: ["sh", "-c", "sleep 5"] }
+          resources:
+            requests: { cpu: "1", memory: 1Gi }
+            limits: { cpu: "4", memory: 4Gi }

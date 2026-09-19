@@ -1,0 +1,35 @@
+# Single-node Conveyor with PostgreSQL. `docker compose up`, then open http://localhost:4000,
+# create a project + API key in Settings, and point Bazel at grpc://localhost:1985.
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: conveyor
+      POSTGRES_PASSWORD: conveyor
+      POSTGRES_DB: conveyor
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U conveyor"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  conveyor:
+    build: .
+    image: conveyor:0.1.0
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: ecto://conveyor:conveyor@db/conveyor
+      SECRET_KEY_BASE: change-me-to-64-random-bytes-generated-with-mix-phx-gen-secret-xxxxxxxxxxxxxxxx
+      PHX_HOST: localhost
+      PORT: "4000"
+      GRPC_PORT: "1985"
+      AUTH_MODE: open
+      ADMIN_TOKEN: change-me
+      CAS_SINK_ENABLED: "true"
+      BLOB_DIR: /var/lib/conveyor/blobs
+    volumes: ["blobs:/var/lib/conveyor/blobs"]
+    ports: ["4000:4000", "1985:1985"]
+volumes:
+  pgdata: {}
+  blobs: {}

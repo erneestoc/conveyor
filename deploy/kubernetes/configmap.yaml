@@ -1,0 +1,25 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: conveyor
+  namespace: conveyor
+data:
+  PHX_HOST: conveyor.example.com
+  PORT: "4000"
+  GRPC_PORT: "1985"
+  FORCE_SSL: "false"            # TLS terminates at the ingress / balancer
+  AUTH_MODE: oidc
+  OIDC_ISSUER: https://login.example.com
+  OIDC_CLIENT_ID: conveyor
+  ADMIN_EMAILS: platform-lead@example.com
+  OIDC_ADMIN_GROUPS: platform
+  CAS_SINK_ENABLED: "true"
+  BLOB_STORE: s3
+  S3_BUCKET: conveyor-blobs
+  S3_REGION: us-east-1
+  CLUSTER_STRATEGY: k8s
+  CLUSTER_K8S_SERVICE: conveyor-headless
+  CLUSTER_NODE_BASENAME: conveyor
+  SHUTDOWN_DRAIN_SECONDS: "45"
+  POOL_SIZE: "40"
+  MAX_STREAMS_PER_KEY: "500"

@@ -1,0 +1,39 @@
+# ingress-nginx: HTTPS for the UI and gRPC (HTTP/2) for Bazel on a second host.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: conveyor-web
+  namespace: conveyor
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [conveyor.example.com], secretName: conveyor-web-tls }]
+  rules:
+    - host: conveyor.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: conveyor, port: { name: http } } }
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: conveyor-grpc
+  namespace: conveyor
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt
+    nginx.ingress.kubernetes.io/backend-protocol: GRPC
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-body-size: 64m
+spec:
+  ingressClassName: nginx
+  tls: [{ hosts: [bes.example.com], secretName: conveyor-grpc-tls }]
+  rules:
+    - host: bes.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend: { service: { name: conveyor, port: { name: grpc } } }
