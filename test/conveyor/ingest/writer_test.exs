@@ -113,6 +113,62 @@ defmodule Conveyor.Ingest.WriterTest do
     assert Process.alive?(GenServer.whereis(writer))
   end
 
+  test "two batches of one invocation in a group merge into one row per table", %{
+    id: id,
+    project: project
+  } do
+    first =
+      batch(id, project, 1, fn b ->
+        b
+        |> Batch.add_event(1, "started", "x")
+        |> Batch.upsert_target({"//a", ""}, %{label: "//a", kind: "rule", status: "configured"})
+        |> Batch.upsert_test({"//a", "", 1, 1, 1}, %{
+          label: "//a",
+          run: 1,
+          shard: 1,
+          attempt: 1,
+          status: "PASSED"
+        })
+        |> Batch.put_metrics(%{tool_logs: %{"a" => "b"}})
+        |> Batch.count_tags(%{"k" => "v"})
+      end)
+
+    second =
+      batch(id, project, 2, fn b ->
+        b
+        |> Batch.add_event(2, "completed", "y")
+        |> Batch.upsert_target({"//a", ""}, %{label: "//a", status: "success"})
+        |> Batch.upsert_test({"//a", "", 1, 1, 1}, %{
+          label: "//a",
+          run: 1,
+          shard: 1,
+          attempt: 1,
+          duration_ms: 7
+        })
+        |> Batch.put_metrics(%{build_metrics: %{"c" => 1}})
+        |> Batch.count_tags(%{"k" => "v"})
+      end)
+
+    # Both are pending before the first flush, so they land in the same group commit.
+    writer = WriterPool.for_invocation(id)
+    Writer.submit(writer, first)
+    Writer.submit(writer, second)
+    first_ref = first.ref
+    second_ref = second.ref
+    assert_receive {:batch_committed, ^first_ref}, 2_000
+    assert_receive {:batch_committed, ^second_ref}, 2_000
+
+    assert Repo.get!(Invocation, id).last_event_seq == 2
+    assert [%{kind: "rule", status: "success"}] = Conveyor.Invocations.targets(id)
+    assert [%{status: "PASSED", duration_ms: 7}] = Conveyor.Invocations.test_results(id)
+
+    assert %{tool_logs: %{"a" => "b"}, build_metrics: %{"c" => 1}} =
+             Conveyor.Invocations.metrics(id)
+
+    assert [%{count: 2}] = Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k")
+    assert Conveyor.Invocations.raw_frames(Repo.get!(Invocation, id)) == ["x", "y"]
+  end
+
   @tag :capture_log
   test "a failed tag count after the group commit does not fail the batch", %{id: id} do
     # project_id nil violates NOT NULL on tag_keys only; the batch itself commits first.

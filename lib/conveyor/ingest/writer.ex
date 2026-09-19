@@ -4,6 +4,10 @@ defmodule Conveyor.Ingest.Writer do
   queue is large) the writer commits all pending batches from many invocations in one
   transaction and notifies each submitter. If the group fails, batches are retried one by
   one so a single fenced invocation cannot block the others.
+
+  Inside the transaction the group is written table by table: one statement per table and
+  column set for segments, targets, tests, actions, named sets and metrics, then one fenced
+  invocation update per batch. Round trips grow with the number of tables, not batches.
   """
   use GenServer
 
@@ -36,6 +40,8 @@ defmodule Conveyor.Ingest.Writer do
   end
 
   @max_pending 64
+  @target_key [:invocation_id, :label, :aspect]
+  @test_key [:invocation_id, :label, :configuration_id, :run, :shard, :attempt]
 
   def start_link(opts),
     do: GenServer.start_link(__MODULE__, opts, name: name(Keyword.fetch!(opts, :shard)))
@@ -109,31 +115,12 @@ defmodule Conveyor.Ingest.Writer do
   # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
   defp commit_group(pending) do
     batches = Enum.map(pending, &elem(&1, 0))
-    # Segments are the bulk of every commit: compress them outside the transaction and
-    # write the whole group's rows with one statement per table.
-    event_rows = batches |> Enum.map(&Batch.event_segment_row/1) |> Enum.reject(&is_nil/1)
-    log_rows = batches |> Enum.map(&Batch.log_segment_row/1) |> Enum.reject(&is_nil/1)
-    # Tag counts are rows shared by every invocation of a project. Updating them inside the
-    # group transaction made every shard queue on the same row locks for the whole commit
-    # (measured: >90 % of active backends waiting on tag_keys), so they are merged across the
-    # group and applied in one short statement after the commit.
-    tag_rows = tag_key_rows(batches)
+    plan = plan(batches)
 
     result =
       Retry.with_backoff(
         fn ->
-          case Repo.transaction(
-                 fn ->
-                   if event_rows != [],
-                     do: Repo.insert_all(EventSegment, event_rows, on_conflict: :nothing)
-
-                   if log_rows != [],
-                     do: Repo.insert_all(LogSegment, log_rows, on_conflict: :nothing)
-
-                   Enum.each(batches, &apply_batch!(&1, segments: false, tag_keys: false))
-                 end,
-                 timeout: 60_000
-               ) do
+          case Repo.transaction(fn -> apply_plan!(plan, batches) end, timeout: 60_000) do
             {:ok, _} -> :ok
             {:error, reason} -> {:error, reason}
           end
@@ -141,16 +128,28 @@ defmodule Conveyor.Ingest.Writer do
         label: "writer group commit"
       )
 
-    if result == :ok, do: count_tag_keys(tag_rows)
+    # Tag counts are rows shared by every invocation of a project. Updating them inside the
+    # group transaction made every shard queue on the same row locks for the whole commit
+    # (measured: >90 % of active backends waiting on tag_keys), so they are applied in one
+    # short statement after the commit.
+    if result == :ok, do: count_tag_keys(plan.tag_rows)
     result
   rescue
     e -> {:error, e}
   end
 
   defp commit_single(batch) do
+    plan = plan([batch])
+
     Retry.with_backoff(
       fn ->
-        case Repo.transaction(fn -> apply_batch!(batch) end, timeout: 60_000) do
+        case Repo.transaction(
+               fn ->
+                 apply_plan!(plan, [batch])
+                 count_tag_keys!(plan.tag_rows)
+               end,
+               timeout: 60_000
+             ) do
           {:ok, _} -> :ok
           {:error, reason} -> {:error, reason}
         end
@@ -170,80 +169,95 @@ defmodule Conveyor.Ingest.Writer do
   end
 
   @doc """
-  Applies one batch inside the current transaction. Raises on failure. `segments: false`
-  and `tag_keys: false` skip parts the group commit writes for all batches at once.
+  The rows every table receives for a group of batches, merged across the batches. Pure and
+  computed outside the transaction (segment compression happens here).
   """
-  @spec apply_batch!(Batch.t(), keyword()) :: :ok
-  def apply_batch!(%Batch{} = b, opts \\ []) do
-    if Keyword.get(opts, :segments, true) do
-      if row = Batch.event_segment_row(b),
-        do: Repo.insert_all(EventSegment, [row], on_conflict: :nothing)
+  @spec plan([Batch.t()]) :: map()
+  def plan(batches) do
+    now = DateTime.utc_now()
 
-      if row = Batch.log_segment_row(b),
-        do: Repo.insert_all(LogSegment, [row], on_conflict: :nothing)
-    end
+    %{
+      event_rows: batches |> Enum.map(&Batch.event_segment_row/1) |> Enum.reject(&is_nil/1),
+      log_rows: batches |> Enum.map(&Batch.log_segment_row/1) |> Enum.reject(&is_nil/1),
+      targets: merged_rows(batches, :targets),
+      tests: merged_rows(batches, :tests),
+      actions: flat_rows(batches, :actions),
+      named_sets: flat_rows(batches, :named_sets),
+      metrics: metrics_rows(batches, now),
+      tag_rows: tag_key_rows(batches, now)
+    }
+  end
 
-    upsert_grouped(Target, b.invocation_id, Map.values(b.targets), [
-      :invocation_id,
-      :label,
-      :aspect
-    ])
+  # Writes a planned group inside the current transaction, ending with one fenced update per
+  # batch in submission order. Raises on failure.
+  defp apply_plan!(plan, batches) do
+    if plan.event_rows != [],
+      do: Repo.insert_all(EventSegment, plan.event_rows, on_conflict: :nothing)
 
-    upsert_grouped(TestResult, b.invocation_id, Map.values(b.tests), [
-      :invocation_id,
-      :label,
-      :configuration_id,
-      :run,
-      :shard,
-      :attempt
-    ])
+    if plan.log_rows != [], do: Repo.insert_all(LogSegment, plan.log_rows, on_conflict: :nothing)
+    upsert_grouped(Target, plan.targets, @target_key)
+    upsert_grouped(TestResult, plan.tests, @test_key)
 
-    if b.actions != [] do
-      rows =
-        b.actions |> Enum.reverse() |> Enum.map(&Map.put(&1, :invocation_id, b.invocation_id))
+    if plan.actions != [],
+      do:
+        Repo.insert_all(Action, plan.actions,
+          on_conflict: :nothing,
+          conflict_target: [:invocation_id, :seq]
+        )
 
-      Repo.insert_all(Action, rows,
-        on_conflict: :nothing,
-        conflict_target: [:invocation_id, :seq]
-      )
-    end
+    if plan.named_sets != [],
+      do:
+        Repo.insert_all(NamedSet, plan.named_sets,
+          on_conflict: :nothing,
+          conflict_target: [:invocation_id, :set_id]
+        )
 
-    if b.named_sets != [] do
-      rows =
-        b.named_sets |> Enum.reverse() |> Enum.map(&Map.put(&1, :invocation_id, b.invocation_id))
-
-      Repo.insert_all(NamedSet, rows,
-        on_conflict: :nothing,
-        conflict_target: [:invocation_id, :set_id]
-      )
-    end
-
-    if b.metrics do
-      now = DateTime.utc_now()
-
-      row =
-        b.metrics
-        |> Map.merge(%{invocation_id: b.invocation_id, inserted_at: now, updated_at: now})
-
-      replace = Map.keys(b.metrics) ++ [:updated_at]
-
-      Repo.insert_all(Metrics, [row],
-        on_conflict: {:replace, replace},
-        conflict_target: [:invocation_id]
-      )
-    end
-
-    if Keyword.get(opts, :tag_keys, true), do: count_tag_keys!(tag_key_rows([b]))
-
-    update_invocation!(b)
+    upsert_grouped(Metrics, plan.metrics, [:invocation_id], [:inserted_at])
+    Enum.each(batches, &update_invocation!/1)
     :ok
+  end
+
+  # Keyed rows (targets, tests) merged per invocation and key, later batches over earlier
+  # ones: one upsert must not touch the same row twice, and the result must equal applying
+  # the batches in order.
+  defp merged_rows(batches, field) do
+    batches
+    |> Enum.reduce(%{}, fn b, acc ->
+      Enum.reduce(Map.fetch!(b, field), acc, fn {key, attrs}, acc ->
+        Map.update(
+          acc,
+          {b.invocation_id, key},
+          Map.put(attrs, :invocation_id, b.invocation_id),
+          &Map.merge(&1, attrs)
+        )
+      end)
+    end)
+    |> Map.values()
+  end
+
+  defp flat_rows(batches, field) do
+    Enum.flat_map(batches, fn b ->
+      b
+      |> Map.fetch!(field)
+      |> Enum.reverse()
+      |> Enum.map(&Map.put(&1, :invocation_id, b.invocation_id))
+    end)
+  end
+
+  defp metrics_rows(batches, now) do
+    batches
+    |> Enum.reduce(%{}, fn
+      %{metrics: nil}, acc -> acc
+      b, acc -> Map.update(acc, b.invocation_id, b.metrics, &Map.merge(&1, b.metrics))
+    end)
+    |> Enum.map(fn {id, metrics} ->
+      Map.merge(metrics, %{invocation_id: id, inserted_at: now, updated_at: now})
+    end)
   end
 
   # One tag_keys upsert for a whole group: counts merged per (project, key, value) and rows
   # sorted so concurrent statements lock them in the same order (no deadlocks).
-  defp tag_key_rows(batches) do
-    now = DateTime.utc_now()
-
+  defp tag_key_rows(batches, now) do
     batches
     |> Enum.reduce(%{}, fn b, acc ->
       Enum.reduce(b.tag_keys, acc, fn {{k, v}, n}, acc ->
@@ -307,14 +321,16 @@ defmodule Conveyor.Ingest.Writer do
 
   # Rows in one insert_all must share a key set, so group by the fields present and
   # replace exactly those on conflict: partial updates without reading current rows.
-  defp upsert_grouped(_schema, _invocation_id, [], _conflict_target), do: :ok
+  # `keep` columns are written on insert but never replaced.
+  defp upsert_grouped(schema, rows, conflict_target, keep \\ [])
 
-  defp upsert_grouped(schema, invocation_id, rows, conflict_target) do
+  defp upsert_grouped(_schema, [], _conflict_target, _keep), do: :ok
+
+  defp upsert_grouped(schema, rows, conflict_target, keep) do
     rows
-    |> Enum.map(&Map.put(&1, :invocation_id, invocation_id))
     |> Enum.group_by(&(&1 |> Map.keys() |> Enum.sort()))
     |> Enum.each(fn {keys, group} ->
-      replace = keys -- conflict_target
+      replace = (keys -- conflict_target) -- keep
       on_conflict = if replace == [], do: :nothing, else: {:replace, replace}
       Repo.insert_all(schema, group, on_conflict: on_conflict, conflict_target: conflict_target)
     end)
