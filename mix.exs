@@ -14,7 +14,10 @@ defmodule Conveyor.MixProject do
       listeners: [Phoenix.CodeReloader],
       test_coverage: [tool: ExCoveralls],
       # `mix escript.build` produces ./bes_loadgen, a standalone load generator (M7).
-      escript: [main_module: Conveyor.Loadgen.CLI, name: "bes_loadgen", app: nil]
+      escript: [main_module: Conveyor.Loadgen.CLI, name: "bes_loadgen", app: nil],
+      releases: [
+        conveyor: [include_executables_for: [:unix], applications: [runtime_tools: :permanent]]
+      ]
     ]
   end
 
@@ -78,7 +81,8 @@ defmodule Conveyor.MixProject do
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
-      {:dns_cluster, "~> 0.2.0"},
+      # Multi-node (M7): cluster formation for Kubernetes, DNS and EC2 auto-scaling groups
+      {:libcluster, "~> 3.5"},
       {:bandit, "~> 1.5"},
       # gRPC (BES ingest) and protobuf
       {:grpc_server, "~> 1.0"},

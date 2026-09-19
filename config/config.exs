@@ -98,6 +98,9 @@ config :phoenix, :json_library, Jason
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
 
+# Cluster formation (see Conveyor.Cluster); runtime.exs reads CLUSTER_* in prod
+config :conveyor, Conveyor.Cluster, strategy: :none, node_basename: "conveyor"
+
 # Per-key ingest limits (see Conveyor.Limits); runtime.exs reads MAX_* in prod
 config :conveyor, Conveyor.Limits,
   max_streams_per_key: 200,

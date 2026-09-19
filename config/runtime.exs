@@ -74,7 +74,44 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
-  config :conveyor, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
+  # Ingest tuning (see Conveyor.Ingest and PLAN §13); defaults are in config.exs.
+  ingest_env = fn var, key ->
+    case System.get_env(var) do
+      nil -> []
+      v -> [{key, String.to_integer(v)}]
+    end
+  end
+
+  config :conveyor,
+         Conveyor.Ingest,
+         Enum.concat([
+           ingest_env.("INGEST_WRITER_SHARDS", :writer_shards),
+           ingest_env.("INGEST_WRITER_FLUSH_MS", :writer_flush_ms),
+           ingest_env.("INGEST_BATCH_FLUSH_MS", :batch_flush_ms),
+           ingest_env.("INGEST_BATCH_MAX_EVENTS", :batch_max_events),
+           ingest_env.("INGEST_MAX_UNACKED_EVENTS", :max_unacked_events),
+           ingest_env.("INGEST_IDLE_TIMEOUT_MS", :idle_timeout_ms),
+           ingest_env.("INGEST_LINGER_MS", :linger_ms),
+           [
+             auth:
+               if(System.get_env("BES_INGEST_AUTH", "api_key") == "none",
+                 do: :none,
+                 else: :api_key
+               )
+           ]
+         ])
+
+  # Multi-node: CLUSTER_STRATEGY=none|k8s|dns|ec2|epmd (see Conveyor.Cluster)
+  config :conveyor, Conveyor.Cluster,
+    strategy: System.get_env("CLUSTER_STRATEGY", "none") |> String.to_atom(),
+    node_basename: System.get_env("CLUSTER_NODE_BASENAME", "conveyor"),
+    k8s_service: System.get_env("CLUSTER_K8S_SERVICE"),
+    dns_query: System.get_env("CLUSTER_DNS_QUERY"),
+    ec2_tag: System.get_env("CLUSTER_EC2_TAG", "conveyor-cluster"),
+    ec2_tag_value: System.get_env("CLUSTER_EC2_TAG_VALUE"),
+    region: System.get_env("AWS_REGION"),
+    hosts: Conveyor.Cluster.parse_hosts(System.get_env("CLUSTER_HOSTS")),
+    polling_interval: String.to_integer(System.get_env("CLUSTER_POLL_MS", "5000"))
 
   config :conveyor, Conveyor.Grpc,
     port: String.to_integer(System.get_env("GRPC_PORT", "1985")),
@@ -95,6 +132,10 @@ if config_env() == :prod do
     config :conveyor, ConveyorWeb.Endpoint,
       force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true, host: nil]
   end
+
+  config :conveyor,
+         :shutdown_drain_seconds,
+         String.to_integer(System.get_env("SHUTDOWN_DRAIN_SECONDS", "30"))
 
   # Prometheus scrape endpoint (/metrics); METRICS_TOKEN protects it when set.
   config :conveyor, :metrics_token, System.get_env("METRICS_TOKEN")

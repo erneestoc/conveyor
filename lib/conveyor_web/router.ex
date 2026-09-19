@@ -53,6 +53,8 @@ defmodule ConveyorWeb.Router do
   scope "/", ConveyorWeb do
     pipe_through :api
     get "/metrics", MetricsController, :index
+    get "/health/live", HealthController, :live
+    get "/health/ready", HealthController, :ready
   end
 
   pipeline :api_upload do

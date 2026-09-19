@@ -16,6 +16,10 @@ defmodule Conveyor.Grpc.AuthInterceptor do
 
   @impl true
   def call(req, stream, next, _opts) do
+    if Conveyor.Drain.draining?() and stream.method_name == "PublishBuildToolEventStream" do
+      raise GRPC.RPCError, status: :unavailable, message: "this node is draining; retry another"
+    end
+
     case authenticate(GRPC.Stream.get_headers(stream), scopes_for(stream.service_name)) do
       {:ok, ctx} ->
         next.(req, %{stream | local: Map.put(stream.local || %{}, :ctx, ctx)})

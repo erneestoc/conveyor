@@ -11,8 +11,9 @@ defmodule Conveyor.Application do
       ConveyorWeb.Telemetry,
       Conveyor.Repo,
       {Oban, Application.fetch_env!(:conveyor, Oban)},
-      {Task, &Conveyor.Storage.boot/0},
-      {DNSCluster, query: Application.get_env(:conveyor, :dns_cluster_query) || :ignore},
+      Supervisor.child_spec({Task, &Conveyor.Storage.boot/0}, id: :storage_boot),
+      Supervisor.child_spec({Task, &Conveyor.Cluster.check!/0}, id: :cluster_check),
+      {Cluster.Supervisor, [Conveyor.Cluster.topologies(), [name: Conveyor.ClusterSupervisor]]},
       {Phoenix.PubSub, name: Conveyor.PubSub},
       Conveyor.Projects.ApiKeyCache,
       Conveyor.Limits,
@@ -42,6 +43,13 @@ defmodule Conveyor.Application do
       # Bazel can send multi-megabyte NamedSetOfFiles and progress chunks.
       max_body_size: Keyword.get(conf, :max_body_size, 64 * 1024 * 1024)
     ]
+  end
+
+  # SIGTERM: stop taking new streams, let balancers notice, finish open streams, then stop.
+  @impl true
+  def prep_stop(state) do
+    Conveyor.Drain.run(Conveyor.Drain.timeout_ms())
+    state
   end
 
   @impl true

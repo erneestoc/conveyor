@@ -77,6 +77,22 @@ defmodule Conveyor.Blobs.S3 do
   end
 
   defp request(method, digest, opts, headers, body, payload_hash, httpc_opts \\ []) do
+    case Conveyor.Aws.credentials(opts) do
+      {:ok, creds} ->
+        opts =
+          Keyword.merge(
+            opts,
+            Map.to_list(Map.take(creds, [:access_key_id, :secret_access_key, :session_token]))
+          )
+
+        do_request(method, digest, opts, headers, body, payload_hash, httpc_opts)
+
+      {:error, reason} ->
+        {:error, {:credentials, reason}}
+    end
+  end
+
+  defp do_request(method, digest, opts, headers, body, payload_hash, httpc_opts) do
     url = url(digest, opts)
     uri = URI.parse(url)
     now = Keyword.get(opts, :now) || DateTime.utc_now()
@@ -155,73 +171,19 @@ defmodule Conveyor.Blobs.S3 do
        else: "#{host}:#{port}"
   end
 
-  @doc """
-  AWS Signature Version 4 `Authorization` header value for a request whose headers
-  (lowercase names) are all signed.
-  """
+  @doc "SigV4 `Authorization` header for S3 (see `Conveyor.Aws.SigV4`)."
   @spec sign(atom(), URI.t(), [{String.t(), String.t()}], String.t(), DateTime.t(), keyword()) ::
           String.t()
   def sign(method, %URI{} = uri, headers, payload_hash, now, opts) do
-    region = Keyword.get(opts, :region, "us-east-1")
-    access_key = Keyword.fetch!(opts, :access_key_id)
-    secret = Keyword.fetch!(opts, :secret_access_key)
-    date = Calendar.strftime(now, "%Y%m%d")
-    scope = "#{date}/#{region}/s3/aws4_request"
+    creds = %{
+      access_key_id: Keyword.fetch!(opts, :access_key_id),
+      secret_access_key: Keyword.fetch!(opts, :secret_access_key),
+      region: Keyword.get(opts, :region, "us-east-1"),
+      service: "s3"
+    }
 
-    sorted =
-      headers |> Enum.map(fn {k, v} -> {String.downcase(k), String.trim(v)} end) |> Enum.sort()
-
-    signed_headers = sorted |> Enum.map(&elem(&1, 0)) |> Enum.join(";")
-    canonical_headers = Enum.map_join(sorted, "", fn {k, v} -> "#{k}:#{v}\n" end)
-
-    canonical_request =
-      Enum.join(
-        [
-          method |> Atom.to_string() |> String.upcase(),
-          canonical_path(uri.path || "/"),
-          canonical_query(uri.query),
-          canonical_headers,
-          signed_headers,
-          payload_hash
-        ],
-        "\n"
-      )
-
-    string_to_sign =
-      Enum.join(["AWS4-HMAC-SHA256", amz_date(now), scope, hex_sha256(canonical_request)], "\n")
-
-    signing_key =
-      ("AWS4" <> secret)
-      |> hmac(date)
-      |> hmac(region)
-      |> hmac("s3")
-      |> hmac("aws4_request")
-
-    signature = signing_key |> hmac(string_to_sign) |> Base.encode16(case: :lower)
-
-    "AWS4-HMAC-SHA256 Credential=#{access_key}/#{scope}, SignedHeaders=#{signed_headers}, Signature=#{signature}"
+    Conveyor.Aws.SigV4.sign(method, uri, headers, payload_hash, now, creds)
   end
-
-  defp canonical_path(path) do
-    path
-    |> String.split("/")
-    |> Enum.map_join("/", &aws_encode/1)
-  end
-
-  defp canonical_query(nil), do: ""
-
-  defp canonical_query(query) do
-    query
-    |> URI.decode_query()
-    |> Enum.sort()
-    |> Enum.map_join("&", fn {k, v} ->
-      aws_encode(k) <> "=" <> aws_encode(v)
-    end)
-  end
-
-  defp aws_encode(s), do: URI.encode(s, &URI.char_unreserved?/1)
 
   defp amz_date(now), do: Calendar.strftime(now, "%Y%m%dT%H%M%SZ")
-  defp hex_sha256(data), do: :crypto.hash(:sha256, data) |> Base.encode16(case: :lower)
-  defp hmac(key, data), do: :crypto.mac(:hmac, :sha256, key, data)
 end
