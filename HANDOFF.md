@@ -62,7 +62,7 @@ PORT=4100 mix phx.server                            # web :4100 (port 4000 is ta
   `bazel test //app:pass_test //lib:greeting --action_env=NONCE=$RANDOM --bes_backend=grpc://localhost:1985 --bes_results_url=http://localhost:4100/invocation/ --build_metadata=USER=$USER --build_metadata=CI=false`
 - Replay fixtures (no Bazel needed), with connection-drop chaos and the persistence oracle:
   `mix conveyor.replay test/fixtures/bep/*.bep --repeat 100 --concurrency 200 --drop-after 20 --verify`
-- Realistic browsing data: `mix conveyor.seed --replay 1500 --days 30` replays the fixtures through the real pipeline (all tabs populated; varied users/hosts/branches/durations; starts the app without listeners, safe while the server runs; refresh the browser). Synthetic volume only: `mix conveyor.seed --invocations 5000 --days 30` (rows without events; starts only the Repo).
+- Realistic browsing data: `mix conveyor.seed --replay 1500 --days 30 --big-log 50` (`--big-log MB` adds one CI build with a curses-style log of that size for the log viewer) replays the fixtures through the real pipeline (all tabs populated; varied users/hosts/branches/durations; starts the app without listeners, safe while the server runs; refresh the browser). Synthetic volume only: `mix conveyor.seed --invocations 5000 --days 30` (rows without events; starts only the Repo).
 - Screenshots for design review: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --screenshot=out.png --window-size=1440,1000 URL` (LiveView JS does not connect in headless screenshots; server-rendered HTML only).
 - Test DB: `mix test` migrates automatically. If migrations are edited in place (they were, pre-release), rebuild: `MIX_ENV=test mix do ecto.drop, ecto.create, ecto.migrate` and `mix ecto.reset` for dev.
 - Regenerate protobuf modules after changing `priv/protos/`: `priv/protos/gen.sh` (needs `protoc` and `~/.mix/escripts/protoc-gen-elixir`). `google/api`, `google/rpc`, `google/longrunning`, `google/bytestream` messages come from the `googleapis` hex dep and are NOT generated (the ByteStream *service* module is missing from the dep — hand-write a `GRPC.Service` for it when building the CAS sink).
@@ -81,6 +81,7 @@ lib/conveyor/
   ingest/writer.ex      group commit per shard, per-batch fallback, Fenced (CAS on last_event_seq), Retry
   ingest/writer_pool.ex shards by phash2(invocation_id)
   ingest/tag_counter.ex per-node coalescing of tag_keys counts (one sorted upsert per second; flush on shutdown)
+  seed.ex               realistic seed: fixture replays reshaped over N days (+ big_log)
   ingest/scrub.ex       redacts header flags, URL creds, token=, Bearer in command lines/logs (rewrites raw protobuf)
   ingest/tags.ex        merge order derived < workspace_status < keywords < api_key < build_metadata; ignores volatile keys
   ingest/status.ex      exit code → status, categories
@@ -95,7 +96,8 @@ lib/conveyor/
   workers/partition_maintenance.ex             Oban hourly cron
 lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor), auth_interceptor.ex, publish_build_event_server.ex, acker.ex
 lib/conveyor_web/       live/{builds,invocation,dashboard,tests,settings}_live.ex, components/{build_components,charts,timeline,layouts,core_components}.ex, controllers/download_controller.ex, format.ex, not_found_error.ex
-assets/js/hooks/        live_time.js (ticking durations), log_viewer.js (ANSI + \r/cursor-up emulation, virtualized)
+assets/js/hooks/        live_time.js (ticking durations), log_viewer.js (virtualized view over the log worker), profile_timeline.js
+assets/js/              log_core.mjs (log engine: paged UTF-8 buffer + terminal emulation + filter; Node tests in assets/test), log_worker.js, profile_worker.js
 lib/mix/tasks/          conveyor.replay, conveyor.seed
 test/support/           data_case, conn_case, grpc_case (random port), ingest_case (shared sandbox + gRPC), live_case (ingest fixtures through the real pipeline)
 priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (+ LICENSE files, VERSION, gen.sh)
@@ -113,6 +115,7 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - **Bazel copies the client env into the command line** (`--client_env=NAME=VALUE`), so scrubbing is mandatory; fixtures were scrubbed and history rewritten.
 - **Finish lifecycle events must never start a new worker** for a finished build (it did once; worker lived until idle timeout).
 - Config knobs live in `config :conveyor, Conveyor.Ingest` (auth, idle_timeout_ms, linger_ms, batch_max_events/bytes, batch_flush_ms, writer_shards, writer_flush_ms, tag_flush_ms, broadcast_interval_ms, max_unacked_events).
+- **Log viewer path (any log size):** the LiveView never sends log text; `log:reset` carries the download URL, `live` and byte count; the browser's log worker streams `/invocation/:id/download/log` (chunked, `x-log-bytes` header) into a paged byte buffer with terminal emulation (`\r`, cursor-up, SGR kept) and serves only visible lines to the page. Live appends (`{:log_chunks, chunks, offset}` on the log topic → `log:append` with `offset`) splice by byte offset; appends ahead of the loaded bytes queue and trigger one delayed reload. Measured: 50 MB in 0.2 s, 127 MB RSS, filter 9 ms. `node --test assets/test/*.test.mjs` runs in precommit (Node 24 on this machine).
 - **Writer hot path (M7 profiling):** a group commit writes one statement per table and column set (segments, targets, tests, actions, named sets, metrics) then one fenced `UPDATE` per batch; rows of the same invocation across batches are merged in order (one upsert must not touch a row twice). `tag_keys` rows are shared per project and must never be updated inside the group transaction (it serialized every shard on their row locks) — counts go through `Conveyor.Ingest.TagCounter` (one sorted upsert per node per second). Never index `last_event_at` (or any column the per-batch update sets): it makes every update non-HOT. Tests that assert tag counts call `TagCounter.flush()` first. DB pool: dev 20, prod `POOL_SIZE` default 40, `queue_target 1s / queue_interval 10s` (overload → latency, not errors).
 
 ## 7. Next work, in order (with concrete specs)
