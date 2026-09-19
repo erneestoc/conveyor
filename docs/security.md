@@ -52,6 +52,9 @@ latency, not errors (`queue_target`/`queue_interval`).
 ### Server-side request forgery through `bytestream://` URIs
 BEP files carry arbitrary URIs. Conveyor only connects to hosts an admin configured as a
 cache endpoint for that project; anything else is reported as "endpoint not configured".
+The URI is a locator only: where to connect (endpoint override), TLS policy (system
+roots, custom CA, mTLS from mounted secret files) and request authentication (headers,
+bearer token) come exclusively from the project's configuration (`docs/cache-endpoints.md`).
 Blobs already present locally are served without any network access.
 
 ### Path traversal and content confusion in the blob store

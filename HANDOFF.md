@@ -41,9 +41,10 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 | M3 | Query language | `Conveyor.Query` (parser, Ecto compiler, in-memory evaluator), facets, search UI |
 | M4 | Dashboard | `Conveyor.Metrics.{Scope,Dashboard,Tests}`, `DashboardLive`, `TestsLive`, SVG charts, Metrics tab, `mix conveyor.seed` |
 | M5 | Artifacts + timeline | `Conveyor.Blobs` (Disk/S3), `Conveyor.Artifacts` (+ `Resource`, `BytestreamClient`, `Junit`), gRPC `ByteStreamServer`/`CasServer`/`CapabilitiesServer`/`ActionCacheServer` (CAS sink), `UploadController` + `Plugs.ApiAuth` + `tools/bes-upload-profile`, `Conveyor.Profile` + `Workers.{FetchProfile,ProfileSummary,BlobMaintenance}`, canvas profile timeline (`assets/js/hooks/profile_timeline.js`, `assets/js/profile_worker.js`), test.log/test.xml viewer, cache endpoints in Settings |
+| M7 (part) | Scale + multi-node | `Conveyor.Loadgen` (+CLI/escript/mix task), `Conveyor.Limits.total_streams`, `ConveyorWeb.Telemetry` Prometheus, `MetricsController`, `HealthController`, `Conveyor.Drain`, `Conveyor.Cluster` (+`EC2`), `Conveyor.Aws` (+`SigV4`), `Conveyor.Release`, `rel/env.sh.eex`, `Dockerfile`, `docker-compose.yml`, `deploy/` |
 | M6 | Auth + security | `Conveyor.Accounts` (+ `User`, `Scope`), `ConveyorWeb.Plugs.Auth`, `ConveyorWeb.Auth` (on_mount), `AuthController`/`AuthHTML` (OIDC via assent, admin token), `Conveyor.Audit`, `Conveyor.Limits`, `Plugs.SecurityHeaders` (nonce CSP), sobelow + deps.audit in precommit, `.github/workflows/ci.yml`, `docs/security.md`, settings: allowed groups + audit log |
 
-197 tests, 95.8% coverage. Verified with real Bazel 9.2.0 end to end, including
+214 tests, 95.2% coverage. Cache endpoints gained an endpoint override, TLS modes (custom CA, mTLS) and bearer auth (docs/cache-endpoints.md). Verified with real Bazel 9.2.0 end to end, including
 `--remote_cache=grpc://localhost:1985 --remote_upload_local_results=false --remote_build_event_upload=minimal --noremote_accept_cached`
 against the CAS sink (profile, test.log, test.xml uploaded; profile timeline + summary rendered).
 
@@ -126,10 +127,12 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - Okta was not verified against a real tenant (only the fake provider); Keycloak is running locally in Docker (`chumti-keycloak`) if a real-provider check is wanted.
 - cowlib EEF-CVE-2026-43969 still open upstream (accepted, see docs/security.md); `mix hex.audit` is informational in CI.
 
-### M7 — scale campaign + multi-node
-- `bes_loadgen` escript (built on `Conveyor.Bep.Replay`): streams, builds/min, speed, fixture mix, jitter, chaos (drops, duplicates, server restarts), ack-latency percentiles; `mix conveyor.verify` over a run. Add per-ack latency telemetry (`[:conveyor, :ingest, :ack]`) and Prometheus `/metrics`.
-- Targets (§13.1 of PLAN): 1,000 streams, 30k events/s, ack p99 < 250 ms, zero loss through restart storm and DB restart. Measured so far: 700 builds / 31k events over 200 streams in 7.6 s on a dev server with debug SQL logging.
-- Multi-node: libcluster (`CLUSTER_STRATEGY=dns|ec2|k8s`), PubSub PG2, `Phoenix.Tracker` or always-publish digests, S3 required when clustered, `/health/live` + `/health/ready`, graceful drain (`SHUTDOWN_DRAIN_SECONDS`), `deploy/kubernetes` manifests + `deploy/aws-asg` Terraform, 3-node load profile with scale-in and node kill.
+### M7 — scale campaign + multi-node (in progress; see PLAN §21 for measurements)
+Done: loadgen (+escript), ack telemetry, Prometheus `/metrics`, libcluster strategies incl. own EC2 one, health endpoints, drain, release config, Dockerfile/compose/k8s/Terraform. Scale runs so far are bound by the load generator running on the same laptop (server ≈2 cores, generator 7–10). Next:
+1. Rerun 200/500/1000 streams with the pre-encoded generator (`bes_loadgen`, build with `mix escript.build`); prod server recipe: `MIX_ENV=prod mix compile && mix assets.deploy`, env `DATABASE_URL=ecto://postgres:postgres@127.0.0.1:5440/conveyor_dev SECRET_KEY_BASE=$(mix phx.gen.secret) PHX_SERVER=true PORT=4100 PHX_HOST=localhost BLOB_DIR=$PWD/tmp/blobs_prod`, then `mix phx.server`; create a key with `mix run --no-start -e ...` (prod requires API keys). Ideally run the generator on another machine.
+2. If the server is the bottleneck: profile at saturation (`:eprof` on a writer shard / worker), check zstd cost in `Batch`, batch sizes (`INGEST_*` env knobs).
+3. 3-node local run: three prod servers with `CLUSTER_STRATEGY=epmd CLUSTER_HOSTS=...`, distinct `PORT`/`GRPC_PORT`, `--name`; loadgen `--hosts` across them; add `--retries N` (reuse invocation id on retry so a killed node's builds resume elsewhere and `--verify` proves zero loss); kill a node mid-run.
+4. Cross-node limits are per node (accept or route by key).
 
 ### M8 — ops + release
 Dockerfile (release, non-root), `docker-compose.yml` (app + Postgres), `Conveyor.Release.migrate` on boot, retention (`RETENTION_DAYS`, `RETENTION_RAW_DAYS`), Grafana dashboard JSON, docs (quickstart, bazelrc recipes incl. `--build_event_upload_max_retries=10`, OIDC guides, CI recipes, sizing), Bazel-in-CI e2e matrix (7/8/9), v0.1.0.
