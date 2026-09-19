@@ -34,12 +34,12 @@ jobs:
       - run: mix conveyor.seed --replay 60 --days 3 --big-log 1
       - name: Start Conveyor
         run: |
-          PORT=4100 nohup mix phx.server > server.log 2>&1 &
+          PORT=4100 ADMIN_TOKEN=e2e-token nohup mix phx.server > server.log 2>&1 &
           for i in $(seq 1 60); do curl -sf localhost:4100/health/ready && break; sleep 2; done
       - run: npm ci --prefix e2e
       - run: npx --prefix e2e playwright install --with-deps chromium
       - run: npm test --prefix e2e
-        env: { BASE_URL: "http://localhost:4100", CI: "true" }
+        env: { BASE_URL: "http://localhost:4100", ADMIN_TOKEN: e2e-token, CI: "true" }
       - uses: actions/upload-artifact@v4
         if: failure()
         with: { name: playwright-results, path: e2e/test-results }

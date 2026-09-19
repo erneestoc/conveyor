@@ -151,7 +151,22 @@ defmodule ConveyorWeb.Charts do
             end)
           end)
 
-        %{d: d, class: class, label: label}
+        # Hover targets carrying the exact value of every point.
+        dots =
+          points
+          |> Enum.with_index()
+          |> Enum.reject(fn {p, _} -> Map.get(p, key) == nil end)
+          |> Enum.map(fn {p, i} ->
+            %{
+              x: @pad_left + i / n * plot_w,
+              y: @pad_top + plot_h - min(Map.get(p, key) / max, 1) * plot_h,
+              class: class,
+              title:
+                "#{label} · #{Map.get(p, :label) || Map.get(p, :day) || i + 1} · #{assigns.label_fun.(Map.get(p, key))}"
+            }
+          end)
+
+        %{d: d, class: class, label: label, dots: dots}
       end)
 
     assigns =
@@ -206,6 +221,28 @@ defmodule ConveyorWeb.Charts do
       >
         <title>{p.label}</title>
       </path>
+      <circle
+        :for={dot <- Enum.flat_map(@paths, & &1.dots)}
+        cx={dot.x}
+        cy={dot.y}
+        r="4"
+        fill="transparent"
+        pointer-events="all"
+        class={dot.class}
+      >
+        <title>{dot.title}</title>
+      </circle>
+      <circle
+        :for={dot <- Enum.flat_map(@paths, & &1.dots)}
+        cx={dot.x}
+        cy={dot.y}
+        r="4"
+        fill="transparent"
+        pointer-events="all"
+        class={dot.class}
+      >
+        <title>{dot.title}</title>
+      </circle>
       <text
         :for={{label, x} <- @labels}
         x={@pad_left + x}

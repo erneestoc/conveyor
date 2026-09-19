@@ -113,7 +113,8 @@ config :conveyor, Conveyor.Limits,
 # Sign-in policy (see Conveyor.Accounts); runtime.exs reads AUTH_MODE, OIDC_*, ADMIN_* in prod
 config :conveyor, Conveyor.Accounts,
   mode: :open,
-  admin_token: nil,
+  # ADMIN_TOKEN makes the admin sign-in testable outside prod (browser tests)
+  admin_token: System.get_env("ADMIN_TOKEN"),
   admin_emails: [],
   admin_groups: [],
   groups_claim: "groups",
