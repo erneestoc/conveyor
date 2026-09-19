@@ -3,7 +3,7 @@
 # becomes a ConfigMap, `secrets` a Secret (or point `existingSecret` at your own).
 
 image:
-  repository: ghcr.io/example/conveyor
+  repository: ghcr.io/erneestoc/conveyor
   tag: ""            # defaults to the chart's appVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []

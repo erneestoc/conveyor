@@ -1,7 +1,7 @@
 site_name: Conveyor
 site_description: Self-hosted Bazel Build Event Service server with a real-time UI
-site_url: https://example.github.io/conveyor/
-repo_url: https://github.com/example/conveyor
+site_url: https://erneestoc.github.io/conveyor/
+repo_url: https://github.com/erneestoc/conveyor
 repo_name: conveyor
 edit_uri: edit/main/docs/
 copyright: MIT licensed

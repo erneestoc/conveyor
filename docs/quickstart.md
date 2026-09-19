@@ -3,12 +3,12 @@
 ## With Docker Compose
 
 ```sh
-git clone https://github.com/example/conveyor && cd conveyor
+git clone https://github.com/erneestoc/conveyor && cd conveyor
 docker compose up -d
 ```
 
 This starts PostgreSQL and Conveyor (built from the checkout; use the published image
-`ghcr.io/example/conveyor:0.1.0` in your own compose file). Open
+`ghcr.io/erneestoc/conveyor:0.1.0` in your own compose file). Open
 [http://localhost:4000](http://localhost:4000) and sign in with the `ADMIN_TOKEN` from
 `docker-compose.yml`; change it and `SECRET_KEY_BASE` before exposing the service.
 

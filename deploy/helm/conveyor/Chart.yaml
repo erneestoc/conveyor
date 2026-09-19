@@ -4,6 +4,6 @@ description: Self-hosted Bazel Build Event Service server with a real-time UI
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/example/conveyor
-sources: [https://github.com/example/conveyor]
+home: https://github.com/erneestoc/conveyor
+sources: [https://github.com/erneestoc/conveyor]
 keywords: [bazel, build-event-service, bes, observability]

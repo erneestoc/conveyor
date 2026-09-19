@@ -21,7 +21,7 @@ spec:
       serviceAccountName: default
       containers:
         - name: conveyor
-          image: ghcr.io/example/conveyor:0.1.0
+          image: ghcr.io/erneestoc/conveyor:0.1.0
           ports:
             - { name: http, containerPort: 4000 }
             - { name: grpc, containerPort: 1985 }

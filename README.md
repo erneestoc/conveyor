@@ -15,14 +15,14 @@ rate, failures and flaky tests per team, branch or CI segment.
 - API keys per project for Bazel, OpenID Connect for people, audit log, secret scrubbing.
 
 Status: **0.1.0**, verified end to end with Bazel 7, 8 and 9. Documentation:
-**https://example.github.io/conveyor/** (source in `docs/`).
+**https://erneestoc.github.io/conveyor/** (source in `docs/`).
 
 ![Conveyor builds list](docs/assets/builds.png)
 
 ## Quick start
 
 ```sh
-git clone https://github.com/example/conveyor && cd conveyor
+git clone https://github.com/erneestoc/conveyor && cd conveyor
 docker compose up -d           # PostgreSQL + Conveyor on http://localhost:4000, gRPC :1985
 ```
 
@@ -43,8 +43,8 @@ the full client recipe (upload modes, remote cache, profiles) and
 
 ## Deploying
 
-- Image: `ghcr.io/example/conveyor:0.1.0` (multi-arch, non-root, migrates on boot).
-- Helm: `helm install conveyor oci://ghcr.io/example/charts/conveyor --version 0.1.0`, see
+- Image: `ghcr.io/erneestoc/conveyor:0.1.0` (multi-arch, non-root, migrates on boot).
+- Helm: `helm install conveyor oci://ghcr.io/erneestoc/charts/conveyor --version 0.1.0`, see
   [docs/kubernetes.md](docs/kubernetes.md) and [deploy/helm/conveyor](deploy/helm/conveyor).
 - [docs/production.md](docs/production.md): topology, sizing from the load tests, Postgres
   settings, connection pooling, rollouts, alerts and a go-live checklist.

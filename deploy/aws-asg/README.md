@@ -9,7 +9,7 @@ they stop; the ASG lifecycle hook gives them `SHUTDOWN_DRAIN_SECONDS`.
 
     terraform init
     terraform apply -var name=conveyor -var vpc_id=vpc-... -var 'subnet_ids=["subnet-a","subnet-b"]' \
-      -var database_url=ecto://... -var secret_key_base=... -var release_cookie=... -var image=ghcr.io/example/conveyor:0.1.0
+      -var database_url=ecto://... -var secret_key_base=... -var release_cookie=... -var image=ghcr.io/erneestoc/conveyor:0.1.0
 
 Scale-in: `terraform apply -var desired=2` (or an ASG policy). Node kill: terminate an
 instance from the console; Bazel clients retry through the NLB onto the remaining nodes and

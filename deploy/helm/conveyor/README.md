@@ -24,7 +24,7 @@ and an API key in Settings, and point Bazel at `grpcs://bes.example.com:443`.
 
 | Key | Default | Notes |
 |---|---|---|
-| `image.repository`, `image.tag` | `ghcr.io/example/conveyor`, chart `appVersion` | |
+| `image.repository`, `image.tag` | `ghcr.io/erneestoc/conveyor`, chart `appVersion` | |
 | `replicaCount` | 3 | ignored when `autoscaling.enabled` |
 | `hosts.web`, `hosts.grpc` | example hosts | separate hosts keep HTTP/2 end to end for gRPC |
 | `config.*` | see `values.yaml` | every Conveyor environment variable; rendered into a ConfigMap |

@@ -15,7 +15,7 @@ kubectl -n conveyor create secret generic conveyor \
   --from-literal=RELEASE_COOKIE="$(openssl rand -base64 32)" \
   --from-literal=ADMIN_TOKEN="$(openssl rand -hex 16)"
 
-helm install conveyor oci://ghcr.io/example/charts/conveyor --version 0.1.0 -n conveyor \
+helm install conveyor oci://ghcr.io/erneestoc/charts/conveyor --version 0.1.0 -n conveyor \
   --set existingSecret=conveyor \
   --set hosts.web=conveyor.example.com --set hosts.grpc=bes.example.com \
   --set config.S3_BUCKET=my-conveyor-blobs --set config.S3_REGION=us-east-1
@@ -72,4 +72,4 @@ during the rollout.
 
 `docker-compose.yml` at the repository root runs one node with PostgreSQL and the disk
 blob store, for trials and small teams. The published image is
-`ghcr.io/example/conveyor:<version>` (multi-arch, non-root); it runs migrations on boot.
+`ghcr.io/erneestoc/conveyor:<version>` (multi-arch, non-root); it runs migrations on boot.

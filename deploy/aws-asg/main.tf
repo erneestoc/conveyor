@@ -7,7 +7,7 @@ variable "region" { default = "us-east-1" }
 variable "vpc_id" {}
 variable "subnet_ids" { type = list(string) }
 variable "instance_type" { default = "c7g.xlarge" }
-variable "image" { default = "ghcr.io/example/conveyor:0.1.0" }
+variable "image" { default = "ghcr.io/erneestoc/conveyor:0.1.0" }
 variable "desired" { default = 3 }
 variable "min" { default = 2 }
 variable "max" { default = 12 }
