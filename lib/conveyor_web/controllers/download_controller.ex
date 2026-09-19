@@ -8,7 +8,7 @@ defmodule ConveyorWeb.DownloadController do
   def show(conn, %{"id" => id, "kind" => "profile"}), do: profile(conn, %{"id" => id})
 
   def show(conn, %{"id" => id, "kind" => kind}) when kind in ["log", "events"] do
-    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
+    inv = ConveyorWeb.Auth.invocation!(conn, id)
 
     case kind do
       "log" ->
@@ -37,7 +37,7 @@ defmodule ConveyorWeb.DownloadController do
   `Content-Encoding: gzip`, so the browser (and the Web Worker's `fetch`) sees JSON.
   """
   def profile(conn, %{"id" => id}) do
-    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
+    inv = ConveyorWeb.Auth.invocation!(conn, id)
 
     if inv.profile_status != "available" or is_nil(inv.profile_blob),
       do: raise(ConveyorWeb.NotFoundError, "profile not available")
@@ -78,7 +78,7 @@ defmodule ConveyorWeb.DownloadController do
 
   @doc "Serves a named artifact (uploaded or fetched) from the blob store."
   def artifact(conn, %{"id" => id, "name" => name}) do
-    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
+    inv = ConveyorWeb.Auth.invocation!(conn, id)
 
     artifact =
       Conveyor.Artifacts.get(inv, name) || raise ConveyorWeb.NotFoundError, "no artifact #{name}"

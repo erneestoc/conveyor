@@ -86,6 +86,8 @@ defmodule Conveyor.MixProject do
       {:mint, "~> 1.9"},
       # Background jobs (retention, partition maintenance, post-processing); exactly-once across nodes
       {:oban, "~> 2.24"},
+      # OIDC login (M6)
+      {:assent, "~> 0.3.1"},
       # Test coverage gate (95% minimum, see coveralls.json)
       {:excoveralls, "~> 0.18", only: :test}
     ]

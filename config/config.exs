@@ -98,5 +98,15 @@ config :phoenix, :json_library, Jason
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
 
+# Sign-in policy (see Conveyor.Accounts); runtime.exs reads AUTH_MODE, OIDC_*, ADMIN_* in prod
+config :conveyor, Conveyor.Accounts,
+  mode: :open,
+  admin_token: nil,
+  admin_emails: [],
+  admin_groups: [],
+  groups_claim: "groups",
+  allowed_email_domains: [],
+  oidc: []
+
 # Blob store for profiles, test logs and CAS uploads (see Conveyor.Blobs)
 config :conveyor, Conveyor.Blobs, adapter: :disk, dir: "tmp/blobs"

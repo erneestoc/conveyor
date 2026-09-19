@@ -25,6 +25,21 @@ defmodule Conveyor.Projects do
   @spec get_project!(term()) :: Project.t()
   def get_project!(id), do: Repo.get!(Project, id)
 
+  @spec get_project(term()) :: Project.t() | nil
+  def get_project(id), do: Repo.get(Project, id)
+
+  @doc "Restricts a project to members of these identity-provider groups (empty = everyone)."
+  @spec put_allowed_groups(Project.t(), [String.t()]) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
+  def put_allowed_groups(%Project{} = project, groups) do
+    groups = groups |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+    update_project(project, %{settings: Map.put(project.settings, "allowed_groups", groups)})
+  end
+
+  @spec allowed_groups(Project.t()) :: [String.t()]
+  def allowed_groups(%Project{settings: settings}),
+    do: Map.get(settings || %{}, "allowed_groups", [])
+
   @spec get_project_by_slug(String.t()) :: Project.t() | nil
   def get_project_by_slug(slug), do: Repo.get_by(Project, slug: slug)
 

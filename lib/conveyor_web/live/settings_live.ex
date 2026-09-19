@@ -113,6 +113,19 @@ defmodule ConveyorWeb.SettingsLive do
     end
   end
 
+  def handle_event(
+        "put_allowed_groups",
+        %{"project_id" => project_id, "groups" => groups},
+        socket
+      ) do
+    {:ok, _} =
+      project_id
+      |> Projects.get_project!()
+      |> Projects.put_allowed_groups(String.split(groups || "", ","))
+
+    {:noreply, socket |> put_flash(:info, "Project access updated") |> reload()}
+  end
+
   def handle_event("delete_cache_endpoint", %{"project_id" => project_id, "host" => host}, socket) do
     {:ok, _} = project_id |> Projects.get_project!() |> Projects.delete_cache_endpoint(host)
     {:noreply, socket |> put_flash(:info, "Cache endpoint removed") |> reload()}
@@ -139,6 +152,7 @@ defmodule ConveyorWeb.SettingsLive do
     ~H"""
     <Layouts.app
       flash={@flash}
+      current_scope={@current_scope}
       projects={@projects}
       project={@project}
       current_path={@current_path}
@@ -276,6 +290,26 @@ defmodule ConveyorWeb.SettingsLive do
           />
           <.button variant="primary">Create key</.button>
         </.form>
+
+        <form
+          id={"allowed-groups-form-#{project.id}"}
+          phx-submit="put_allowed_groups"
+          class="mt-4 flex flex-wrap items-end gap-2 border-t border-base-300/60 pt-3 text-xs"
+        >
+          <input type="hidden" name="project_id" value={project.id} />
+          <label class="flex flex-col gap-1">
+            <span class="text-[11px] text-base-content/60">
+              Visible to identity-provider groups (comma-separated; empty = everyone; admins always see it)
+            </span>
+            <input
+              name="groups"
+              value={Enum.join(Projects.allowed_groups(project), ", ")}
+              placeholder="team-payments, platform"
+              class="w-96 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+            />
+          </label>
+          <.button variant="primary">Save access</.button>
+        </form>
 
         <div id={"cache-endpoints-#{project.id}"} class="mt-4 border-t border-base-300/60 pt-3">
           <h3 class="text-xs font-semibold">Remote cache endpoints</h3>

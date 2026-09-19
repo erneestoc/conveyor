@@ -8,24 +8,41 @@ defmodule ConveyorWeb.Router do
     plug :put_root_layout, html: {ConveyorWeb.Layouts, :root}
     plug :protect_from_forgery
     plug :put_secure_browser_headers
+    plug ConveyorWeb.Plugs.Auth
   end
 
   pipeline :api do
     plug :accepts, ["json"]
   end
 
+  scope "/auth", ConveyorWeb do
+    pipe_through :browser
+
+    get "/login", AuthController, :login
+    post "/admin", AuthController, :admin
+    get "/oidc", AuthController, :oidc
+    get "/oidc/callback", AuthController, :callback
+    delete "/logout", AuthController, :logout
+  end
+
   scope "/", ConveyorWeb do
     pipe_through :browser
 
-    live "/", BuildsLive, :all
-    live "/dashboard", DashboardLive, :all
-    live "/tests", TestsLive, :all
-    live "/settings", SettingsLive, :index
-    live "/p/:slug", BuildsLive, :project
-    live "/p/:slug/dashboard", DashboardLive, :project
-    live "/p/:slug/tests", TestsLive, :project
-    live "/invocation/:id", InvocationLive, :overview
-    live "/invocation/:id/:tab", InvocationLive, :tab
+    live_session :default, on_mount: [{ConveyorWeb.Auth, :default}] do
+      live "/", BuildsLive, :all
+      live "/dashboard", DashboardLive, :all
+      live "/tests", TestsLive, :all
+      live "/p/:slug", BuildsLive, :project
+      live "/p/:slug/dashboard", DashboardLive, :project
+      live "/p/:slug/tests", TestsLive, :project
+      live "/invocation/:id", InvocationLive, :overview
+      live "/invocation/:id/:tab", InvocationLive, :tab
+    end
+
+    live_session :admin, on_mount: [{ConveyorWeb.Auth, :default}, {ConveyorWeb.Auth, :admin}] do
+      live "/settings", SettingsLive, :index
+    end
+
     get "/invocation/:id/download/:kind", DownloadController, :show
     get "/invocation/:id/artifact/:name", DownloadController, :artifact
   end

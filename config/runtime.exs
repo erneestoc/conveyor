@@ -84,6 +84,36 @@ if config_env() == :prod do
   config :conveyor, Conveyor.Artifacts,
     max_bytes: String.to_integer(System.get_env("ARTIFACT_MAX_MB", "512")) * 1024 * 1024
 
+  # Sign-in: AUTH_MODE=open (ADMIN_TOKEN gates Settings) or oidc (OIDC_ISSUER, OIDC_CLIENT_ID,
+  # OIDC_CLIENT_SECRET, OIDC_SCOPES, OIDC_GROUPS_CLAIM, OIDC_ADMIN_GROUPS, ADMIN_EMAILS,
+  # ALLOWED_EMAIL_DOMAINS).
+  auth_mode =
+    case System.get_env("AUTH_MODE", "open") do
+      "oidc" -> :oidc
+      "open" -> :open
+      other -> raise "AUTH_MODE must be open or oidc, got #{inspect(other)}"
+    end
+
+  if auth_mode == :oidc do
+    for var <- ~w(OIDC_ISSUER OIDC_CLIENT_ID OIDC_CLIENT_SECRET) do
+      System.get_env(var) || raise "#{var} is required when AUTH_MODE=oidc"
+    end
+  end
+
+  config :conveyor, Conveyor.Accounts,
+    mode: auth_mode,
+    admin_token: System.get_env("ADMIN_TOKEN"),
+    admin_emails: Conveyor.Accounts.csv(System.get_env("ADMIN_EMAILS")),
+    admin_groups: Conveyor.Accounts.csv(System.get_env("OIDC_ADMIN_GROUPS")),
+    groups_claim: System.get_env("OIDC_GROUPS_CLAIM", "groups"),
+    allowed_email_domains: Conveyor.Accounts.csv(System.get_env("ALLOWED_EMAIL_DOMAINS")),
+    oidc: [
+      base_url: System.get_env("OIDC_ISSUER"),
+      client_id: System.get_env("OIDC_CLIENT_ID"),
+      client_secret: System.get_env("OIDC_CLIENT_SECRET"),
+      scopes: System.get_env("OIDC_SCOPES", "openid email profile")
+    ]
+
   # Blob store: BLOB_STORE=disk (default, BLOB_DIR) or s3 (required when clustered).
   case System.get_env("BLOB_STORE", "disk") do
     "s3" ->

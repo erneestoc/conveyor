@@ -12,7 +12,6 @@ defmodule ConveyorWeb.InvocationLive do
   alias Conveyor.Ingest.Status
   alias Conveyor.Invocations
   alias Conveyor.Invocations.{Action, Invocation, Target, TestResult}
-  alias Conveyor.Projects
   alias ConveyorWeb.Format
 
   @tabs ~w(overview log timeline targets tests actions metrics details events)
@@ -20,8 +19,11 @@ defmodule ConveyorWeb.InvocationLive do
 
   @impl true
   def mount(%{"id" => id}, _session, socket) do
-    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
-    projects = Projects.list_projects(include_archived: true)
+    inv = ConveyorWeb.Auth.invocation!(socket.assigns.current_scope, id)
+
+    projects =
+      ConveyorWeb.Auth.visible_projects(socket.assigns.current_scope, include_archived: true)
+
     project = Enum.find(projects, &(&1.id == inv.project_id))
 
     if connected?(socket),
@@ -511,7 +513,13 @@ defmodule ConveyorWeb.InvocationLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} projects={@projects} project={@project} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      projects={@projects}
+      project={@project}
+      current_path={@current_path}
+    >
       <div class="flex flex-col gap-3">
         <div class="flex flex-wrap items-start justify-between gap-3">
           <div class="min-w-0">

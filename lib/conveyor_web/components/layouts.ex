@@ -77,7 +77,16 @@ defmodule ConveyorWeb.Layouts do
           </nav>
 
           <div class="ml-auto flex items-center gap-3">
+            <span
+              :if={@current_scope && @current_scope.user}
+              id="nav-user"
+              class="hidden text-xs text-base-content/60 sm:inline"
+              title={@current_scope.user.role}
+            >
+              {@current_scope.user.email}
+            </span>
             <.link
+              :if={admin?(@current_scope)}
               navigate={~p"/settings"}
               class={[
                 "rounded px-2 py-1 text-sm hover:bg-base-200",
@@ -87,6 +96,24 @@ defmodule ConveyorWeb.Layouts do
               title="Projects and API keys"
             >
               <.icon name="hero-cog-6-tooth-micro" class="size-4" />
+            </.link>
+            <.link
+              :if={@current_scope && @current_scope.mode == :open && !@current_scope.admin?}
+              navigate={~p"/auth/login"}
+              id="nav-admin-login"
+              class="rounded px-2 py-1 text-sm hover:bg-base-200"
+              title="Unlock settings with the admin token"
+            >
+              <.icon name="hero-lock-closed-micro" class="size-4" />
+            </.link>
+            <.link
+              :if={@current_scope && (@current_scope.user || @current_scope.admin_session?)}
+              href={~p"/auth/logout"}
+              method="delete"
+              id="nav-logout"
+              class="rounded px-2 py-1 text-xs hover:bg-base-200"
+            >
+              Sign out
             </.link>
             <.theme_toggle />
           </div>
@@ -105,6 +132,9 @@ defmodule ConveyorWeb.Layouts do
     </div>
     """
   end
+
+  defp admin?(%{admin?: admin}), do: admin
+  defp admin?(_), do: false
 
   attr :navigate, :string, required: true
   attr :active, :boolean, default: false

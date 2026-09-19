@@ -7,7 +7,6 @@ defmodule ConveyorWeb.DashboardLive do
 
   alias Conveyor.Ingest
   alias Conveyor.Metrics.{Dashboard, Scope}
-  alias Conveyor.Projects
   alias Conveyor.Projects.Segments
   alias Conveyor.Query
   alias ConveyorWeb.Format
@@ -16,12 +15,12 @@ defmodule ConveyorWeb.DashboardLive do
 
   @impl true
   def mount(params, _session, socket) do
-    projects = Projects.list_projects()
+    projects = ConveyorWeb.Auth.visible_projects(socket.assigns.current_scope)
 
     project =
       case params do
         %{"slug" => slug} ->
-          Projects.get_project_by_slug(slug) ||
+          ConveyorWeb.Auth.visible_project_by_slug(socket.assigns.current_scope, slug) ||
             raise ConveyorWeb.NotFoundError, "no project #{slug}"
 
         _ ->
@@ -129,7 +128,13 @@ defmodule ConveyorWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <Layouts.app flash={@flash} projects={@projects} project={@project} current_path={@current_path}>
+    <Layouts.app
+      flash={@flash}
+      current_scope={@current_scope}
+      projects={@projects}
+      project={@project}
+      current_path={@current_path}
+    >
       <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
         <div>
           <h1 class="text-lg font-semibold tracking-tight">Dashboard</h1>
