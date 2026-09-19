@@ -66,8 +66,14 @@ defmodule ConveyorWeb.Layouts do
             >
               Builds
             </.nav_link>
-            <span class="rounded px-2 py-1 text-base-content/40" title="Coming in a later milestone">Dashboard</span>
-            <span class="rounded px-2 py-1 text-base-content/40" title="Coming in a later milestone">Tests</span>
+            <.nav_link
+              navigate={sub_path(@project, "dashboard")}
+              active={String.ends_with?(@current_path, "/dashboard")}
+            >Dashboard</.nav_link>
+            <.nav_link
+              navigate={sub_path(@project, "tests")}
+              active={String.ends_with?(@current_path, "/tests")}
+            >Tests</.nav_link>
           </nav>
 
           <div class="ml-auto flex items-center gap-3">
@@ -146,6 +152,9 @@ defmodule ConveyorWeb.Layouts do
 
   defp builds_path(nil), do: ~p"/"
   defp builds_path(project), do: ~p"/p/#{project.slug}"
+
+  defp sub_path(nil, page), do: "/#{page}"
+  defp sub_path(project, page), do: "/p/#{project.slug}/#{page}"
 
   @doc """
   Shows the flash group with standard titles and content.

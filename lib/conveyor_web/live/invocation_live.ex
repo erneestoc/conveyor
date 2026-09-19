@@ -15,7 +15,7 @@ defmodule ConveyorWeb.InvocationLive do
   alias Conveyor.Projects
   alias ConveyorWeb.Format
 
-  @tabs ~w(overview log targets tests actions details events)
+  @tabs ~w(overview log targets tests actions metrics details events)
   @events_per_page 100
 
   @impl true
@@ -125,6 +125,10 @@ defmodule ConveyorWeb.InvocationLive do
       |> assign(action_count: length(actions))
       |> stream(:actions, actions, reset: true)
     end
+  end
+
+  defp load_tab(socket, "metrics", _page) do
+    assign(socket, metrics: Invocations.metrics(socket.assigns.invocation))
   end
 
   defp load_tab(socket, "events", page) do
@@ -451,6 +455,7 @@ defmodule ConveyorWeb.InvocationLive do
             count={@action_count}
             invocation={@invocation}
           />
+          <.metrics_tab :if={@tab == "metrics"} invocation={@invocation} metrics={@metrics} />
           <.details :if={@tab == "details"} invocation={@invocation} />
           <.events
             :if={@tab == "events"}
@@ -890,6 +895,129 @@ defmodule ConveyorWeb.InvocationLive do
     </div>
     """
   end
+
+  attr :invocation, :map, required: true
+  attr :metrics, :any, required: true
+
+  defp metrics_tab(assigns) do
+    groups = if assigns.metrics, do: Map.to_list(assigns.metrics.build_metrics), else: []
+    logs = if assigns.metrics, do: assigns.metrics.tool_logs, else: %{}
+    assigns = assign(assigns, groups: Enum.sort_by(groups, &elem(&1, 0)), logs: logs)
+
+    ~H"""
+    <div id="metrics" class="grid gap-4 lg:grid-cols-2">
+      <p :if={@groups == []} class="text-sm text-base-content/60 lg:col-span-2">
+        Bazel sends metrics at the end of a build; nothing has arrived yet.
+      </p>
+      <div
+        :for={{name, value} <- @groups}
+        class="rounded-md border border-base-300 p-4"
+        id={"metrics-#{name}"}
+      >
+        <h2 class="mb-2 text-sm font-semibold">{humanize(name)}</h2>
+        <.metric_value value={value} />
+      </div>
+      <div
+        :if={@logs != %{}}
+        class="rounded-md border border-base-300 p-4 lg:col-span-2"
+        id="tool-logs"
+      >
+        <h2 class="mb-2 text-sm font-semibold">Build tool logs</h2>
+        <dl class="space-y-2 text-xs">
+          <div :for={{name, file} <- Enum.sort(@logs)}>
+            <dt class="font-mono text-base-content/60">{name}</dt>
+            <dd :if={file["contents"]}>
+              <pre class="max-h-64 overflow-auto whitespace-pre-wrap rounded bg-base-200 p-2 font-mono">{file["contents"]}</pre>
+            </dd>
+            <dd :if={file["uri"]} class="break-all font-mono">{file["uri"]}</dd>
+          </div>
+        </dl>
+      </div>
+    </div>
+    """
+  end
+
+  # Renders any BuildMetrics group: scalars as a definition list, lists of maps as tables,
+  # nested maps recursively. New Bazel fields show up without code changes.
+  attr :value, :any, required: true
+
+  defp metric_value(%{value: value} = assigns) when is_map(value) do
+    {scalars, nested} = Enum.split_with(value, fn {_, v} -> not is_map(v) and not is_list(v) end)
+    assigns = assign(assigns, scalars: Enum.sort(scalars), nested: Enum.sort(nested))
+
+    ~H"""
+    <dl :if={@scalars != []} class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-0.5 text-xs">
+      <%= for {k, v} <- @scalars do %>
+        <dt class="text-base-content/60">{humanize(k)}</dt>
+        <dd class="font-mono tabular-nums">{format_metric(k, v)}</dd>
+      <% end %>
+    </dl>
+    <div :for={{k, v} <- @nested} class="mt-2">
+      <h3 class="mb-1 text-[11px] font-medium uppercase tracking-wide text-base-content/60">
+        {humanize(k)}
+      </h3>
+      <.metric_value value={v} />
+    </div>
+    """
+  end
+
+  defp metric_value(%{value: [first | _] = list} = assigns) when is_map(first) do
+    columns =
+      list
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+      |> Enum.reject(fn c -> Enum.any?(list, &(is_map(&1[c]) or is_list(&1[c]))) end)
+
+    assigns = assign(assigns, columns: columns, rows: list)
+
+    ~H"""
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr>
+            <th :for={c <- @columns} class="px-2 py-1 text-left font-medium text-base-content/60">
+              {humanize(c)}
+            </th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-base-300/60 font-mono tabular-nums">
+          <tr :for={row <- @rows}>
+            <td :for={c <- @columns} class="px-2 py-0.5">{format_metric(c, row[c])}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    """
+  end
+
+  defp metric_value(assigns) do
+    ~H"""
+    <span class="font-mono text-xs">{inspect(@value)}</span>
+    """
+  end
+
+  defp humanize(key) when is_binary(key) do
+    key
+    |> String.replace(~r/([a-z0-9])([A-Z])/, "\\1 \\2")
+    |> String.replace("_", " ")
+    |> String.downcase()
+  end
+
+  defp format_metric(_k, nil), do: "—"
+
+  defp format_metric(k, v) when is_binary(v),
+    do:
+      if(String.ends_with?(k, "Ms") and Integer.parse(v) != :error,
+        do: Format.duration(String.to_integer(v)),
+        else: v
+      )
+
+  defp format_metric(k, v) when is_integer(v),
+    do: if(String.ends_with?(k, "Ms"), do: Format.duration(v), else: Format.number(v))
+
+  defp format_metric(_k, v) when is_float(v), do: Float.to_string(v)
+  defp format_metric(_k, v) when is_boolean(v), do: to_string(v)
+  defp format_metric(_k, v), do: inspect(v)
 
   attr :invocation, :map, required: true
 

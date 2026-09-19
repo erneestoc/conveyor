@@ -18,7 +18,11 @@ defmodule ConveyorWeb.Router do
     pipe_through :browser
 
     live "/", BuildsLive, :all
+    live "/dashboard", DashboardLive, :all
+    live "/tests", TestsLive, :all
     live "/p/:slug", BuildsLive, :project
+    live "/p/:slug/dashboard", DashboardLive, :project
+    live "/p/:slug/tests", TestsLive, :project
     live "/invocation/:id", InvocationLive, :overview
     live "/invocation/:id/:tab", InvocationLive, :tab
     get "/invocation/:id/download/:kind", DownloadController, :show

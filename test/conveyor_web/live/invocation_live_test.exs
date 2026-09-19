@@ -136,3 +136,25 @@ defmodule ConveyorWeb.InvocationLiveTest do
     assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/invocation/not-a-uuid") end
   end
 end
+
+defmodule ConveyorWeb.InvocationLiveMetricsTest do
+  use ConveyorWeb.LiveCase, async: false
+
+  test "metrics tab renders every BuildMetrics group and tool logs", %{conn: conn} do
+    id = ingest_fixture!("clean_build_and_test", context())
+    {:ok, view, _} = live(conn, ~p"/invocation/#{id}/metrics")
+    assert has_element?(view, "#metrics-actionSummary")
+    assert has_element?(view, "#metrics-timingMetrics")
+    assert has_element?(view, "#tool-logs")
+    assert render(view) =~ "critical path"
+
+    empty =
+      Conveyor.Repo.insert!(%Conveyor.Invocations.Invocation{
+        id: Conveyor.Bep.Replay.uuid(),
+        project_id: context().project_id
+      })
+
+    {:ok, view, _} = live(conn, ~p"/invocation/#{empty.id}/metrics")
+    assert render(view) =~ "nothing has arrived yet"
+  end
+end
