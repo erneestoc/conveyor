@@ -12,7 +12,14 @@ defmodule Conveyor.Grpc.Acker do
   @spec start(GRPC.Server.Stream.t()) :: pid()
   def start(stream) do
     parent = self()
-    spawn_link(fn -> loop(%{stream: stream, parent: parent, final: nil, acked: 0}) end)
+    spawn_link(fn -> loop(%{stream: stream, parent: parent, final: nil, acked: 0, sent: %{}}) end)
+  end
+
+  @doc "Records that an event was received so its ack latency can be measured."
+  @spec note(pid(), pos_integer()) :: :ok
+  def note(acker, seq) do
+    send(acker, {:sent, seq, System.monotonic_time()})
+    :ok
   end
 
   @doc "Tells the acker which sequence number ends the stream."
@@ -40,13 +47,18 @@ defmodule Conveyor.Grpc.Acker do
 
   defp loop(state) do
     receive do
+      {:sent, seq, t0} ->
+        loop(%{state | sent: Map.put(state.sent, seq, t0)})
+
       {:ack, seq} ->
         GRPC.Server.send_reply(state.stream, %V1.PublishBuildToolEventStreamResponse{
           stream_id: stream_id(state.stream),
           sequence_number: seq
         })
 
-        state = %{state | acked: max(state.acked, seq)}
+        {t0, sent} = Map.pop(state.sent, seq)
+        if t0, do: emit_latency(t0)
+        state = %{state | acked: max(state.acked, seq), sent: sent}
         if done?(state), do: finish(state), else: loop(state)
 
       {:ack_failed, _seq, reason} ->
@@ -60,6 +72,12 @@ defmodule Conveyor.Grpc.Acker do
         state = %{state | final: state.final || last_seq}
         if done?(state), do: finish(state), else: loop(state)
     end
+  end
+
+  # Time from receiving an event on the wire to sending its acknowledgement.
+  defp emit_latency(t0) do
+    latency_us = System.convert_time_unit(System.monotonic_time() - t0, :native, :microsecond)
+    :telemetry.execute([:conveyor, :ingest, :ack], %{latency_us: latency_us, count: 1}, %{})
   end
 
   defp done?(%{final: nil}), do: false

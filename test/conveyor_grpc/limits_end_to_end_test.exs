@@ -58,10 +58,11 @@ defmodule Conveyor.Grpc.LimitsEndToEndTest do
     GRPC.Stub.disconnect(ch1)
     wait_until(fn -> Limits.streams(key.id) == 0 end)
 
-    assert {:ok, %{sent: sent, acks: acks}} =
+    assert {:ok, %{sent: sent, acks: acks, invocation_id: id}} =
              Replay.run(fixture("analysis_failure"), port: port, api_key: plaintext)
 
     assert length(acks) == sent
+    :ok = await_worker_exit(id)
   end
 
   test "events beyond the rate limit are slowed down, not failed", %{
@@ -76,8 +77,9 @@ defmodule Conveyor.Grpc.LimitsEndToEndTest do
         Replay.run(fixture("clean_build_and_test"), port: port, api_key: plaintext)
       end)
 
-    assert {:ok, %{sent: sent, acks: acks}} = result
+    assert {:ok, %{sent: sent, acks: acks, invocation_id: id}} = result
     assert length(acks) == sent
+    :ok = await_worker_exit(id)
     # ~98 events at 20/s after the first 20 free tokens: several seconds.
     assert elapsed_us >= 2_000_000
   end

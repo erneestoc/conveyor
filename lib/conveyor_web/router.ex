@@ -50,6 +50,11 @@ defmodule ConveyorWeb.Router do
     get "/invocation/:id/artifact/:name", DownloadController, :artifact
   end
 
+  scope "/", ConveyorWeb do
+    pipe_through :api
+    get "/metrics", MetricsController, :index
+  end
+
   pipeline :api_upload do
     plug ConveyorWeb.Plugs.ApiAuth, scope: "upload"
   end

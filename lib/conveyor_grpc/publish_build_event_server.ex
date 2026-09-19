@@ -75,6 +75,7 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
           do: Acker.final(acker, obe.sequence_number)
 
         :ok = Limits.throttle(ctx.api_key_id, ctx.limits || Limits.defaults())
+        Acker.note(acker, obe.sequence_number)
 
         case Ingest.push(ctx, obe, acker) do
           :ok ->

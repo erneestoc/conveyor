@@ -96,6 +96,9 @@ if config_env() == :prod do
       force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true, host: nil]
   end
 
+  # Prometheus scrape endpoint (/metrics); METRICS_TOKEN protects it when set.
+  config :conveyor, :metrics_token, System.get_env("METRICS_TOKEN")
+
   # Sign-in: AUTH_MODE=open (ADMIN_TOKEN gates Settings) or oidc (OIDC_ISSUER, OIDC_CLIENT_ID,
   # OIDC_CLIENT_SECRET, OIDC_SCOPES, OIDC_GROUPS_CLAIM, OIDC_ADMIN_GROUPS, ADMIN_EMAILS,
   # ALLOWED_EMAIL_DOMAINS).

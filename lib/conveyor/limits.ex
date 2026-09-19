@@ -168,6 +168,12 @@ defmodule Conveyor.Limits do
     end
   end
 
+  @doc "Concurrent streams across all keys on this node."
+  @spec total_streams() :: non_neg_integer()
+  def total_streams do
+    :ets.select(@table, [{{{:streams, :_}, :"$1"}, [], [:"$1"]}]) |> Enum.sum()
+  end
+
   @doc "Clears all counters (tests)."
   def reset do
     :ets.delete_all_objects(@table)

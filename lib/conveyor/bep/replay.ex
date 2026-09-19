@@ -49,6 +49,7 @@ defmodule Conveyor.Bep.Replay do
     lifecycle? = Keyword.get(opts, :lifecycle, true)
     project_id = Keyword.get(opts, :project_id, "")
     drop_after = Keyword.get(opts, :drop_after)
+    duplicate_every = Keyword.get(opts, :duplicate_every)
     metadata = metadata(opts)
 
     events = rewrite_invocation_id(events, invocation_id)
@@ -67,7 +68,8 @@ defmodule Conveyor.Bep.Replay do
           project_id,
           drop_after,
           metadata,
-          started_at
+          started_at,
+          duplicate_every
         )
       catch
         # A stream the server closed early (e.g. UNAUTHENTICATED) makes later sends exit.
@@ -88,7 +90,8 @@ defmodule Conveyor.Bep.Replay do
          project_id,
          drop_after,
          metadata,
-         started_at
+         started_at,
+         duplicate_every
        ) do
     {:ok, :placeholder}
     |> then(fn _ ->
@@ -99,7 +102,8 @@ defmodule Conveyor.Bep.Replay do
         metadata: metadata,
         project_id: project_id,
         stream_id: stream_id,
-        delay: delay
+        delay: delay,
+        duplicate_every: duplicate_every
       }
 
       with :ok <-
@@ -110,7 +114,7 @@ defmodule Conveyor.Bep.Replay do
                 {:invocation_attempt_started,
                  %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}}
              ]),
-           {:ok, acks} <- send_with_retry(conn, events, drop_after),
+           {:ok, {acks, latencies}} <- send_with_retry(conn, events, drop_after),
            :ok <-
              maybe_lifecycle(lifecycle?, conn, [
                {stream_id, 2,
@@ -125,6 +129,7 @@ defmodule Conveyor.Bep.Replay do
            build_id: build_id,
            sent: length(events) + 1,
            acks: acks,
+           latencies_ms: latencies,
            duration_ms: System.monotonic_time(:millisecond) - started_at
          }}
       end
@@ -170,14 +175,19 @@ defmodule Conveyor.Bep.Replay do
       |> Enum.drop(from_seq - 1)
       |> then(&if(drop_after, do: Enum.take(&1, drop_after), else: &1))
 
-    Enum.each(to_send, fn {event, seq} ->
-      if conn.delay > 0, do: Process.sleep(conn.delay)
+    sent_at =
+      Enum.reduce(to_send, %{}, fn {event, seq}, sent_at ->
+        if conn.delay > 0, do: Process.sleep(conn.delay)
+        req = request(conn.project_id, ordered_event(conn.stream_id, seq, event))
+        GRPC.Stub.send_request(stream, req)
 
-      GRPC.Stub.send_request(
-        stream,
-        request(conn.project_id, ordered_event(conn.stream_id, seq, event))
-      )
-    end)
+        # Bazel resends an event it believes unacknowledged; the server must ack duplicates
+        # without storing them twice.
+        if conn.duplicate_every && rem(seq, conn.duplicate_every) == 0,
+          do: GRPC.Stub.send_request(stream, req)
+
+        Map.put_new(sent_at, seq, System.monotonic_time(:microsecond))
+      end)
 
     if drop_after do
       GRPC.Stub.cancel(stream)
@@ -188,23 +198,34 @@ defmodule Conveyor.Bep.Replay do
 
       final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
       GRPC.Stub.send_request(stream, final, end_stream: true)
+      sent_at = Map.put(sent_at, total + 1, System.monotonic_time(:microsecond))
 
       with {:ok, replies} <- GRPC.Stub.recv(stream) do
-        collect_acks(replies)
+        collect_acks(replies, sent_at)
       end
     end
   end
 
-  defp collect_acks(replies) do
-    Enum.reduce_while(replies, {:ok, []}, fn
-      {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}}, {:ok, acc} ->
-        {:cont, {:ok, [seq | acc]}}
+  # Returns the acked sequence numbers in order and the client-observed latency of each
+  # first ack (send → ack, milliseconds).
+  defp collect_acks(replies, sent_at) do
+    Enum.reduce_while(replies, {:ok, [], []}, fn
+      {:ok, %V1.PublishBuildToolEventStreamResponse{sequence_number: seq}}, {:ok, acks, lat} ->
+        now = System.monotonic_time(:microsecond)
+
+        lat =
+          case Map.get(sent_at, seq) do
+            nil -> lat
+            t0 -> [(now - t0) / 1000 | lat]
+          end
+
+        {:cont, {:ok, [seq | acks], lat}}
 
       {:error, reason}, _ ->
         {:halt, {:error, reason}}
     end)
     |> case do
-      {:ok, acks} -> {:ok, Enum.reverse(acks)}
+      {:ok, acks, lat} -> {:ok, {Enum.reverse(acks), Enum.reverse(lat)}}
       error -> error
     end
   end

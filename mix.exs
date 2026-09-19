@@ -12,7 +12,9 @@ defmodule Conveyor.MixProject do
       deps: deps(),
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       listeners: [Phoenix.CodeReloader],
-      test_coverage: [tool: ExCoveralls]
+      test_coverage: [tool: ExCoveralls],
+      # `mix escript.build` produces ./bes_loadgen, a standalone load generator (M7).
+      escript: [main_module: Conveyor.Loadgen.CLI, name: "bes_loadgen", app: nil]
     ]
   end
 
@@ -72,6 +74,7 @@ defmodule Conveyor.MixProject do
        compile: false,
        depth: 1},
       {:telemetry_metrics, "~> 1.0"},
+      {:telemetry_metrics_prometheus_core, "~> 1.2"},
       {:telemetry_poller, "~> 1.0"},
       {:gettext, "~> 1.0"},
       {:jason, "~> 1.2"},
