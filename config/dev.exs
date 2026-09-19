@@ -87,3 +87,5 @@ config :conveyor, Conveyor.Grpc,
 config :conveyor, Conveyor.Ingest,
   auth: if(System.get_env("BES_INGEST_AUTH") == "api_key", do: :api_key, else: :none),
   linger_ms: 5_000
+
+config :conveyor, Conveyor.Blobs, adapter: :disk, dir: "tmp/blobs_dev"

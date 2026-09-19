@@ -49,3 +49,5 @@ config :conveyor, Conveyor.Ingest,
   broadcast_interval_ms: 10
 
 config :conveyor, Oban, testing: :manual
+
+config :conveyor, Conveyor.Blobs, adapter: :disk, dir: "tmp/blobs_test"

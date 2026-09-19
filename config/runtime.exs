@@ -76,6 +76,29 @@ if config_env() == :prod do
 
   config :conveyor, :dns_cluster_query, System.get_env("DNS_CLUSTER_QUERY")
 
+  # Blob store: BLOB_STORE=disk (default, BLOB_DIR) or s3 (required when clustered).
+  case System.get_env("BLOB_STORE", "disk") do
+    "s3" ->
+      config :conveyor, Conveyor.Blobs,
+        adapter: :s3,
+        s3: [
+          bucket:
+            System.get_env("S3_BUCKET") || raise("S3_BUCKET is required when BLOB_STORE=s3"),
+          region: System.get_env("S3_REGION") || System.get_env("AWS_REGION") || "us-east-1",
+          endpoint: System.get_env("S3_ENDPOINT"),
+          path_style: System.get_env("S3_PATH_STYLE") in ~w(true 1),
+          prefix: System.get_env("S3_PREFIX", "blobs"),
+          access_key_id: System.get_env("AWS_ACCESS_KEY_ID"),
+          secret_access_key: System.get_env("AWS_SECRET_ACCESS_KEY"),
+          session_token: System.get_env("AWS_SESSION_TOKEN")
+        ]
+
+    _ ->
+      config :conveyor, Conveyor.Blobs,
+        adapter: :disk,
+        dir: System.get_env("BLOB_DIR", "/var/lib/conveyor/blobs")
+  end
+
   config :conveyor, ConveyorWeb.Endpoint,
     url: [host: host, port: 443, scheme: "https"],
     http: [

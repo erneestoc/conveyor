@@ -49,7 +49,8 @@ defmodule Conveyor.Ingest.Retry do
              :too_many_connections,
              :cannot_connect_now,
              :admin_shutdown
-           ], do: true
+           ],
+      do: true
 
   def transient?(_), do: false
 end
