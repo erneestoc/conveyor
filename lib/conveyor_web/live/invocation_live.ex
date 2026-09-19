@@ -31,6 +31,7 @@ defmodule ConveyorWeb.InvocationLive do
      socket
      |> assign(
        invocation: inv,
+       artifacts: Conveyor.Artifacts.list(inv),
        projects: Enum.reject(projects, & &1.archived_at),
        project: project,
        tab: "overview",
@@ -211,7 +212,8 @@ defmodule ConveyorWeb.InvocationLive do
   end
 
   def handle_info({:artifacts_changed, id}, socket) do
-    {:noreply, assign(socket, invocation: Conveyor.Invocations.get!(id))}
+    inv = Conveyor.Invocations.get!(id)
+    {:noreply, assign(socket, invocation: inv, artifacts: Conveyor.Artifacts.list(inv))}
   end
 
   def handle_info({:log_chunks, chunks}, socket) do
@@ -478,7 +480,7 @@ defmodule ConveyorWeb.InvocationLive do
             invocation={@invocation}
           />
           <.metrics_tab :if={@tab == "metrics"} invocation={@invocation} metrics={@metrics} />
-          <.details :if={@tab == "details"} invocation={@invocation} />
+          <.details :if={@tab == "details"} artifacts={@artifacts} invocation={@invocation} />
           <.events
             :if={@tab == "events"}
             invocation={@invocation}
@@ -1042,6 +1044,7 @@ defmodule ConveyorWeb.InvocationLive do
   defp format_metric(_k, v), do: inspect(v)
 
   attr :invocation, :map, required: true
+  attr :artifacts, :list, required: true
 
   defp details(assigns) do
     parsed = assigns.invocation.options["parsed"] || %{}
@@ -1124,10 +1127,24 @@ defmodule ConveyorWeb.InvocationLive do
           </div>
           <div class="flex gap-3">
             <dt class="w-32 shrink-0 text-base-content/60">Profile</dt><dd class="break-all font-mono text-xs">
-              {@invocation.profile_uri || "not reported"}
+              <span id="profile-status">{@invocation.profile_status}</span>
+              · {@invocation.profile_uri || "not reported"}
             </dd>
           </div>
         </dl>
+      </div>
+      <div class="rounded-md border border-base-300 p-4">
+        <h2 class="mb-2 text-sm font-semibold">Artifacts</h2>
+        <ul class="space-y-0.5 font-mono text-xs" id="artifacts">
+          <li :for={a <- @artifacts} id={"artifact-#{a.id}"} class="flex gap-2">
+            <a href={~p"/invocation/#{@invocation.id}/artifact/#{a.name}"} class="hover:underline">{a.name}</a>
+            <span class="text-base-content/50">{Format.bytes(a.size)} · {a.source}</span>
+          </li>
+        </ul>
+        <p :if={@artifacts == []} class="text-xs text-base-content/50">
+          None. Upload with <code>tools/bes-upload-profile</code>
+          or configure a cache endpoint in Settings.
+        </p>
       </div>
       <div class="rounded-md border border-base-300 p-4">
         <h2 class="mb-2 text-sm font-semibold">Tags</h2>

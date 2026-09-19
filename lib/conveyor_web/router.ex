@@ -27,12 +27,19 @@ defmodule ConveyorWeb.Router do
     live "/invocation/:id", InvocationLive, :overview
     live "/invocation/:id/:tab", InvocationLive, :tab
     get "/invocation/:id/download/:kind", DownloadController, :show
+    get "/invocation/:id/artifact/:name", DownloadController, :artifact
   end
 
-  # Other scopes may use custom stacks.
-  # scope "/api", ConveyorWeb do
-  #   pipe_through :api
-  # end
+  pipeline :api_upload do
+    plug ConveyorWeb.Plugs.ApiAuth, scope: "upload"
+  end
+
+  scope "/api/v1", ConveyorWeb do
+    pipe_through [:api, :api_upload]
+
+    put "/invocations/:id/artifacts/:name", UploadController, :artifact
+    put "/invocations/:id/bep", UploadController, :bep
+  end
 
   # Enable LiveDashboard in development
   if Application.compile_env(:conveyor, :dev_routes) do
