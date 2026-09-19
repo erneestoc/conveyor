@@ -45,10 +45,13 @@ defmodule Conveyor.Ingest.TagCounterTest do
 
   @tag :capture_log
   test "a failed flush is logged and dropped" do
+    # Drain counts left by other tests' ingests so the failing statement is ours alone.
+    TagCounter.flush()
     TagCounter.add(%{{nil, "bad", "v"} => 1})
 
     log = ExUnit.CaptureLog.capture_log(fn -> assert :ok = TagCounter.flush() end)
     assert log =~ "tag counts not updated for 1 rows"
+    assert log =~ "not_null_violation"
     assert counts("bad") == []
   end
 end
