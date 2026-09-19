@@ -49,6 +49,7 @@ defmodule ConveyorWeb.InvocationLive do
        action_count: 0,
        timeline_actions: [],
        profile_summary: %{},
+       test_file: nil,
        events: [],
        events_page: 1,
        events_total: 0,
@@ -193,6 +194,117 @@ defmodule ConveyorWeb.InvocationLive do
        truncated: truncated
      })}
   end
+
+  def handle_event("view_test_file", params, socket) do
+    %{"label" => label, "config" => config, "name" => name} = params
+    key = {label, config, int(params["run"]), int(params["shard"]), int(params["attempt"])}
+
+    with %TestResult{} = t <- Map.get(socket.assigns.tests_by_key, key),
+         %{} = file <- Enum.find(List.wrap(t.files["files"]), &(&1["name"] == name)) do
+      inv = socket.assigns.invocation
+
+      {:noreply,
+       socket
+       |> assign(
+         test_file: %{
+           title: "#{t.label} · #{name}",
+           name: name,
+           kind: if(String.ends_with?(name, ".xml"), do: :junit, else: :log),
+           status: :loading,
+           content: nil,
+           suites: [],
+           truncated: false,
+           message: nil
+         }
+       )
+       |> start_async(:test_file, fn -> load_test_file(inv, file, name) end)}
+    else
+      _ -> {:noreply, put_flash(socket, :error, "That file is not attached to the test attempt")}
+    end
+  end
+
+  def handle_event("close_test_file", _params, socket),
+    do: {:noreply, assign(socket, test_file: nil)}
+
+  @impl true
+  def handle_async(:test_file, {:ok, result}, socket) do
+    case socket.assigns.test_file do
+      nil -> {:noreply, socket}
+      tf -> {:noreply, assign(socket, test_file: Map.merge(tf, result))}
+    end
+  end
+
+  def handle_async(:test_file, {:exit, reason}, socket) do
+    case socket.assigns.test_file do
+      nil ->
+        {:noreply, socket}
+
+      tf ->
+        {:noreply,
+         assign(socket,
+           test_file: %{
+             tf
+             | status: :error,
+               message: "Could not load the file: #{inspect(reason)}"
+           }
+         )}
+    end
+  end
+
+  @test_file_max 512 * 1024
+
+  defp load_test_file(inv, file, name) do
+    with {:ok, digest} <- Conveyor.Artifacts.fetch(inv, file),
+         {:ok, chunks} <- Conveyor.Blobs.stream(digest) do
+      {content, truncated} = take_bytes(chunks, @test_file_max)
+
+      if String.ends_with?(name, ".xml") do
+        case Conveyor.Artifacts.Junit.parse(content) do
+          {:ok, suites} -> %{status: :ok, kind: :junit, suites: suites}
+          {:error, _} -> %{status: :ok, kind: :log, content: content, truncated: truncated}
+        end
+      else
+        %{status: :ok, kind: :log, content: content, truncated: truncated}
+      end
+    else
+      {:error, reason} -> %{status: :error, message: fetch_error_message(reason)}
+    end
+  end
+
+  defp take_bytes(chunks, max) do
+    Enum.reduce_while(chunks, {[], 0, false}, fn chunk, {acc, size, _} ->
+      if size + byte_size(chunk) > max,
+        do: {:halt, {[acc, binary_part(chunk, 0, max - size)], max, true}},
+        else: {:cont, {[acc, chunk], size + byte_size(chunk), false}}
+    end)
+    |> then(fn {acc, _size, truncated} -> {IO.iodata_to_binary(acc), truncated} end)
+  end
+
+  defp fetch_error_message(:local_file),
+    do:
+      "Bazel kept this file on the machine that ran the build (file://). Run with --remote_cache and --remote_build_event_upload=minimal (Conveyor's CAS sink or your own cache) so test outputs are uploaded."
+
+  defp fetch_error_message(:endpoint_not_configured),
+    do:
+      "This file is on a remote cache Conveyor is not allowed to contact. Add the cache host under Settings → cache endpoints."
+
+  defp fetch_error_message({:rpc, :not_found, _}), do: "The remote cache no longer has this file."
+
+  defp fetch_error_message(:too_large),
+    do: "The file is larger than the configured artifact size limit."
+
+  defp fetch_error_message(reason), do: "Could not fetch the file: #{inspect(reason)}"
+
+  defp int(nil), do: 1
+  defp int(s) when is_binary(s), do: String.to_integer(s)
+
+  defp test_files(%TestResult{files: files}) do
+    files["files"] |> List.wrap() |> Enum.filter(&(&1["name"] in ["test.log", "test.xml"]))
+  end
+
+  defp junit_status(:passed), do: "PASSED"
+  defp junit_status(:skipped), do: "SKIPPED"
+  defp junit_status(_), do: "FAILED"
 
   # --- live updates ---------------------------------------------------------------------------------
 
@@ -394,9 +506,6 @@ defmodule ConveyorWeb.InvocationLive do
     do:
       "No profile was reported. Bazel writes one by default (--profile); it appears here once it can be fetched or is uploaded."
 
-  defp file_uri(%{"uri" => uri}), do: uri
-  defp file_uri(_), do: nil
-
   # --- render -------------------------------------------------------------------------------------
 
   @impl true
@@ -533,7 +642,7 @@ defmodule ConveyorWeb.InvocationLive do
             </details>
           </div>
           <.targets :if={@tab == "targets"} streams={@streams} count={map_size(@targets_by_key)} />
-          <.tests :if={@tab == "tests"} groups={test_groups(@tests_by_key)} />
+          <.tests :if={@tab == "tests"} groups={test_groups(@tests_by_key)} test_file={@test_file} />
           <.actions
             :if={@tab == "actions"}
             streams={@streams}
@@ -829,9 +938,74 @@ defmodule ConveyorWeb.InvocationLive do
   end
 
   attr :groups, :list, required: true
+  attr :test_file, :map, default: nil
 
   defp tests(assigns) do
     ~H"""
+    <div :if={@test_file} id="test-file" class="mb-3 rounded-md border border-base-300 p-3 text-xs">
+      <div class="mb-2 flex items-center justify-between gap-2">
+        <h3 class="truncate font-mono font-semibold">{@test_file.title}</h3>
+        <button
+          type="button"
+          phx-click="close_test_file"
+          id="close-test-file"
+          class="rounded border border-base-300 px-2 py-0.5 hover:bg-base-200"
+        >Close</button>
+      </div>
+      <p :if={@test_file.status == :loading} class="text-base-content/60">Fetching…</p>
+      <p
+        :if={@test_file.status == :error}
+        id="test-file-error"
+        class="text-rose-600 dark:text-rose-400"
+      >
+        {@test_file.message}
+      </p>
+      <pre
+        :if={@test_file.status == :ok and @test_file.kind == :log}
+        id="test-file-log"
+        class="max-h-[60vh] overflow-auto whitespace-pre-wrap rounded bg-base-200/60 p-2 font-mono text-[11px]"
+      >{@test_file.content}<span :if={@test_file.truncated} class="text-base-content/50">
+    … truncated; download the artifact for the full log.</span></pre>
+      <div
+        :if={@test_file.status == :ok and @test_file.kind == :junit}
+        id="test-file-junit"
+        class="space-y-3"
+      >
+        <div :for={suite <- @test_file.suites}>
+          <p class="font-mono text-base-content/70">
+            {suite.name} · {suite.tests} tests, {suite.failures} failures, {suite.errors} errors, {suite.skipped} skipped
+            <span :if={suite.time_ms}>· {Format.duration(suite.time_ms)}</span>
+          </p>
+          <table class="mt-1 w-full">
+            <tbody class="divide-y divide-base-300/60">
+              <tr :for={c <- suite.cases} data-status={c.status}>
+                <td class={[
+                  "py-0.5 pr-2 font-mono font-semibold",
+                  test_status_classes(junit_status(c.status))
+                ]}>
+                  {junit_status(c.status)}
+                </td>
+                <td class="py-0.5 pr-2 font-mono">{c.name}</td>
+                <td class="py-0.5 pr-2 font-mono text-base-content/60">{c.classname}</td>
+                <td class="py-0.5 pr-2 text-right font-mono text-base-content/60">
+                  {if c.time_ms, do: Format.duration(c.time_ms)}
+                </td>
+                <td class="max-w-lg py-0.5">
+                  <pre
+                    :if={c.message}
+                    class="whitespace-pre-wrap font-mono text-[11px] text-rose-700 dark:text-rose-300"
+                  >{c.message}</pre>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <details :if={suite.system_out}>
+            <summary class="cursor-pointer text-base-content/60">Output</summary>
+            <pre class="mt-1 max-h-96 overflow-auto whitespace-pre-wrap rounded bg-base-200/60 p-2 font-mono text-[11px]">{suite.system_out}</pre>
+          </details>
+        </div>
+      </div>
+    </div>
     <div class="overflow-x-auto rounded-md border border-base-300">
       <table class="w-full text-sm" id="tests">
         <thead class="bg-base-200/60 text-left text-[11px] uppercase tracking-wide text-base-content/60">
@@ -874,14 +1048,19 @@ defmodule ConveyorWeb.InvocationLive do
                   {if a.shard > 1 or length(g.attempts) > 1,
                     do: "s#{a.shard}/a#{a.attempt} ",
                     else: ""}{a.status}
-                  <a
-                    :if={
-                      file_uri(Enum.find(List.wrap(a.files["files"]), &(&1["name"] == "test.log")))
-                    }
-                    href={file_uri(Enum.find(a.files["files"], &(&1["name"] == "test.log")))}
+                  <button
+                    :for={f <- test_files(a)}
+                    type="button"
+                    phx-click="view_test_file"
+                    phx-value-label={a.label}
+                    phx-value-config={a.configuration_id}
+                    phx-value-run={a.run}
+                    phx-value-shard={a.shard}
+                    phx-value-attempt={a.attempt}
+                    phx-value-name={f["name"]}
                     class="ml-1 text-base-content/50 hover:underline"
-                    title="test.log (as reported by Bazel)"
-                  >log</a>
+                    title={"view #{f["name"]}"}
+                  >{String.replace(f["name"], "test.", "")}</button>
                 </span>
               </div>
             </td>

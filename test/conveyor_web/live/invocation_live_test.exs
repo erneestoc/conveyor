@@ -177,6 +177,50 @@ defmodule ConveyorWeb.InvocationLiveTest do
     {:ok, view, _} = live(conn, ~p"/invocation/#{id}/timeline")
     assert has_element?(view, "#profile-hint", "not allowed to contact")
   end
+
+  test "tests tab fetches test.log and test.xml from the blob store", %{
+    conn: conn,
+    ctx: ctx,
+    ok_id: ok_id
+  } do
+    for digest <-
+          ~w(b5a25a43f146a8201e71729b95aec18cbebc3d47a61be6f6f11523d46d0d755c 94a90e1beb50bfb773239210a2b21dfc0b3fbb709b3fce460f1886fc891868bc) do
+      {:ok, _} =
+        Conveyor.Blobs.put(File.read!(Path.join([File.cwd!(), "test/fixtures/blobs", digest])))
+    end
+
+    id = ingest_fixture!("remote_cache_upload", ctx)
+    {:ok, view, _} = live(conn, ~p"/invocation/#{id}/tests")
+    row = "#test-#{:erlang.phash2("//app:pass_test")}"
+
+    view |> element("#{row} button[phx-value-name='test.log']") |> render_click()
+    assert render_async(view) =~ "pass_test: ok"
+    assert has_element?(view, "#test-file-log")
+
+    view |> element("#{row} button[phx-value-name='test.xml']") |> render_click()
+    render_async(view)
+    assert has_element?(view, "#test-file-junit tr[data-status=passed] td", "app/pass_test")
+    assert has_element?(view, "#test-file-junit details")
+
+    view |> element("#close-test-file") |> render_click()
+    refute has_element?(view, "#test-file")
+
+    # Files Bazel kept locally cannot be fetched; the panel explains why.
+    {:ok, view, _} = live(conn, ~p"/invocation/#{ok_id}/tests")
+    view |> element("#{row} button[phx-value-name='test.log']") |> render_click()
+    assert render_async(view) =~ "kept this file on the machine"
+    assert has_element?(view, "#test-file-error")
+
+    # Unknown attempts are reported, not crashed on.
+    assert render_click(view, "view_test_file", %{
+             "label" => "//nope",
+             "config" => "",
+             "run" => "1",
+             "shard" => "1",
+             "attempt" => "1",
+             "name" => "test.log"
+           }) =~ "not attached"
+  end
 end
 
 defmodule ConveyorWeb.InvocationLiveMetricsTest do
