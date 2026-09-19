@@ -632,3 +632,19 @@ bes/
 - **Cache endpoint connection model (post-M5 adjustment, 2026-09-19):** endpoint override, TLS modes (plaintext / system roots / custom CA / mTLS from secret files), bearer token; verified against an mTLS gRPC listener in tests; `docs/cache-endpoints.md`.
 - **Learned in M2/M3.** The segment partition day must come from the row's `inserted_at`, never from `started_at`, because the Started event rewrites `started_at` (a build ingested just after midnight UTC became unreadable). Bazel names the profile `command-<uuid>.profile.gz`.
 - **Learned in M1.** `TargetConfigured` ids carry no configuration, so targets are keyed by label+aspect. Bazel 9 names the profile `command-<uuid>.profile.gz`. `CREATE TABLE IF NOT EXISTS … PARTITION OF` still races between two booting nodes and must tolerate `duplicate_table`. A finish lifecycle event arriving after the worker exited must not start a new worker (it did, and the worker lived until the idle timeout).
+
+## 22. M9 proposal (2026-09-19): questions still unanswered
+
+Agreed direction with the user: (1) explain rebuilds from input digests, (2) browser tests for settings and auth, (3) a better dashboard. Use cases: local developer builds, RBE in CI, fleet/platform views.
+
+**Local builds.** Why did target X rebuild? (input-digest diff against the previous run of the same target; non-hermetic targets whose digests change on identical sources). Why is my incremental build slow? (analysis vs execution split, Skyframe invalidation counts, cache hit local vs remote). Is my machine the limit? (profile CPU/memory counters, sandbox setup vs execution). Did I break it or is it flaky? (test history, same failure on main).
+
+**RBE in CI.** Where does wall time go per build and over time (cache check / upload / queue / execute / download, now available per build via profile summaries, not yet trended). Is the cache working (hit rate by mnemonic and by target over time, top missing targets, misses explained by digests). Queue time trend as an RBE capacity signal. Bytes up/down per build. Regressions per target on main week over week. Flaky tests blocking merges and retry counts. Builds in progress and p95 per pipeline (from tags).
+
+**Fleet.** Bazel version adoption; client config drift (builds missing `--remote_cache`, unusual flags) detected from parsed options; build minutes and cache usage per team for cost attribution.
+
+**Dashboard v2.** Saved segments (any query) and side-by-side segment comparison; stacked phase-over-time chart; cache hit rate by mnemonic and a top-missing-targets table; regression list (targets whose p50 rose >20 % vs the previous period); build minutes per day; queue-time trend; time-of-day heatmap. Grooming: hover tooltips with exact values on the SVG charts, period-over-period deltas on stat tiles, consistent palette and legends, empty and loading states.
+
+**Explain the rebuild (core of M9).** Ingest Bazel's compact execution log (`--execution_log_compact_file`, uploaded through the artifact API or the CAS sink); store per action: target, mnemonic, input path→digest map (deduplicated), output digests, cache status, runner. Diff view on the Actions tab: "rebuilt because these N inputs changed" with paths; dashboard report of non-hermetic targets (same inputs, different outputs or re-executed). Also feeds bytes up/down and cache hit per target.
+
+**Browser tests.** Settings: create project, create/rotate/revoke API key, cache endpoint form with TLS modes; auth: admin token in open mode, OIDC through the fake provider (needs it enabled in dev) or Keycloak in CI.
