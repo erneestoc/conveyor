@@ -18,6 +18,7 @@ defmodule Conveyor.Projects.ApiKey do
     field :name, :string
     field :scopes, {:array, :string}, default: ["ingest"]
     field :default_tags, :map, default: %{}
+    field :limits, :map, default: %{}
     field :expires_at, :utc_datetime_usec
     field :revoked_at, :utc_datetime_usec
     field :last_used_at, :utc_datetime_usec
@@ -31,7 +32,7 @@ defmodule Conveyor.Projects.ApiKey do
 
   def changeset(key, attrs) do
     key
-    |> cast(attrs, [:name, :scopes, :default_tags, :expires_at, :created_by])
+    |> cast(attrs, [:name, :scopes, :default_tags, :limits, :expires_at, :created_by])
     |> validate_required([:name])
     |> validate_length(:name, min: 1, max: 120)
     |> validate_subset(:scopes, @scopes)
@@ -39,6 +40,15 @@ defmodule Conveyor.Projects.ApiKey do
       if s == [], do: [scopes: "must include at least one scope"], else: []
     end)
     |> validate_change(:default_tags, &validate_tags/2)
+    |> validate_change(:limits, &validate_limits/2)
+  end
+
+  @limit_keys ~w(max_streams max_events_per_second max_log_bytes)
+
+  defp validate_limits(field, limits) do
+    if Enum.all?(limits, fn {k, v} -> k in @limit_keys and is_integer(v) and v > 0 end),
+      do: [],
+      else: [{field, "keys must be #{Enum.join(@limit_keys, ", ")} with positive integers"}]
   end
 
   defp validate_tags(field, tags) do

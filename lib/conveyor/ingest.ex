@@ -17,7 +17,8 @@ defmodule Conveyor.Ingest do
               api_key_tags: %{},
               keywords: [],
               instance_name: nil,
-              peer: nil
+              peer: nil,
+              limits: nil
 
     @type t :: %__MODULE__{}
   end

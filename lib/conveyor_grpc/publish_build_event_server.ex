@@ -15,6 +15,7 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
   alias Conveyor.Bep.Event
   alias Conveyor.Grpc.Acker
   alias Conveyor.Ingest
+  alias Conveyor.Limits
   alias Google.Devtools.Build.V1, as: V1
 
   @spec publish_lifecycle_event(V1.PublishLifecycleEventRequest.t(), GRPC.Server.Stream.t()) ::
@@ -43,6 +44,24 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
     # Reading requests and sending acks happen in different processes so that the handler
     # never waits on a commit: events are pushed as they arrive and acknowledged, strictly in
     # order, as the writer commits them. Cowboy accepts replies from any process.
+    %{ctx: %{api_key_id: key_id, limits: limits}} = stream.local
+
+    case Limits.acquire_stream(key_id, limits || Limits.defaults()) do
+      :ok ->
+        try do
+          run_stream(requests, stream)
+        after
+          Limits.release_stream(key_id)
+        end
+
+      {:error, :too_many_streams} ->
+        raise GRPC.RPCError,
+          status: :resource_exhausted,
+          message: "too many concurrent streams for this API key (limit #{limits.max_streams})"
+    end
+  end
+
+  defp run_stream(requests, stream) do
     acker = Acker.start(stream)
     stream = %{stream | local: Map.put(stream.local, :stream_id, nil)}
 
@@ -54,6 +73,8 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
 
         if Event.bes_kind(obe.event) == :component_stream_finished,
           do: Acker.final(acker, obe.sequence_number)
+
+        :ok = Limits.throttle(ctx.api_key_id, ctx.limits || Limits.defaults())
 
         case Ingest.push(ctx, obe, acker) do
           :ok ->

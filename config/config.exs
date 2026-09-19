@@ -98,6 +98,12 @@ config :phoenix, :json_library, Jason
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
 
+# Per-key ingest limits (see Conveyor.Limits); runtime.exs reads MAX_* in prod
+config :conveyor, Conveyor.Limits,
+  max_streams_per_key: 200,
+  max_events_per_second_per_key: 5_000,
+  max_log_bytes: 256 * 1024 * 1024
+
 # Sign-in policy (see Conveyor.Accounts); runtime.exs reads AUTH_MODE, OIDC_*, ADMIN_* in prod
 config :conveyor, Conveyor.Accounts,
   mode: :open,

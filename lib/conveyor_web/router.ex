@@ -7,7 +7,10 @@ defmodule ConveyorWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {ConveyorWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+    # Baseline policy; ConveyorWeb.Plugs.SecurityHeaders replaces it with the per-request
+    # nonce policy right after.
+    plug :put_secure_browser_headers, %{"content-security-policy" => "default-src 'self'"}
+    plug ConveyorWeb.Plugs.SecurityHeaders
     plug ConveyorWeb.Plugs.Auth
   end
 

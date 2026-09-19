@@ -85,10 +85,27 @@ defmodule Conveyor.Artifacts.BytestreamClient do
     :exit, reason -> {:error, {:stream_closed, reason}}
   end
 
-  defp rpc_error(%GRPC.RPCError{status: status, message: message}) do
-    name = status |> GRPC.Status.code_name() |> Macro.underscore() |> String.to_atom()
-    {:rpc, name, message}
-  end
+  @status_names %{
+    1 => :cancelled,
+    2 => :unknown,
+    3 => :invalid_argument,
+    4 => :deadline_exceeded,
+    5 => :not_found,
+    6 => :already_exists,
+    7 => :permission_denied,
+    8 => :resource_exhausted,
+    9 => :failed_precondition,
+    10 => :aborted,
+    11 => :out_of_range,
+    12 => :unimplemented,
+    13 => :internal,
+    14 => :unavailable,
+    15 => :data_loss,
+    16 => :unauthenticated
+  }
+
+  defp rpc_error(%GRPC.RPCError{status: status, message: message}),
+    do: {:rpc, Map.get(@status_names, status, :unknown), message}
 
   defp rpc_error(other), do: other
 end

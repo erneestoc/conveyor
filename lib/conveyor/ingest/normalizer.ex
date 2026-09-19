@@ -14,6 +14,8 @@ defmodule Conveyor.Ingest.Normalizer do
   defmodule State do
     @moduledoc "In-memory view of the invocation row plus what changed since the last commit."
     defstruct inv: %{},
+              max_log_bytes: nil,
+              log_capped: false,
               dirty: MapSet.new(),
               tag_sources: %{},
               finished_seen: false,
@@ -33,6 +35,7 @@ defmodule Conveyor.Ingest.Normalizer do
 
     %State{
       inv: inv,
+      max_log_bytes: Keyword.get(opts, :max_log_bytes),
       # A rehydrated worker (restart or takeover) must remember verdicts already committed.
       finished_seen: inv[:exit_code_name] != nil,
       aborted_seen: inv[:abort_reason] != nil,
@@ -358,6 +361,7 @@ defmodule Conveyor.Ingest.Normalizer do
 
   defp handle(:progress, %{payload: {:progress, p}}, seq, state, batch) do
     text = p.stdout <> p.stderr
+    {text, state} = cap_log(text, state)
 
     if text == "" do
       {state, batch}
@@ -543,6 +547,23 @@ defmodule Conveyor.Ingest.Normalizer do
       "combined" => o.combined_form,
       "effect_tags" => Enum.map(o.effect_tags, &to_string/1)
     }
+  end
+
+  # Enforces the per-invocation log byte limit: the chunk that crosses it is cut and a
+  # marker appended once; later chunks are dropped (events themselves are still stored).
+  defp cap_log(text, %State{max_log_bytes: nil} = state), do: {text, state}
+  defp cap_log(_text, %State{log_capped: true} = state), do: {"", state}
+
+  defp cap_log(text, %State{max_log_bytes: max} = state) do
+    used = state.inv[:log_bytes] || 0
+
+    if used + byte_size(text) <= max do
+      {text, state}
+    else
+      keep = binary_part(text, 0, max(max - used, 0))
+      marker = "\n[conveyor: build log truncated at #{max} bytes; the remainder was not stored]\n"
+      {keep <> marker, %{state | log_capped: true}}
+    end
   end
 
   @doc false

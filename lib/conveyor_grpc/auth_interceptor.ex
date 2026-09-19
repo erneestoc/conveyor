@@ -37,7 +37,13 @@ defmodule Conveyor.Grpc.AuthInterceptor do
     case Conveyor.Ingest.config(:auth, :api_key) do
       :none ->
         project = default_project()
-        {:ok, %Context{project_id: project.id, project_slug: project.slug}}
+
+        {:ok,
+         %Context{
+           project_id: project.id,
+           project_slug: project.slug,
+           limits: Conveyor.Limits.defaults()
+         }}
 
       :api_key ->
         with {:ok, plaintext} <- extract(headers),
@@ -50,7 +56,8 @@ defmodule Conveyor.Grpc.AuthInterceptor do
              project_id: key.project_id,
              project_slug: key.project.slug,
              api_key_id: key.id,
-             api_key_tags: key.default_tags
+             api_key_tags: key.default_tags,
+             limits: Conveyor.Limits.for_key(key)
            }}
         else
           {:error, :missing} ->

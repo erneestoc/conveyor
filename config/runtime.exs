@@ -84,6 +84,18 @@ if config_env() == :prod do
   config :conveyor, Conveyor.Artifacts,
     max_bytes: String.to_integer(System.get_env("ARTIFACT_MAX_MB", "512")) * 1024 * 1024
 
+  config :conveyor, Conveyor.Limits,
+    max_streams_per_key: String.to_integer(System.get_env("MAX_STREAMS_PER_KEY", "200")),
+    max_events_per_second_per_key:
+      String.to_integer(System.get_env("MAX_EVENTS_PER_SECOND_PER_KEY", "5000")),
+    max_log_bytes: String.to_integer(System.get_env("MAX_LOG_MB", "256")) * 1024 * 1024
+
+  # Behind a TLS terminator, FORCE_SSL=true redirects http to https and sends HSTS.
+  if System.get_env("FORCE_SSL") in ~w(true 1) do
+    config :conveyor, ConveyorWeb.Endpoint,
+      force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true, host: nil]
+  end
+
   # Sign-in: AUTH_MODE=open (ADMIN_TOKEN gates Settings) or oidc (OIDC_ISSUER, OIDC_CLIENT_ID,
   # OIDC_CLIENT_SECRET, OIDC_SCOPES, OIDC_GROUPS_CLAIM, OIDC_ADMIN_GROUPS, ADMIN_EMAILS,
   # ALLOWED_EMAIL_DOMAINS).

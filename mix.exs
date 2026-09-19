@@ -89,7 +89,10 @@ defmodule Conveyor.MixProject do
       # OIDC login (M6)
       {:assent, "~> 0.3.1"},
       # Test coverage gate (95% minimum, see coveralls.json)
-      {:excoveralls, "~> 0.18", only: :test}
+      {:excoveralls, "~> 0.18", only: :test},
+      # Security tooling (M6): static analysis and dependency advisories, run by mix precommit
+      {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false}
     ]
   end
 
@@ -112,7 +115,14 @@ defmodule Conveyor.MixProject do
         "esbuild conveyor --minify",
         "phx.digest"
       ],
-      precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "coveralls"]
+      precommit: [
+        "compile --warnings-as-errors",
+        "deps.unlock --unused",
+        "format",
+        "sobelow --exit",
+        "deps.audit",
+        "coveralls"
+      ]
     ]
   end
 end

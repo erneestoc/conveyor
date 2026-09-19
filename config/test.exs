@@ -51,3 +51,8 @@ config :conveyor, Conveyor.Ingest,
 config :conveyor, Oban, testing: :manual
 
 config :conveyor, Conveyor.Blobs, adapter: :disk, dir: "tmp/blobs_test"
+
+config :conveyor, Conveyor.Limits,
+  max_streams_per_key: 200,
+  max_events_per_second_per_key: 5_000,
+  max_log_bytes: 256 * 1024 * 1024

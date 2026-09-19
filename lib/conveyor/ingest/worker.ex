@@ -44,7 +44,13 @@ defmodule Conveyor.Ingest.Worker do
         label: "worker load #{id}"
       )
 
-    norm = Normalizer.new(inv, keywords: ctx.keywords, api_key_tags: ctx.api_key_tags)
+    norm =
+      Normalizer.new(inv,
+        keywords: ctx.keywords,
+        api_key_tags: ctx.api_key_tags,
+        max_log_bytes: (ctx.limits || Conveyor.Limits.defaults()).max_log_bytes
+      )
+
     day = Invocations.day(inv)
 
     state = %{

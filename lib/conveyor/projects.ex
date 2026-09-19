@@ -231,6 +231,16 @@ defmodule Conveyor.Projects do
   def cache_endpoints(%Project{settings: settings}),
     do: Map.get(settings || %{}, "cache_endpoints", %{})
 
+  @doc "Overrides the ingest limits of a key (see `Conveyor.Limits`)."
+  @spec update_api_key_limits(ApiKey.t(), map()) ::
+          {:ok, ApiKey.t()} | {:error, Ecto.Changeset.t()}
+  def update_api_key_limits(%ApiKey{} = key, limits) do
+    with {:ok, key} <- key |> ApiKey.changeset(%{limits: limits}) |> Repo.update() do
+      ApiKeyCache.invalidate(key.key_id)
+      {:ok, key}
+    end
+  end
+
   @doc "Keys expiring within `days` days (for the settings page and alerting)."
   @spec expiring_api_keys(pos_integer()) :: [ApiKey.t()]
   def expiring_api_keys(days \\ 7) do

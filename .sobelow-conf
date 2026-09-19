@@ -1,0 +1,12 @@
+[
+  verbose: false,
+  private: false,
+  skip: true,
+  # Reviewed and accepted:
+  #  - Traversal.FileModule: every path is built from a digest validated by
+  #    Conveyor.Blobs.valid_digest?/1 (64 lowercase hex chars) or from a fixture path given
+  #    on the command line by the operator.
+  #  - SQL.Query: partition DDL interpolates names derived from dates only.
+  ignore: ["Traversal.FileModule", "SQL.Query"],
+  threshold: "low"
+]

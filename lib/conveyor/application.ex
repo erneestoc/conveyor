@@ -15,6 +15,7 @@ defmodule Conveyor.Application do
       {DNSCluster, query: Application.get_env(:conveyor, :dns_cluster_query) || :ignore},
       {Phoenix.PubSub, name: Conveyor.PubSub},
       Conveyor.Projects.ApiKeyCache,
+      Conveyor.Limits,
       Conveyor.Ingest.Supervisor,
       # Start a worker by calling: Conveyor.Worker.start_link(arg)
       # {Conveyor.Worker, arg},

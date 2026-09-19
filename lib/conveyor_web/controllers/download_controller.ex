@@ -77,6 +77,8 @@ defmodule ConveyorWeb.DownloadController do
   end
 
   @doc "Serves a named artifact (uploaded or fetched) from the blob store."
+  # The content type is sanitized by safe_content_type/1 and served as an attachment.
+  # sobelow_skip ["XSS.ContentType"]
   def artifact(conn, %{"id" => id, "name" => name}) do
     inv = ConveyorWeb.Auth.invocation!(conn, id)
 
@@ -87,7 +89,7 @@ defmodule ConveyorWeb.DownloadController do
       {:ok, chunks} ->
         conn =
           conn
-          |> put_resp_content_type(artifact.content_type || "application/octet-stream", nil)
+          |> put_resp_content_type(safe_content_type(artifact.content_type), nil)
           |> put_resp_header("content-length", Integer.to_string(artifact.size))
           |> put_resp_header("content-disposition", ~s(attachment; filename="#{name}"))
           |> put_resp_header("x-content-type-options", "nosniff")
@@ -99,4 +101,25 @@ defmodule ConveyorWeb.DownloadController do
         raise ConveyorWeb.NotFoundError, "artifact #{name} is no longer in the blob store"
     end
   end
+
+  # Artifact content types are client-supplied at upload time: serve only well-formed,
+  # non-executable media types (never text/html or scripts) as attachments.
+  @doc false
+  def safe_content_type(type) when is_binary(type) do
+    cond do
+      not Regex.match?(~r{^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$}i, type) ->
+        "application/octet-stream"
+
+      String.downcase(type) in ["text/html", "application/xhtml+xml", "image/svg+xml"] ->
+        "application/octet-stream"
+
+      String.contains?(String.downcase(type), ["javascript", "ecmascript"]) ->
+        "application/octet-stream"
+
+      true ->
+        String.downcase(type)
+    end
+  end
+
+  def safe_content_type(_), do: "application/octet-stream"
 end
