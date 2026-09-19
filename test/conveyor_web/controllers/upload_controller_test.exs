@@ -106,6 +106,43 @@ defmodule ConveyorWeb.UploadControllerTest do
     assert_raise ConveyorWeb.NotFoundError, fn ->
       get(build_conn(), ~p"/invocation/#{id}/artifact/command.profile.gz")
     end
+
+    # The timeline fetches it from /profile with gzip passthrough.
+    gz = :zlib.gzip("{\"traceEvents\":[]}")
+
+    put_raw(conn, ~p"/api/v1/invocations/#{id}/artifacts/command.profile.gz", gz, [
+      {"x-api-key", key}
+    ])
+    |> json_response(201)
+
+    conn3 = get(build_conn(), ~p"/invocation/#{id}/download/profile")
+    assert get_resp_header(conn3, "content-encoding") == ["gzip"]
+    assert response(conn3, 200) == gz
+
+    put_raw(conn, ~p"/api/v1/invocations/#{id}/artifacts/command.profile.json", "{}", [
+      {"x-api-key", key}
+    ])
+    |> json_response(201)
+
+    conn4 = get(build_conn(), ~p"/invocation/#{id}/download/profile")
+    assert get_resp_header(conn4, "content-encoding") == []
+    assert response(conn4, 200) == "{}"
+    Conveyor.Repo.update_all(Conveyor.Invocations.Invocation, set: [profile_status: "referenced"])
+
+    assert_raise ConveyorWeb.NotFoundError, fn ->
+      get(build_conn(), ~p"/invocation/#{id}/download/profile")
+    end
+
+    assert_raise ConveyorWeb.NotFoundError, fn ->
+      get(build_conn(), ~p"/invocation/#{Ecto.UUID.generate()}/download/profile")
+    end
+
+    Conveyor.Repo.update_all(Conveyor.Invocations.Invocation, set: [profile_status: "available"])
+    :ok = Blobs.delete(Blobs.digest("{}"))
+
+    assert_raise ConveyorWeb.NotFoundError, fn ->
+      get(build_conn(), ~p"/invocation/#{id}/download/profile")
+    end
   end
 
   test "validates names, ownership and size", %{conn: conn, id: id, upload_key: key} do

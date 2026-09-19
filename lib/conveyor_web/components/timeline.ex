@@ -6,6 +6,7 @@ defmodule ConveyorWeb.Timeline do
   replaces the lanes when a `command.profile.gz` is available.
   """
   use Phoenix.Component
+  use ConveyorWeb, :verified_routes
 
   alias ConveyorWeb.Format
 
@@ -169,6 +170,150 @@ defmodule ConveyorWeb.Timeline do
         <code class="font-mono">command.profile.gz</code>
         can be fetched.
       </p>
+    </div>
+    """
+  end
+
+  attr :invocation, :map, required: true
+
+  @doc "Tier B: the canvas profile timeline, driven by the ProfileTimeline hook."
+  def profile_timeline(assigns) do
+    ~H"""
+    <div
+      id="profile-timeline"
+      phx-hook="ProfileTimeline"
+      phx-update="ignore"
+      data-url={~p"/invocation/#{@invocation.id}/download/profile"}
+      data-worker={~p"/assets/js/profile_worker.js"}
+      class="relative rounded-md border border-base-300 p-3 text-base-content"
+    >
+      <div class="mb-2 flex flex-wrap items-center gap-2 text-xs">
+        <input
+          type="search"
+          data-role="search"
+          placeholder="Search name, target, mnemonic…"
+          class="w-64 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+        />
+        <select data-role="category" class="rounded border border-base-300 bg-base-100 px-2 py-1">
+          <option value="-1">All categories</option>
+        </select>
+        <label class="flex items-center gap-1">
+          <input type="checkbox" data-role="critical" /> Critical path only
+        </label>
+        <button
+          type="button"
+          data-role="reset"
+          class="rounded border border-base-300 px-2 py-1 hover:bg-base-200"
+        >
+          Reset zoom
+        </button>
+        <span data-role="status" class="ml-auto text-base-content/60"></span>
+      </div>
+      <div data-role="scroller" class="max-h-[70vh] overflow-auto rounded bg-base-200/30">
+        <canvas class="block cursor-crosshair"></canvas>
+      </div>
+      <div
+        data-role="tooltip"
+        hidden
+        class="pointer-events-none absolute z-10 max-w-64 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono text-[11px] shadow"
+      >
+      </div>
+      <dl
+        data-role="details"
+        hidden
+        class="mt-2 space-y-0.5 rounded border border-base-300 p-2 text-xs"
+      >
+      </dl>
+      <p class="mt-2 text-[11px] text-base-content/50">
+        Scroll to zoom, drag to pan, shift+scroll to slide, double-click to reset. Click an event for details.
+      </p>
+    </div>
+    """
+  end
+
+  attr :summary, :map, required: true
+
+  @doc "Where build time went, from the profile summary job."
+  def profile_summary(assigns) do
+    wall = max(assigns.summary["duration_ms"] || 0, 1)
+    assigns = assign(assigns, wall: wall)
+
+    ~H"""
+    <div id="profile-summary" class="grid gap-3 text-xs lg:grid-cols-2">
+      <div class="rounded-md border border-base-300 p-3">
+        <h3 class="mb-1 text-sm font-semibold">Phases</h3>
+        <div class="flex h-3 w-full overflow-hidden rounded bg-base-200" title="build phases">
+          <div
+            :for={{p, i} <- Enum.with_index(@summary["phases"] || [])}
+            style={"width: #{Float.round(100 * p["duration_ms"] / @wall, 2)}%"}
+            class={"h-full " <> Enum.at(~w(bg-sky-500 bg-emerald-500 bg-amber-500 bg-violet-500 bg-rose-500 bg-teal-500), rem(i, 6))}
+            title={"#{p["name"]}: #{Format.duration(round(p["duration_ms"]))}"}
+          >
+          </div>
+        </div>
+        <ul class="mt-2 space-y-0.5">
+          <li :for={p <- @summary["phases"] || []} class="flex justify-between font-mono">
+            <span class="truncate">{p["name"]}</span>
+            <span class="text-base-content/70">{Format.duration(round(p["duration_ms"]))}</span>
+          </li>
+        </ul>
+        <p class="mt-2 text-base-content/60">
+          {@summary["event_count"]} events on {@summary["thread_count"]} threads ·
+          wall {Format.duration(round(@summary["duration_ms"] || 0))} ·
+          critical path {Format.duration(round(@summary["critical_path_ms"] || 0))}
+        </p>
+      </div>
+      <div class="rounded-md border border-base-300 p-3">
+        <h3 class="mb-1 text-sm font-semibold">Time by category</h3>
+        <table class="w-full">
+          <tbody>
+            <tr :for={c <- Enum.take(@summary["categories"] || [], 10)}>
+              <td class="truncate py-0.5 pr-2 font-mono">{c["name"]}</td>
+              <td class="py-0.5 pr-2 text-right font-mono text-base-content/70">{c["count"]}×</td>
+              <td class="py-0.5 text-right font-mono">{Format.duration(round(c["total_ms"]))}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div :if={(@summary["mnemonics"] || []) != []} class="rounded-md border border-base-300 p-3">
+        <h3 class="mb-1 text-sm font-semibold">Action time by mnemonic</h3>
+        <table class="w-full">
+          <tbody>
+            <tr :for={m <- Enum.take(@summary["mnemonics"] || [], 10)}>
+              <td class="truncate py-0.5 pr-2 font-mono">{m["name"]}</td>
+              <td class="py-0.5 pr-2 text-right font-mono text-base-content/70">{m["count"]}×</td>
+              <td class="py-0.5 text-right font-mono">{Format.duration(round(m["total_ms"]))}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div :if={(@summary["critical_path"] || []) != []} class="rounded-md border border-base-300 p-3">
+        <h3 class="mb-1 text-sm font-semibold">Critical path</h3>
+        <ol class="space-y-0.5">
+          <li
+            :for={c <- Enum.take(@summary["critical_path"] || [], 15)}
+            class="flex justify-between gap-2 font-mono"
+          >
+            <span class="truncate">{c["name"]}</span>
+            <span class="shrink-0 text-base-content/70">{Format.duration(round(c["duration_ms"]))}</span>
+          </li>
+        </ol>
+      </div>
+      <div class="rounded-md border border-base-300 p-3 lg:col-span-2">
+        <h3 class="mb-1 text-sm font-semibold">Longest events</h3>
+        <table class="w-full">
+          <tbody>
+            <tr :for={e <- Enum.take(@summary["longest"] || [], 15)}>
+              <td class="max-w-md truncate py-0.5 pr-2 font-mono" title={e["target"] || e["name"]}>
+                {e["name"]}
+              </td>
+              <td class="truncate py-0.5 pr-2 text-base-content/70">{e["category"]}</td>
+              <td class="truncate py-0.5 pr-2 font-mono text-base-content/70">{e["thread"]}</td>
+              <td class="py-0.5 text-right font-mono">{Format.duration(round(e["duration_ms"]))}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
     """
   end

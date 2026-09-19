@@ -31,7 +31,11 @@ config :conveyor, Oban,
   queues: [default: 10, maintenance: 2],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
-    {Oban.Plugins.Cron, crontab: [{"0 * * * *", Conveyor.Workers.PartitionMaintenance}]}
+    {Oban.Plugins.Cron,
+     crontab: [
+       {"0 * * * *", Conveyor.Workers.PartitionMaintenance},
+       {"30 3 * * *", Conveyor.Workers.BlobMaintenance}
+     ]}
   ]
 
 # BES gRPC listener (Bazel's --bes_backend target)
@@ -65,7 +69,7 @@ config :esbuild,
   version: "0.25.4",
   conveyor: [
     args:
-      ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
+      ~w(js/app.js js/profile_worker.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]}
   ]

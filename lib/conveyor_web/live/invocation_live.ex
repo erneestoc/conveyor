@@ -48,6 +48,7 @@ defmodule ConveyorWeb.InvocationLive do
        tests_by_key: %{},
        action_count: 0,
        timeline_actions: [],
+       profile_summary: %{},
        events: [],
        events_page: 1,
        events_total: 0,
@@ -130,7 +131,10 @@ defmodule ConveyorWeb.InvocationLive do
   end
 
   defp load_tab(socket, "timeline", _page) do
-    socket |> load_tab("tests", 1) |> load_tab("actions", 1)
+    socket
+    |> load_tab("tests", 1)
+    |> load_tab("actions", 1)
+    |> assign(profile_summary: profile_summary(socket.assigns.invocation))
   end
 
   defp load_tab(socket, "metrics", _page) do
@@ -213,7 +217,13 @@ defmodule ConveyorWeb.InvocationLive do
 
   def handle_info({:artifacts_changed, id}, socket) do
     inv = Conveyor.Invocations.get!(id)
-    {:noreply, assign(socket, invocation: inv, artifacts: Conveyor.Artifacts.list(inv))}
+
+    {:noreply,
+     assign(socket,
+       invocation: inv,
+       artifacts: Conveyor.Artifacts.list(inv),
+       profile_summary: profile_summary(inv)
+     )}
   end
 
   def handle_info({:log_chunks, chunks}, socket) do
@@ -359,6 +369,31 @@ defmodule ConveyorWeb.InvocationLive do
   defp tab_path(inv, "overview"), do: ~p"/invocation/#{inv.id}"
   defp tab_path(inv, tab), do: ~p"/invocation/#{inv.id}/#{tab}"
 
+  defp profile_summary(inv) do
+    case Invocations.metrics(inv) do
+      %{profile_summary: summary} when is_map(summary) -> summary
+      _ -> %{}
+    end
+  end
+
+  defp profile_hint(%{profile_status: "referenced"}),
+    do: "The profile was referenced by the build and is being fetched from the remote cache."
+
+  defp profile_hint(%{profile_status: "failed"}),
+    do: "Fetching the profile from the remote cache failed; it will be retried."
+
+  defp profile_hint(%{profile_status: "unavailable", profile_uri: "file://" <> _}),
+    do:
+      "Bazel wrote the profile to a local file. Upload it with tools/bes-upload-profile, or run with --remote_cache and --remote_build_event_upload=minimal (Conveyor's CAS sink or your own cache) so it is fetched automatically."
+
+  defp profile_hint(%{profile_status: "unavailable"}),
+    do:
+      "The profile is on a remote cache Conveyor is not allowed to contact. Add the cache host under Settings → cache endpoints, or upload the profile with tools/bes-upload-profile."
+
+  defp profile_hint(_),
+    do:
+      "No profile was reported. Bazel writes one by default (--profile); it appears here once it can be fetched or is uploaded."
+
   defp file_uri(%{"uri" => uri}), do: uri
   defp file_uri(_), do: nil
 
@@ -465,12 +500,38 @@ defmodule ConveyorWeb.InvocationLive do
             mnemonics={@mnemonics}
           />
           <.log :if={@tab == "log"} invocation={@invocation} />
-          <ConveyorWeb.Timeline.timeline
+          <div
             :if={@tab == "timeline"}
-            invocation={@invocation}
-            tests={Map.values(@tests_by_key)}
-            actions={@timeline_actions}
-          />
+            id="timeline-tab"
+            class="space-y-3"
+            data-profile={@invocation.profile_status}
+          >
+            <ConveyorWeb.Timeline.profile_timeline
+              :if={@invocation.profile_status == "available"}
+              invocation={@invocation}
+            />
+            <ConveyorWeb.Timeline.profile_summary
+              :if={@profile_summary != %{}}
+              summary={@profile_summary}
+            />
+            <p
+              :if={@invocation.profile_status != "available"}
+              id="profile-hint"
+              class="rounded-md border border-base-300 p-3 text-xs text-base-content/70"
+            >
+              {profile_hint(@invocation)}
+            </p>
+            <details open={@invocation.profile_status != "available"}>
+              <summary class="cursor-pointer text-xs text-base-content/60">
+                Timeline from build events (tests and reported actions)
+              </summary>
+              <ConveyorWeb.Timeline.timeline
+                invocation={@invocation}
+                tests={Map.values(@tests_by_key)}
+                actions={@timeline_actions}
+              />
+            </details>
+          </div>
           <.targets :if={@tab == "targets"} streams={@streams} count={map_size(@targets_by_key)} />
           <.tests :if={@tab == "tests"} groups={test_groups(@tests_by_key)} />
           <.actions

@@ -1,0 +1,4 @@
+exec ${PAGER:-/usr/bin/less} "$0" || exit 1
+Executing tests from //app:pass_test
+-----------------------------------------------------------------------------
+pass_test: ok (shard 0/1)

@@ -135,6 +135,48 @@ defmodule ConveyorWeb.InvocationLiveTest do
 
     assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/invocation/not-a-uuid") end
   end
+
+  test "timeline tab shows hints, then the profile timeline and summary", %{conn: conn, ok_id: id} do
+    {:ok, view, _} = live(conn, ~p"/invocation/#{id}/timeline")
+    assert has_element?(view, "#timeline-tab[data-profile=unavailable]")
+    assert has_element?(view, "#profile-hint", "Upload it with")
+    refute has_element?(view, "#profile-timeline")
+    assert has_element?(view, "#timeline")
+
+    fixture =
+      Path.join([
+        File.cwd!(),
+        "test/fixtures/blobs",
+        "c9fb9e145e0fbb8955f0a0f93e7cfa750e3ab9e6e15387e5caacf811cfa7ec86"
+      ])
+
+    {:ok, blob} = Conveyor.Blobs.put(File.read!(fixture), content_type: "application/gzip")
+    inv = Conveyor.Invocations.get!(id)
+    :ok = Conveyor.Artifacts.profile_available(inv, blob)
+
+    assert :ok =
+             Conveyor.Workers.ProfileSummary.perform(%Oban.Job{args: %{"invocation_id" => id}})
+
+    # The broadcast from the summary job reaches the open view.
+    assert render(view) =~ "profile-summary"
+    assert has_element?(view, "#profile-timeline[data-url='/invocation/#{id}/download/profile']")
+    assert has_element?(view, "#profile-summary", "Launch Blaze")
+    assert has_element?(view, "#profile-summary", "Genrule")
+    refute has_element?(view, "#profile-hint")
+
+    for status <- ~w(referenced failed none) do
+      Conveyor.Repo.update_all(Conveyor.Invocations.Invocation, set: [profile_status: status])
+      {:ok, view, _} = live(conn, ~p"/invocation/#{id}/timeline")
+      assert has_element?(view, "#profile-hint")
+    end
+
+    Conveyor.Repo.update_all(Conveyor.Invocations.Invocation,
+      set: [profile_status: "unavailable", profile_uri: "bytestream://x/blobs/#{blob.digest}/1"]
+    )
+
+    {:ok, view, _} = live(conn, ~p"/invocation/#{id}/timeline")
+    assert has_element?(view, "#profile-hint", "not allowed to contact")
+  end
 end
 
 defmodule ConveyorWeb.InvocationLiveMetricsTest do

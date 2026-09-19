@@ -102,7 +102,9 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:error, %GRPC.RPCError{status: 3}} =
              RE.ContentAddressableStorage.Stub.batch_read_blobs(
                channel,
-               %RE.BatchReadBlobsRequest{digests: [huge]}, metadata: meta)
+               %RE.BatchReadBlobsRequest{digests: [huge]},
+               metadata: meta
+             )
 
     big_data = :crypto.strong_rand_bytes(4 * 1024 * 1024 + 1)
 
@@ -120,7 +122,9 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:error, %GRPC.RPCError{status: 3}} =
              RE.ContentAddressableStorage.Stub.find_missing_blobs(
                channel,
-               %RE.FindMissingBlobsRequest{digest_function: :MD5}, metadata: meta)
+               %RE.FindMissingBlobsRequest{digest_function: :MD5},
+               metadata: meta
+             )
 
     assert {:error, %GRPC.RPCError{status: 12}} =
              RE.ContentAddressableStorage.Stub.get_tree(channel, %RE.GetTreeRequest{},
@@ -141,7 +145,9 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:error, %GRPC.RPCError{status: 12}} =
              RE.ContentAddressableStorage.Stub.get_chunk_mapping(
                channel,
-               %RE.GetChunkMappingRequest{}, metadata: meta)
+               %RE.GetChunkMappingRequest{},
+               metadata: meta
+             )
              |> read_stream()
 
     stream = RE.ContentAddressableStorage.Stub.register_chunk_mapping(channel, metadata: meta)
@@ -153,7 +159,9 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:error, %GRPC.RPCError{status: 5}} =
              RE.ActionCache.Stub.get_action_result(
                channel,
-               %RE.GetActionResultRequest{action_digest: digest("act")}, metadata: meta)
+               %RE.GetActionResultRequest{action_digest: digest("act")},
+               metadata: meta
+             )
 
     assert {:error, %GRPC.RPCError{status: 5}} =
              RE.ActionCache.Stub.get_action_result(channel, %RE.GetActionResultRequest{},
@@ -179,12 +187,16 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:error, %GRPC.RPCError{status: 12}} =
              RE.ContentAddressableStorage.Stub.find_missing_blobs(
                channel,
-               %RE.FindMissingBlobsRequest{}, metadata: meta)
+               %RE.FindMissingBlobsRequest{},
+               metadata: meta
+             )
 
     assert {:error, %GRPC.RPCError{status: 12}} =
              RE.ContentAddressableStorage.Stub.batch_update_blobs(
                channel,
-               %RE.BatchUpdateBlobsRequest{}, metadata: meta)
+               %RE.BatchUpdateBlobsRequest{},
+               metadata: meta
+             )
 
     assert {:error, %GRPC.RPCError{status: 12}} =
              RE.ActionCache.Stub.get_action_result(channel, %RE.GetActionResultRequest{},
@@ -194,7 +206,9 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert {:ok, %RE.BatchReadBlobsResponse{}} =
              RE.ContentAddressableStorage.Stub.batch_read_blobs(
                channel,
-               %RE.BatchReadBlobsRequest{}, metadata: meta)
+               %RE.BatchReadBlobsRequest{},
+               metadata: meta
+             )
   end
 
   defp read_stream({:ok, replies}), do: Enum.find(replies, &match?({:error, _}, &1))

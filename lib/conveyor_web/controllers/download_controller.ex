@@ -5,6 +5,8 @@ defmodule ConveyorWeb.DownloadController do
   alias Conveyor.Bep.Fixture
   alias Conveyor.Invocations
 
+  def show(conn, %{"id" => id, "kind" => "profile"}), do: profile(conn, %{"id" => id})
+
   def show(conn, %{"id" => id, "kind" => kind}) when kind in ["log", "events"] do
     inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
 
@@ -30,6 +32,50 @@ defmodule ConveyorWeb.DownloadController do
 
   def show(_conn, _params), do: raise(ConveyorWeb.NotFoundError, "unknown download")
 
+  @doc """
+  Serves the JSON profile for the timeline. Gzipped profiles are sent as-is with
+  `Content-Encoding: gzip`, so the browser (and the Web Worker's `fetch`) sees JSON.
+  """
+  def profile(conn, %{"id" => id}) do
+    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
+
+    if inv.profile_status != "available" or is_nil(inv.profile_blob),
+      do: raise(ConveyorWeb.NotFoundError, "profile not available")
+
+    case Conveyor.Blobs.stream(inv.profile_blob, chunk_size: 256 * 1024) do
+      {:ok, chunks} ->
+        {chunks, conn} = maybe_gzip_encoding(chunks, conn)
+
+        conn
+        |> put_resp_content_type("application/json")
+        |> put_resp_header("cache-control", "private, max-age=3600")
+        |> put_resp_header("x-content-type-options", "nosniff")
+        |> send_chunked(200)
+        |> send_chunks(chunks)
+
+      {:error, _} ->
+        raise ConveyorWeb.NotFoundError, "profile is no longer in the blob store"
+    end
+  end
+
+  # Peeks at the first chunk: a gzip magic number means we can pass the bytes through
+  # with a content-encoding header instead of inflating them on the server.
+  defp maybe_gzip_encoding(chunks, conn) do
+    case Enum.take(chunks, 1) do
+      [<<0x1F, 0x8B, _::binary>>] -> {chunks, put_resp_header(conn, "content-encoding", "gzip")}
+      _ -> {chunks, conn}
+    end
+  end
+
+  defp send_chunks(conn, chunks) do
+    Enum.reduce_while(chunks, conn, fn data, conn ->
+      case chunk(conn, data) do
+        {:ok, conn} -> {:cont, conn}
+        {:error, _} -> {:halt, conn}
+      end
+    end)
+  end
+
   @doc "Serves a named artifact (uploaded or fetched) from the blob store."
   def artifact(conn, %{"id" => id, "name" => name}) do
     inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
@@ -47,12 +93,7 @@ defmodule ConveyorWeb.DownloadController do
           |> put_resp_header("x-content-type-options", "nosniff")
           |> send_chunked(200)
 
-        Enum.reduce_while(chunks, conn, fn data, conn ->
-          case chunk(conn, data) do
-            {:ok, conn} -> {:cont, conn}
-            {:error, _} -> {:halt, conn}
-          end
-        end)
+        send_chunks(conn, chunks)
 
       {:error, _} ->
         raise ConveyorWeb.NotFoundError, "artifact #{name} is no longer in the blob store"

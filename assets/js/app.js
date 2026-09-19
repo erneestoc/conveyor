@@ -26,12 +26,13 @@ import {hooks as colocatedHooks} from "phoenix-colocated/conveyor"
 import topbar from "../vendor/topbar"
 import {LiveTime} from "./hooks/live_time"
 import {LogViewer} from "./hooks/log_viewer"
+import {ProfileTimeline} from "./hooks/profile_timeline"
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks, LiveTime, LogViewer},
+  hooks: {...colocatedHooks, LiveTime, LogViewer, ProfileTimeline},
 })
 
 // Show progress bar on live navigation and form submits
