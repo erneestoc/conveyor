@@ -18,7 +18,7 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 ## 2. Working agreements with the user (do not relitigate)
 
 - Project name is **Conveyor** (modules `Conveyor.*`, `ConveyorWeb.*`).
-- **Commit per step**, never push. Attribution trailer on every commit:
+- **Commit per step**; push `main` to `origin` (github.com/erneestoc/conveyor) when a step is green. Tags trigger the public release workflow (GHCR image + chart): push tags only when the user says so. Attribution trailer on every commit:
   `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
 - **95%+ line coverage is a hard gate**: `mix precommit` = compile --warnings-as-errors,
   deps.unlock --unused, format, `coveralls` with `minimum_coverage: 95` (`coveralls.json`
@@ -112,7 +112,7 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - **Tags:** lowercase keys, string values; reserved keys (`status`, `id`, `project`) become `user.<key>`; ignored: build_timestamp, formatted_date, build_embed_label, command_name, protocol_name.
 - **API keys:** `conveyor_<8 base32 chars>_<43 base64url>`; sha256 stored; lookup by key_id via ETS (30 s TTL, invalidated locally + via PubSub).
 - **Bazel retry budget is short** (default 4 retries ≈ seconds). Docs must recommend `--build_event_upload_max_retries=10`; restarts must be fast; balancers must stop routing before a node drains.
-- **Bazel copies the client env into the command line** (`--client_env=NAME=VALUE`), so scrubbing is mandatory; fixtures were scrubbed and history rewritten.
+- **Bazel copies the client env into the command line** (`--client_env=NAME=VALUE`), so scrubbing is mandatory. 2026-09-19: GitHub push protection caught real AWS keys in the recorded fixtures (the scrubber missed credential-named env vars such as `AWS_SECRET_ACCESS_KEY`; fixed with the `@env_re` rule, fixtures re-scrubbed, and the whole history rewritten with `git filter-repo --blob-callback`, same-length filler so old protobuf fixtures still decode). Before recording new fixtures, run Bazel from a shell without credentials in the environment (`env -i PATH=$PATH HOME=$HOME bazel ...`), and re-scrub with `Conveyor.Ingest.Scrub` (see the scrub test that asserts fixtures are already clean).
 - **Finish lifecycle events must never start a new worker** for a finished build (it did once; worker lived until idle timeout).
 - Config knobs live in `config :conveyor, Conveyor.Ingest` (auth, idle_timeout_ms, linger_ms, batch_max_events/bytes, batch_flush_ms, writer_shards, writer_flush_ms, tag_flush_ms, broadcast_interval_ms, max_unacked_events).
 - **Log viewer path (any log size):** the LiveView never sends log text; `log:reset` carries the download URL, `live` and byte count; the browser's log worker streams `/invocation/:id/download/log` (chunked, `x-log-bytes` header) into a paged byte buffer with terminal emulation (`\r`, cursor-up, SGR kept) and serves only visible lines to the page. Live appends (`{:log_chunks, chunks, offset}` on the log topic → `log:append` with `offset`) splice by byte offset; appends ahead of the loaded bytes queue and trigger one delayed reload. Measured: 50 MB in 0.2 s, 127 MB RSS, filter 9 ms. `node --test assets/test/*.test.mjs` runs in precommit (Node 24 on this machine).
