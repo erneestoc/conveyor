@@ -14,8 +14,12 @@ defmodule Conveyor.Grpc.DrainTest do
     Drain.start()
     on_exit(fn -> Drain.stop() end)
 
-    assert {:error, {:stream_closed, _}} =
+    # The server answers UNAVAILABLE; depending on timing the client sees that status or
+    # the sender's closed stream first.
+    assert {:error, reason} =
              Replay.run(fixture("analysis_failure"), port: port, api_key: plaintext)
+
+    assert match?(%GRPC.RPCError{status: 14}, reason) or match?({:stream_closed, _}, reason)
 
     Drain.stop()
 
