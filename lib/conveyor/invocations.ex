@@ -202,6 +202,25 @@ defmodule Conveyor.Invocations do
     )
   end
 
+  @doc "Recomputes a project's tag facet counts from its invocations (after bulk deletes or reshaping)."
+  @spec rebuild_tag_keys!(integer()) :: :ok
+  def rebuild_tag_keys!(project_id) do
+    Repo.query!("DELETE FROM tag_keys WHERE project_id = $1", [project_id])
+
+    Repo.query!(
+      """
+      INSERT INTO tag_keys (project_id, key, value, count, last_seen_at)
+      SELECT $1, t.key, t.value, count(*), max(i.started_at)
+      FROM invocations i, jsonb_each_text(i.tags) AS t
+      WHERE i.project_id = $1
+      GROUP BY t.key, t.value
+      """,
+      [project_id]
+    )
+
+    :ok
+  end
+
   @spec tag_keys(integer(), keyword()) :: [TagKey.t()]
   def tag_keys(project_id, opts \\ []) do
     limit = Keyword.get(opts, :limit, 20)

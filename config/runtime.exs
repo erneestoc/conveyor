@@ -74,6 +74,11 @@ if config_env() == :prod do
 
   host = System.get_env("PHX_HOST") || "example.com"
 
+  # Retention: builds (rows, cascading) and raw event/log segments (dropped by day).
+  config :conveyor,
+    retention_days: String.to_integer(System.get_env("RETENTION_DAYS", "90")),
+    retention_raw_days: String.to_integer(System.get_env("RETENTION_RAW_DAYS", "14"))
+
   # Ingest tuning (see Conveyor.Ingest and PLAN §13); defaults are in config.exs.
   ingest_env = fn var, key ->
     case System.get_env(var) do

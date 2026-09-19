@@ -1,0 +1,65 @@
+name: Bazel end-to-end
+
+# Real Bazel builds (7, 8 and 9) streamed into a Conveyor server started from this
+# checkout, then verified through the persistence oracle.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 5 * * *"
+
+jobs:
+  e2e:
+    name: bazel ${{ matrix.bazel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        bazel: ["7.6.1", "8.3.1", "9.2.0"]
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: conveyor_dev
+        ports: ["5440:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: e2e-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+      - run: mix deps.get
+      - run: mix compile
+      - run: mix ecto.create && mix ecto.migrate
+      - name: Start Conveyor
+        run: |
+          PORT=4000 BES_INGEST_AUTH=none nohup mix phx.server > server.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf localhost:4000/health/ready && break; sleep 2; done
+          curl -sf localhost:4000/health/ready
+      - uses: bazelbuild/setup-bazelisk@v3
+      - name: bazel test → Conveyor
+        working-directory: test/fixtures/workspace
+        env:
+          USE_BAZEL_VERSION: ${{ matrix.bazel }}
+        run: |
+          bazel test //app:pass_test //lib:greeting \
+            --bes_backend=grpc://localhost:1985 \
+            --bes_results_url=http://localhost:4000/invocation/ \
+            --bes_upload_mode=wait_for_upload_complete --bes_timeout=60s \
+            --build_metadata=CI=true --build_metadata=BAZEL=${USE_BAZEL_VERSION}
+      - name: Verify the build landed exactly once
+        run: mix conveyor.e2e_check --bazel ${{ matrix.bazel }}
+      - name: Server log
+        if: failure()
+        run: tail -100 server.log

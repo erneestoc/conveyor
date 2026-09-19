@@ -68,7 +68,7 @@ defmodule Conveyor.Seed do
       |> Enum.map(fn {:ok, id} -> id end)
 
     Conveyor.Ingest.TagCounter.flush()
-    rebuild_tag_keys!(project.id)
+    Conveyor.Invocations.rebuild_tag_keys!(project.id)
     ids
   end
 
@@ -109,7 +109,7 @@ defmodule Conveyor.Seed do
     plan = %{plan(1) | ci?: true, user: "ci", host: "ci-runner-1", branch: "main", scale: 400.0}
     shape!(id, plan)
     Conveyor.Ingest.TagCounter.flush()
-    rebuild_tag_keys!(project.id)
+    Conveyor.Invocations.rebuild_tag_keys!(project.id)
     id
   end
 
@@ -346,23 +346,5 @@ defmodule Conveyor.Seed do
       sandbox_exec: misses - remote - worker,
       local_exec: 0
     ]
-  end
-
-  # Facets are a cache of the tags column; rebuild them from the truth after reshaping.
-  defp rebuild_tag_keys!(project_id) do
-    Repo.query!("DELETE FROM tag_keys WHERE project_id = $1", [project_id])
-
-    Repo.query!(
-      """
-      INSERT INTO tag_keys (project_id, key, value, count, last_seen_at)
-      SELECT $1, t.key, t.value, count(*), max(i.started_at)
-      FROM invocations i, jsonb_each_text(i.tags) AS t
-      WHERE i.project_id = $1
-      GROUP BY t.key, t.value
-      """,
-      [project_id]
-    )
-
-    :ok
   end
 end

@@ -2,52 +2,83 @@
 
 Self-hosted build observability for [Bazel](https://bazel.build). Conveyor is a
 [Build Event Service](https://bazel.build/remote/bep) server with a real-time web UI:
-point `--bes_backend` at it and every build shows up with its log, timeline, targets,
-tests, cache statistics and metrics, filterable by any tag you attach with
-`--build_metadata`.
+point `--bes_backend` at it and every build shows up live with its log, timeline,
+targets, tests, cache statistics and metrics, filterable by any tag you attach with
+`--build_metadata`, plus a dashboard of success rate, duration percentiles, cache hit
+rate, failures and flaky tests per team, branch or CI segment.
 
-Status: **pre-alpha, under active development.** See [PLAN.md](PLAN.md) for the roadmap and [HANDOFF.md](HANDOFF.md) for the current state and how to resume work.
+- One binary (Elixir release) + PostgreSQL; S3 for artifacts when running more than one node.
+- Acks are the durability boundary: an event is acknowledged only once it is committed,
+  and a build resumes on any node after a crash. Measured at 1,000 concurrent streams
+  with p99 ack under 150 ms and zero loss through a killed node.
+- Logs of any size stream into a virtualized viewer (50 MB renders in a fraction of a second).
+- API keys per project for Bazel, OpenID Connect for people, audit log, secret scrubbing.
 
-## Development
+Status: **0.1.0**, verified end to end with Bazel 7, 8 and 9.
 
-Requirements: Elixir 1.20+ / OTP 29, Docker (for PostgreSQL), `protoc` and
-`protoc-gen-elixir` only if you change the vendored protos.
+## Quick start
 
 ```sh
-docker compose -f docker-compose.dev.yml up -d   # PostgreSQL on 127.0.0.1:5440
-mix setup
-PORT=4000 mix phx.server                          # web on :4000, BES gRPC on :1985
+git clone https://github.com/example/conveyor && cd conveyor
+docker compose up -d           # PostgreSQL + Conveyor on http://localhost:4000, gRPC :1985
 ```
 
-In development the BES endpoint accepts unauthenticated streams into the `default`
-project (set `BES_INGEST_AUTH=api_key` to require keys). Point a Bazel workspace at it:
+Open http://localhost:4000, sign in with the `ADMIN_TOKEN` from `docker-compose.yml`
+(change it), create a project and an API key in Settings, then in any Bazel workspace:
 
 ```sh
 bazel test //... \
   --bes_backend=grpc://localhost:1985 \
   --bes_results_url=http://localhost:4000/invocation/ \
-  --build_metadata=USER=$USER --build_metadata=CI=false
+  --bes_header=x-api-key=conveyor_... \
+  --build_metadata=TEAM=infra --build_metadata=CI=false
 ```
 
-With API keys (production default), create a project and a key, then pass the key as a
-header. Keys are shown once; only a hash is stored.
+Bazel prints the link to the build as it starts. See [docs/bazel.md](docs/bazel.md) for
+the full client recipe (upload modes, remote cache, profiles) and
+[docs/ci.md](docs/ci.md) for GitHub Actions and Buildkite.
+
+## Deploying
+
+- [docs/production.md](docs/production.md): topology, sizing from the load tests, Postgres
+  settings, connection pooling, rollouts, alerts and a go-live checklist.
+- [deploy/kubernetes](deploy/kubernetes): manifests with a horizontal autoscaler.
+- [deploy/aws-asg](deploy/aws-asg): Terraform for an EC2 auto-scaling group.
+- [deploy/grafana/conveyor.json](deploy/grafana/conveyor.json): dashboard for the
+  Prometheus metrics served at `/metrics`.
+- [docs/auth.md](docs/auth.md): OpenID Connect and admin access.
+  [docs/security.md](docs/security.md): threat model. [docs/cache-endpoints.md](docs/cache-endpoints.md):
+  fetching profiles and test logs from your remote cache.
+
+Configuration is by environment variables (`DATABASE_URL`, `SECRET_KEY_BASE`, `PHX_HOST`,
+`PORT`, `GRPC_PORT`, `AUTH_MODE`, `BLOB_STORE`, `RETENTION_DAYS`, ...); every variable is
+listed with its default in `config/runtime.exs`.
+
+## Development
+
+Requirements: Elixir 1.20+ / OTP 29, Node 20+ (for the log-engine tests), Docker for
+PostgreSQL, `protoc` and `protoc-gen-elixir` only if you change the vendored protos.
 
 ```sh
-mix run -e 'IO.puts(elem(Conveyor.Projects.create_api_key(Conveyor.Projects.ensure_default_project!(), %{name: "laptop"}), 2))'
-bazel test //... --bes_backend=grpc://localhost:1985 --bes_header=x-api-key=conveyor_...
+docker compose -f docker-compose.dev.yml up -d   # PostgreSQL on 127.0.0.1:5440
+mix setup
+PORT=4000 mix phx.server                          # web on :4000, BES gRPC on :1985
+mix conveyor.seed --replay 1500 --days 30 --big-log 50   # realistic data to browse
 ```
 
-Or replay a recorded build without Bazel, optionally simulating dropped connections and
-verifying that everything was persisted exactly once:
+In development the BES endpoint accepts unauthenticated streams into the `default`
+project (set `BES_INGEST_AUTH=api_key` to require keys). Useful commands:
 
 ```sh
-mix conveyor.replay test/fixtures/bep/clean_build_and_test.bep --repeat 10 --concurrency 5 --drop-after 20 --verify
+mix conveyor.replay test/fixtures/bep/*.bep --repeat 10 --concurrency 5 --drop-after 20 --verify
+mix conveyor.loadgen --streams 200 --builds 2000 --retries 5 --verify     # or the bes_loadgen escript
+mix conveyor.e2e_check --bazel 9.2.0                                       # after a real bazel run
+mix precommit                                                              # the CI gate
 ```
 
-Fixtures under `test/fixtures/bep/` were recorded from `test/fixtures/workspace/` with
-`--build_event_binary_file`. Regenerate the protobuf modules with `priv/protos/gen.sh`.
-
-Run `mix precommit` before committing.
+`PLAN.md` holds the roadmap and per-milestone measurements; `HANDOFF.md` the operational
+notes for contributors. Fixtures under `test/fixtures/bep/` were recorded from
+`test/fixtures/workspace/`; regenerate protobuf modules with `priv/protos/gen.sh`.
 
 ## License
 

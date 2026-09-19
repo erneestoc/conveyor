@@ -54,8 +54,10 @@ Settings on the server:
   PgBouncer is not supported. RDS Proxy works only with session pinning, which removes
   its benefit; connect directly.
 - `shared_buffers` 25 % of RAM, `effective_io_concurrency` 200 on SSD, `wal_compression = lz4`.
-- Storage growth is bounded by retention: `RETENTION_DAYS` for builds, `RETENTION_RAW_DAYS`
-  for raw event and log segments (daily partitions are dropped, not deleted row by row).
+- Storage growth is bounded by retention: `RETENTION_DAYS` (default 90) deletes builds in
+  batches nightly; `RETENTION_RAW_DAYS` (default 14) drops raw event and log segments by
+  daily partition, so the log and events tabs of older builds are gone while their summary,
+  targets, tests and metrics remain until `RETENTION_DAYS`.
 
 ## Bazel clients
 

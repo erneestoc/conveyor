@@ -36,7 +36,8 @@ config :conveyor, Oban,
     {Oban.Plugins.Cron,
      crontab: [
        {"0 * * * *", Conveyor.Workers.PartitionMaintenance},
-       {"30 3 * * *", Conveyor.Workers.BlobMaintenance}
+       {"30 3 * * *", Conveyor.Workers.BlobMaintenance},
+       {"0 2 * * *", Conveyor.Workers.BuildRetention}
      ]}
   ]
 
