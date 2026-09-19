@@ -81,6 +81,42 @@ defmodule Conveyor.QueryTest do
     db
   end
 
+  test "terms rendered to a query string parse back to the same terms" do
+    values = [
+      "alice",
+      "",
+      "*",
+      "John Doe",
+      "feat(x)",
+      "a:b=c",
+      "-lead",
+      ">5",
+      "!=x",
+      "~re",
+      "\"quoted\"",
+      "caf\u00e9",
+      "tab\there",
+      "2026-09-18",
+      "a,b"
+    ]
+
+    for value <- values do
+      terms = [%{neg: false, key: "k", op: :eq, value: value}]
+      rendered = Query.to_query_string(terms)
+      assert {:ok, ^terms} = Query.parse(rendered), "#{inspect(value)} rendered as #{rendered}"
+    end
+
+    terms = [
+      %{neg: true, key: "k", op: :eq, value: "*"},
+      %{neg: false, key: "d", op: :gt, value: "5m"},
+      %{neg: false, key: "k", op: :in, value: ["a", "b"]},
+      %{neg: false, key: nil, op: :text, value: "free text"},
+      %{neg: false, key: "k", op: :exists, value: nil}
+    ]
+
+    assert {:ok, ^terms} = Query.parse(Query.to_query_string(terms))
+  end
+
   test "column and tag queries agree between SQL and in-memory evaluation", %{
     invs: invs,
     ids: [ok, failed, running]

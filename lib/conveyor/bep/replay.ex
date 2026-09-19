@@ -118,24 +118,31 @@ defmodule Conveyor.Bep.Replay do
                 {:invocation_attempt_started,
                  %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}}
              ]),
-           {:ok, {acks, latencies}} <- send_with_retry(conn, events, drop_after),
-           :ok <-
-             maybe_lifecycle(lifecycle?, conn, [
-               {stream_id, 2,
-                {:invocation_attempt_finished,
-                 %V1.BuildEvent.InvocationAttemptFinished{invocation_status: status(events)}}},
-               {%{stream_id | invocation_id: ""}, 2,
-                {:build_finished, %V1.BuildEvent.BuildFinished{status: status(events)}}}
-             ]) do
-        {:ok,
-         %{
-           invocation_id: invocation_id,
-           build_id: build_id,
-           sent: length(events) + 1,
-           acks: acks,
-           latencies_ms: latencies,
-           duration_ms: System.monotonic_time(:millisecond) - started_at
-         }}
+           {:ok, conn, {acks, latencies}} <- send_with_retry(conn, events, drop_after) do
+        # After a simulated drop, `conn` is the fresh connection; everything else the
+        # client sends for this build goes through it too.
+        try do
+          with :ok <-
+                 maybe_lifecycle(lifecycle?, conn, [
+                   {stream_id, 2,
+                    {:invocation_attempt_finished,
+                     %V1.BuildEvent.InvocationAttemptFinished{invocation_status: status(events)}}},
+                   {%{stream_id | invocation_id: ""}, 2,
+                    {:build_finished, %V1.BuildEvent.BuildFinished{status: status(events)}}}
+                 ]) do
+            {:ok,
+             %{
+               invocation_id: invocation_id,
+               build_id: build_id,
+               sent: length(events) + 1,
+               acks: acks,
+               latencies_ms: latencies,
+               duration_ms: System.monotonic_time(:millisecond) - started_at
+             }}
+          end
+        after
+          if conn.channel != channel, do: GRPC.Stub.disconnect(conn.channel)
+        end
       end
     end)
   end
@@ -162,7 +169,9 @@ defmodule Conveyor.Bep.Replay do
     }
   end
 
-  defp send_with_retry(conn, events, nil), do: send_stream(conn, events, 1, nil)
+  defp send_with_retry(conn, events, nil) do
+    with {:ok, result} <- send_stream(conn, events, 1, nil), do: {:ok, conn, result}
+  end
 
   defp send_with_retry(conn, events, drop_after) do
     # First attempt: send `drop_after` events, then drop the connection mid-stream without
@@ -173,13 +182,11 @@ defmodule Conveyor.Bep.Replay do
 
     # The resend dials a fresh connection, as Bazel does after losing one. The old
     # connection may still hold frames queued for the cancelled stream (HTTP/2 flow
-    # control), and a new stream on it would wait behind them forever.
+    # control), and anything else sent on it would wait behind them forever. The caller
+    # keeps using the new connection and disconnects it at the end.
     with {:ok, channel} <- conn.connect.() do
-      try do
-        send_stream(%{conn | channel: channel}, events, 1, nil)
-      after
-        GRPC.Stub.disconnect(channel)
-      end
+      conn = %{conn | channel: channel}
+      with {:ok, result} <- send_stream(conn, events, 1, nil), do: {:ok, conn, result}
     end
   end
 

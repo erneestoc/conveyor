@@ -123,6 +123,11 @@ end
 defmodule ConveyorWeb.BuildsLiveSearchTest do
   use ConveyorWeb.LiveCase, async: false
 
+  import Ecto.Query
+
+  alias Conveyor.Invocations.Invocation
+  alias Conveyor.Repo
+
   setup do
     ctx = context()
 
@@ -163,6 +168,7 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
 
     view |> element("#toggle-facets") |> render_click()
     refute has_element?(view, "#facets")
+    view |> element("#toggle-facets") |> render_click()
 
     # Live updates respect the query.
     summary = %{
@@ -190,5 +196,23 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
     )
 
     assert has_element?(view, "#inv-#{summary.id}")
+
+    # Facet values that need quoting toggle on and off without a query error.
+    Repo.update_all(from(i in Invocation, where: i.id == ^ok_id),
+      set: [tags: %{"empty" => "", "star" => "*", "who" => "John Doe"}]
+    )
+
+    Conveyor.Invocations.rebuild_tag_keys!(Conveyor.Projects.ensure_default_project!().id)
+    {:ok, view, _} = live(conn, ~p"/")
+
+    for {key, value} <- [{"empty", ""}, {"star", "*"}, {"who", "John Doe"}] do
+      id = "facet-#{:erlang.phash2({key, value})}"
+      view |> element("##{id}") |> render_click()
+      assert_patch(view)
+      refute has_element?(view, "#query-error"), "#{key}=#{inspect(value)} raised a query error"
+      assert has_element?(view, "#inv-#{ok_id}")
+      view |> element("##{id}") |> render_click()
+      assert_patch(view, ~p"/")
+    end
   end
 end

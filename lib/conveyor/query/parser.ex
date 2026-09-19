@@ -189,10 +189,13 @@ defmodule Conveyor.Query.Parser do
   defp op_string(:lte), do: "<="
   defp op_string(:regex), do: "~"
 
-  defp quote_value(v) when is_binary(v),
-    do:
-      if(String.contains?(v, [" ", "\"", "(", ")"]),
-        do: "\"" <> String.replace(v, "\"", "\\\"") <> "\"",
-        else: v
-      )
+  # Quote whatever would not read back as the same equality term: empty values, `*`
+  # (the exists operator), values with whitespace, quotes or parentheses, and values
+  # starting with an operator character.
+  defp quote_value(v) when is_binary(v) do
+    if v == "" or v == "*" or String.contains?(v, [" ", "\t", "\"", "(", ")"]) or
+         String.starts_with?(v, ["!", "<", ">", "=", "~", ":"]),
+       do: "\"" <> String.replace(v, "\"", "\\\"") <> "\"",
+       else: v
+  end
 end
