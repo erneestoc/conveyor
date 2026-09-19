@@ -108,10 +108,24 @@ defmodule Conveyor.Ingest.Writer do
   # batch so one bad invocation (typically a fenced one) cannot hold up the others.
   # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
   defp commit_group(pending) do
+    batches = Enum.map(pending, &elem(&1, 0))
+    # Segments are the bulk of every commit: compress them outside the transaction and
+    # write the whole group's rows with one statement per table.
+    event_rows = batches |> Enum.map(&Batch.event_segment_row/1) |> Enum.reject(&is_nil/1)
+    log_rows = batches |> Enum.map(&Batch.log_segment_row/1) |> Enum.reject(&is_nil/1)
+
     Retry.with_backoff(
       fn ->
         case Repo.transaction(
-               fn -> Enum.each(pending, fn {batch, _} -> apply_batch!(batch) end) end,
+               fn ->
+                 if event_rows != [],
+                   do: Repo.insert_all(EventSegment, event_rows, on_conflict: :nothing)
+
+                 if log_rows != [],
+                   do: Repo.insert_all(LogSegment, log_rows, on_conflict: :nothing)
+
+                 Enum.each(batches, &apply_batch!(&1, segments: false))
+               end,
                timeout: 60_000
              ) do
           {:ok, _} -> :ok
@@ -148,12 +162,14 @@ defmodule Conveyor.Ingest.Writer do
 
   @doc "Applies one batch inside the current transaction. Raises on failure."
   @spec apply_batch!(Batch.t()) :: :ok
-  def apply_batch!(%Batch{} = b) do
-    if row = Batch.event_segment_row(b),
-      do: Repo.insert_all(EventSegment, [row], on_conflict: :nothing)
+  def apply_batch!(%Batch{} = b, opts \\ []) do
+    if Keyword.get(opts, :segments, true) do
+      if row = Batch.event_segment_row(b),
+        do: Repo.insert_all(EventSegment, [row], on_conflict: :nothing)
 
-    if row = Batch.log_segment_row(b),
-      do: Repo.insert_all(LogSegment, [row], on_conflict: :nothing)
+      if row = Batch.log_segment_row(b),
+        do: Repo.insert_all(LogSegment, [row], on_conflict: :nothing)
+    end
 
     upsert_grouped(Target, b.invocation_id, Map.values(b.targets), [
       :invocation_id,
