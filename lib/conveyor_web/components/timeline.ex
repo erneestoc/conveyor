@@ -209,8 +209,9 @@ defmodule ConveyorWeb.Timeline do
         </button>
         <span data-role="status" class="ml-auto text-base-content/60"></span>
       </div>
+      <canvas data-role="minimap" class="mb-1 block w-full cursor-ew-resize rounded bg-base-200/30"></canvas>
       <div data-role="scroller" class="max-h-[70vh] overflow-auto rounded bg-base-200/30">
-        <canvas class="block cursor-crosshair"></canvas>
+        <canvas data-role="plot" tabindex="0" class="block cursor-crosshair focus:outline-none"></canvas>
       </div>
       <div
         data-role="tooltip"
@@ -224,19 +225,48 @@ defmodule ConveyorWeb.Timeline do
         class="mt-2 space-y-0.5 rounded border border-base-300 p-2 text-xs"
       >
       </dl>
+      <div data-role="breakdown" hidden class="mt-3 rounded border border-base-300 p-3 text-xs"></div>
       <p class="mt-2 text-[11px] text-base-content/50">
-        Scroll to zoom, drag to pan, shift+scroll to slide, double-click to reset. Click an event for details.
+        Scroll to zoom at the cursor, drag to pan, shift+drag (or drag in the axis) to zoom to a range, drag the overview to move.
+        Click an event for its details and action breakdown, double-click to zoom to it, click a thread name to collapse it.
+        Keys: <kbd>+</kbd>/<kbd>-</kbd>
+        zoom, <kbd>←</kbd>/<kbd>→</kbd>
+        pan, <kbd>0</kbd>
+        reset, <kbd>/</kbd>
+        search, <kbd>c</kbd>
+        critical path, <kbd>Esc</kbd>
+        clear.
       </p>
     </div>
     """
   end
+
+  @phase_colors %{
+    "cache check" => "#0ea5e9",
+    "upload inputs" => "#f59e0b",
+    "queued" => "#a3a3a3",
+    "remote execution" => "#8b5cf6",
+    "download outputs" => "#14b8a6",
+    "local execution" => "#10b981",
+    "setup" => "#f97316",
+    "outputs" => "#64748b"
+  }
+
+  @doc false
+  def phase_color(name), do: Map.get(@phase_colors, name, "#94a3b8")
 
   attr :summary, :map, required: true
 
   @doc "Where build time went, from the profile summary job."
   def profile_summary(assigns) do
     wall = max(assigns.summary["duration_ms"] || 0, 1)
-    assigns = assign(assigns, wall: wall)
+
+    phase_total =
+      assigns.summary["action_phases"]
+      |> List.wrap()
+      |> Enum.reduce(0, &(&1["total_ms"] + &2))
+
+    assigns = assign(assigns, wall: wall, phase_total: phase_total)
 
     ~H"""
     <div id="profile-summary" class="grid gap-3 text-xs lg:grid-cols-2">
@@ -261,6 +291,34 @@ defmodule ConveyorWeb.Timeline do
           {@summary["event_count"]} events on {@summary["thread_count"]} threads ·
           wall {Format.duration(round(@summary["duration_ms"] || 0))} ·
           critical path {Format.duration(round(@summary["critical_path_ms"] || 0))}
+        </p>
+      </div>
+      <div :if={(@summary["action_phases"] || []) != []} class="rounded-md border border-base-300 p-3">
+        <h3 class="mb-1 text-sm font-semibold">Action time by phase</h3>
+        <div class="flex h-3 w-full overflow-hidden rounded bg-base-200" title="action phases">
+          <div
+            :for={p <- @summary["action_phases"]}
+            style={"width: #{Float.round(100 * p["total_ms"] / max(@phase_total, 1), 2)}%; background: #{phase_color(p["name"])}"}
+            class="h-full"
+            title={"#{p["name"]}: #{Format.duration(round(p["total_ms"]))}"}
+          >
+          </div>
+        </div>
+        <ul class="mt-2 space-y-0.5">
+          <li :for={p <- @summary["action_phases"]} class="flex justify-between font-mono">
+            <span class="flex items-center gap-1.5">
+              <i
+                class="inline-block h-2 w-2 rounded-sm"
+                style={"background: #{phase_color(p["name"])}"}
+              ></i>
+              {p["name"]}
+              <span class="text-base-content/50">{p["count"]}×</span>
+            </span>
+            <span class="text-base-content/70">{Format.duration(round(p["total_ms"]))}</span>
+          </li>
+        </ul>
+        <p class="mt-2 text-base-content/60">
+          Summed across threads: cache checks, input uploads, queueing, remote and local execution, output downloads.
         </p>
       </div>
       <div class="rounded-md border border-base-300 p-3">

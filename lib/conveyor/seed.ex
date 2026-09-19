@@ -181,6 +181,7 @@ defmodule Conveyor.Seed do
       team: Enum.random(@teams),
       version: Enum.random(@versions),
       started_at: started_at(days),
+      profile_opts: [],
       # Fixture builds take seconds; CI builds are minutes, local incremental builds tens
       # of seconds, both log-normal.
       scale: (if(ci?, do: 40, else: 4) * :math.exp(:rand.normal() * 0.8)) |> max(1.0)
@@ -266,6 +267,8 @@ defmodule Conveyor.Seed do
         true -> "/Users/#{plan.user}/src"
       end
 
+    attach_profile!(inv, plan, duration)
+
     Repo.update_all(from(i in Invocation, where: i.id == ^id),
       set:
         [
@@ -317,6 +320,233 @@ defmodule Conveyor.Seed do
     |> Repo.update_all([])
 
     :ok
+  end
+
+  @fixture_profile "test/fixtures/blobs/c9fb9e145e0fbb8955f0a0f93e7cfa750e3ab9e6e15387e5caacf811cfa7ec86"
+  @mnemonics_weighted [
+    {"CppCompile", 40},
+    {"Javac", 12},
+    {"GoCompile", 10},
+    {"TsProject", 8},
+    {"CppLink", 5},
+    {"Genrule", 8},
+    {"TestRunner", 12},
+    {"ProtoCompile", 5}
+  ]
+
+  # CI builds get a synthetic remote-execution profile (cache checks, input uploads,
+  # queueing, remote execution, output downloads per action, spread over worker threads,
+  # with phase markers, counters and a critical path); local builds that referenced a
+  # profile get the recorded one. Summaries are computed inline so the seed finishes
+  # with everything in place.
+  defp attach_profile!(inv, plan, duration_ms) do
+    cond do
+      plan.ci? and inv.status in ["succeeded", "failed"] ->
+        put_profile!(
+          inv,
+          synthetic_profile(duration_ms, Keyword.get(plan[:profile_opts] || [], :actions))
+        )
+
+      inv.profile_status == "referenced" and File.exists?(@fixture_profile) ->
+        put_profile!(inv, File.read!(@fixture_profile))
+
+      true ->
+        :ok
+    end
+  end
+
+  defp put_profile!(inv, gz) do
+    {:ok, blob} = Conveyor.Blobs.put(gz, content_type: "application/gzip", source: "fetch")
+    :ok = Conveyor.Artifacts.profile_available(inv, blob)
+
+    Conveyor.Workers.ProfileSummary.perform(%Oban.Job{args: %{"invocation_id" => inv.id}})
+    :ok
+  end
+
+  @doc "A gzipped Bazel-style JSON profile for a remote-execution build of about `duration_ms`."
+  @spec synthetic_profile(pos_integer(), pos_integer() | nil) :: binary()
+  def synthetic_profile(duration_ms, actions \\ nil) do
+    threads = 8
+    actions = actions || max(div(duration_ms, 400), 30)
+    total_us = duration_ms * 1000
+    analysis_us = div(total_us, 8)
+
+    x = fn tid, cat, name, ts, dur, args ->
+      %{
+        ph: "X",
+        pid: 1,
+        tid: tid,
+        cat: cat,
+        name: name,
+        ts: round(ts),
+        dur: round(max(dur, 1)),
+        args: args
+      }
+    end
+
+    meta =
+      for t <- 0..threads,
+          e <- [
+            %{
+              ph: "M",
+              pid: 1,
+              tid: t,
+              name: "thread_name",
+              args: %{name: if(t == 0, do: "Main Thread", else: "skyframe-evaluator #{t}")}
+            },
+            %{ph: "M", pid: 1, tid: t, name: "thread_sort_index", args: %{sort_index: t}}
+          ],
+          do: e
+
+    markers =
+      for {name, at} <- [
+            {"Launch Blaze", 0},
+            {"Initialize command", total_us * 0.01},
+            {"Evaluate target patterns", total_us * 0.03},
+            {"Load and analyze dependencies", total_us * 0.05},
+            {"Build artifacts", analysis_us},
+            {"Complete build", total_us * 0.99}
+          ],
+          do: %{
+            ph: "i",
+            pid: 1,
+            tid: 0,
+            cat: "build phase marker",
+            name: name,
+            ts: round(at),
+            s: "g"
+          }
+
+    exec_us = total_us - analysis_us - div(total_us, 50)
+    per_thread = div(actions, threads) + 1
+
+    {events, _} =
+      Enum.flat_map_reduce(1..threads, [], fn tid, acc ->
+        {evs, _t} =
+          Enum.flat_map_reduce(1..per_thread, analysis_us, fn n, t ->
+            if t > analysis_us + exec_us,
+              do: {[], t},
+              else: action_events(x, tid, t, exec_us / per_thread, n)
+          end)
+
+        {evs, acc}
+      end)
+
+    critical =
+      events
+      |> Enum.filter(&(&1.cat == "action processing"))
+      |> Enum.sort_by(& &1.dur, :desc)
+      |> Enum.take(6)
+      |> Enum.with_index()
+      |> Enum.map(fn {a, _i} ->
+        %{
+          ph: "X",
+          pid: 1,
+          tid: threads + 1,
+          cat: "critical path component",
+          name: "action '#{a.name}'",
+          ts: a.ts,
+          dur: a.dur,
+          args: %{}
+        }
+      end)
+
+    crit_meta = [
+      %{ph: "M", pid: 1, tid: threads + 1, name: "thread_name", args: %{name: "Critical Path"}}
+    ]
+
+    counters =
+      for k <- 0..div(total_us, 1_000_000) do
+        ts = k * 1_000_000
+
+        running =
+          Enum.count(
+            events,
+            &(&1.cat == "action processing" and &1.ts <= ts and &1.ts + &1.dur > ts)
+          )
+
+        [
+          %{ph: "C", pid: 1, tid: 0, name: "action count", ts: ts, args: %{"action" => running}},
+          %{
+            ph: "C",
+            pid: 1,
+            tid: 0,
+            name: "CPU usage (Bazel)",
+            ts: ts,
+            args: %{"cpu" => Float.round(min(running / threads, 1.0) * 3.5, 2)}
+          }
+        ]
+      end
+
+    json = %{
+      otherData: %{bazel_version: "release 9.2.0", build_id: Replay.uuid(), synthetic: true},
+      traceEvents: meta ++ crit_meta ++ markers ++ events ++ critical ++ List.flatten(counters)
+    }
+
+    :zlib.gzip(Jason.encode!(json))
+  end
+
+  # One action with its nested phases; returns the events and the next free time.
+  defp action_events(x, tid, t, budget_us, n) do
+    mnemonic = weighted(@mnemonics_weighted)
+    target = "//#{Enum.random(@dirs)}:#{Enum.random(~w(server client core net lib proto))}_#{n}"
+    hit? = :rand.uniform() < 0.65
+    dur = budget_us * (0.3 + :rand.uniform() * 1.4) * if(hit?, do: 0.15, else: 1.0)
+    check = min(dur * (0.05 + :rand.uniform() * 0.1), 200_000)
+    args = %{target: target, mnemonic: mnemonic}
+
+    inner =
+      if hit? do
+        [
+          x.(tid, "remote action cache check", "check cache hit", t, check, %{}),
+          x.(
+            tid,
+            "remote output download",
+            "download outputs",
+            t + check,
+            dur - check - 1000,
+            %{}
+          )
+        ]
+      else
+        upload = dur * (0.03 + :rand.uniform() * 0.12)
+        queue = dur * (0.02 + :rand.uniform() * 0.2)
+        download = dur * (0.03 + :rand.uniform() * 0.1)
+        exec = dur - check - upload - queue - download - 1000
+
+        [
+          x.(tid, "remote action cache check", "check cache hit", t, check, %{}),
+          x.(
+            tid,
+            "Remote execution upload time",
+            "upload missing inputs",
+            t + check,
+            upload,
+            %{}
+          ),
+          x.(tid, "Remote execution queuing time", "queued", t + check + upload, queue, %{}),
+          x.(
+            tid,
+            "remote action execution",
+            "execute remotely",
+            t + check + upload + queue,
+            exec,
+            %{}
+          ),
+          x.(
+            tid,
+            "remote output download",
+            "download outputs",
+            t + check + upload + queue + exec,
+            download,
+            %{}
+          )
+        ]
+      end
+
+    action = x.(tid, "action processing", "#{mnemonic} #{target}", t, dur, args)
+    complete = x.(tid, "complete action execution", "actuallyCompleteAction", t + dur, 800, %{})
+    {[action | inner] ++ [complete], t + dur + 1500}
   end
 
   # Build-level action counters sized like a real repository: CI builds hit a warm remote

@@ -40,6 +40,13 @@ defmodule Conveyor.SeedTest do
       end
     end
 
+    # CI builds carry a synthetic remote-execution profile with a summary; builds that
+    # referenced the recorded profile get the real one.
+    with_profile = Enum.filter(ids, &(Repo.get!(Invocation, &1).profile_status == "available"))
+    assert with_profile != []
+    summary = Invocations.metrics(Repo.get!(Invocation, hd(with_profile))).profile_summary
+    assert summary["event_count"] > 0 and summary["action_phases"] != []
+
     facets = Repo.all(from t in TagKey, where: t.project_id == ^project.id)
     assert Enum.any?(facets, &(&1.key == "branch"))
     assert Enum.sum(for %{key: "team"} = f <- facets, do: f.count) == 6

@@ -1,0 +1,11 @@
+{
+  "name": "conveyor-e2e",
+  "private": true,
+  "description": "Browser tests for Conveyor's LiveView UI (Playwright)",
+  "scripts": {
+    "test": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0"
+  }
+}

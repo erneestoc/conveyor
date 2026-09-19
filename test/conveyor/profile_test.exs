@@ -62,6 +62,44 @@ defmodule Conveyor.ProfileTest do
     assert Jason.encode!(summary)
   end
 
+  test "attributes action time to phases" do
+    x = fn cat, name, ts, dur ->
+      %{
+        "ph" => "X",
+        "pid" => 1,
+        "tid" => 1,
+        "cat" => cat,
+        "name" => name,
+        "ts" => ts,
+        "dur" => dur
+      }
+    end
+
+    summary =
+      Profile.summarize([
+        x.("action processing", "Compiling a.cc", 0, 1000),
+        x.("remote action cache check", "check cache hit", 0, 100),
+        x.("Remote execution upload time", "upload missing inputs", 100, 200),
+        x.("remote action execution", "execute remotely", 300, 500),
+        x.("remote output download", "download outputs", 800, 100),
+        x.("local action execution", "subprocess.run", 2000, 50),
+        x.("general information", "unrelated", 3000, 10)
+      ])
+
+    assert Enum.map(summary["action_phases"], &{&1["name"], &1["total_ms"], &1["count"]}) == [
+             {"remote execution", 0.5, 1},
+             {"upload inputs", 0.2, 1},
+             {"cache check", 0.1, 1},
+             {"download outputs", 0.1, 1},
+             {"local execution", 0.1, 1}
+           ]
+
+    assert Profile.phase("Staging local action file system", "x") == "setup"
+    assert Profile.phase("complete action execution", "actuallyCompleteAction") == "outputs"
+    assert Profile.phase("Remote execution queuing time", "queued") == "queued"
+    assert Profile.phase("general information", "x") == nil
+  end
+
   test "summarizes synthetic events, keeping only the longest and peak counters" do
     events =
       [

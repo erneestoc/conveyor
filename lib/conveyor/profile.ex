@@ -155,6 +155,57 @@ defmodule Conveyor.Profile do
     end
   end
 
+  @doc """
+  The action phase an event represents, from Bazel's profiler categories and the names
+  the remote and local spawn runners emit (same vocabulary as the timeline worker).
+  """
+  @spec phase(String.t() | nil, String.t() | nil) :: String.t() | nil
+  def phase(cat, name) do
+    c = String.downcase(cat || "")
+    n = String.downcase(name || "")
+
+    cond do
+      c == "action processing" ->
+        nil
+
+      String.contains?(c, "cache check") or String.contains?(n, "check cache hit") ->
+        "cache check"
+
+      String.contains?(c, "upload") or String.contains?(n, "upload") ->
+        "upload inputs"
+
+      String.contains?(c, "queu") or String.contains?(n, "queued") ->
+        "queued"
+
+      c in ["remote action execution", "remote execution"] or
+          String.contains?(n, "execute remotely") ->
+        "remote execution"
+
+      String.contains?(c, "download") or String.contains?(n, "download") ->
+        "download outputs"
+
+      c in ["local action execution", "local execution in worker"] or
+          String.contains?(n, "subprocess.run") ->
+        "local execution"
+
+      String.contains?(c, [
+        "sandbox",
+        "staging",
+        "setup",
+        "local parse",
+        "worker borrow",
+        "action fs"
+      ]) ->
+        "setup"
+
+      c == "complete action execution" or String.contains?(c, "copying outputs") ->
+        "outputs"
+
+      true ->
+        nil
+    end
+  end
+
   @doc "Folds trace events into the profile summary map (string keys, JSON-friendly)."
   @spec summarize(Enumerable.t()) :: map()
   def summarize(events) do
@@ -162,6 +213,7 @@ defmodule Conveyor.Profile do
       threads: %{},
       cats: %{},
       mnemonics: %{},
+      action_phases: %{},
       critical: [],
       longest: [],
       longest_n: 0,
@@ -185,6 +237,12 @@ defmodule Conveyor.Profile do
     dur = num(e["dur"])
     cat = e["cat"] || "uncategorized"
     args = e["args"] || %{}
+
+    acc =
+      case phase(cat, e["name"]) do
+        nil -> acc
+        phase -> Map.update!(acc, :action_phases, &add_total(&1, phase, dur))
+      end
 
     acc =
       acc
@@ -290,6 +348,7 @@ defmodule Conveyor.Profile do
       "phases" => phases,
       "categories" => totals(acc.cats),
       "mnemonics" => totals(acc.mnemonics),
+      "action_phases" => totals(acc.action_phases),
       "critical_path_ms" => ms(Enum.reduce(critical, 0, &(&1.dur + &2))),
       "critical_path" =>
         Enum.map(
