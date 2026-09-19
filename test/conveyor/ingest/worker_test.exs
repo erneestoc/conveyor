@@ -84,6 +84,7 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert Invocations.actions(inv) != [] and Invocations.metrics(inv).build_metrics != %{}
     assert map_size(Invocations.named_sets(inv)) > 0
     assert [%{byte_offset: 0, line_offset: 0} | _] = Invocations.log_segments(inv)
+    Conveyor.Ingest.TagCounter.flush()
     assert Enum.any?(Invocations.tag_keys(ctx.project_id, limit: 50), &(&1.key == "scenario"))
 
     assert_received {:invocation_updated, %{id: ^id}}

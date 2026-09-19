@@ -87,6 +87,7 @@ if config_env() == :prod do
          Enum.concat([
            ingest_env.("INGEST_WRITER_SHARDS", :writer_shards),
            ingest_env.("INGEST_WRITER_FLUSH_MS", :writer_flush_ms),
+           ingest_env.("INGEST_TAG_FLUSH_MS", :tag_flush_ms),
            ingest_env.("INGEST_BATCH_FLUSH_MS", :batch_flush_ms),
            ingest_env.("INGEST_BATCH_MAX_EVENTS", :batch_max_events),
            ingest_env.("INGEST_MAX_UNACKED_EVENTS", :max_unacked_events),

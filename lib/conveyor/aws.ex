@@ -181,7 +181,9 @@ defmodule Conveyor.Aws do
       case :httpc.request(
              :post,
              {url, charlist_headers, ~c"application/x-www-form-urlencoded; charset=utf-8", body},
-             [timeout: 10_000, connect_timeout: 5_000], body_format: :binary) do
+             [timeout: 10_000, connect_timeout: 5_000],
+             body_format: :binary
+           ) do
         {:ok, {{_, 200, _}, _, xml}} -> {:ok, private_ips(xml)}
         {:ok, {{_, status, _}, _, resp}} -> {:error, {:http, status, resp}}
         {:error, reason} -> {:error, reason}

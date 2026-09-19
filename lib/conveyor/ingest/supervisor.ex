@@ -1,5 +1,5 @@
 defmodule Conveyor.Ingest.Supervisor do
-  @moduledoc "Supervises the ingest registry, the writer pool and the per-invocation workers."
+  @moduledoc "Supervises the ingest registry, the tag counter, the writer pool and the per-invocation workers."
   use Supervisor
 
   def start_link(opts), do: Supervisor.start_link(__MODULE__, opts, name: __MODULE__)
@@ -8,6 +8,7 @@ defmodule Conveyor.Ingest.Supervisor do
   def init(_opts) do
     children = [
       {Registry, keys: :unique, name: Conveyor.Ingest.Registry},
+      Conveyor.Ingest.TagCounter,
       Conveyor.Ingest.WriterPool,
       {DynamicSupervisor,
        name: Conveyor.Ingest.WorkerSupervisor,

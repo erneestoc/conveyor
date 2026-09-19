@@ -81,31 +81,39 @@ defmodule Conveyor.Ingest.Worker do
     {:noreply, state |> reset_idle() |> mark_dirty(:summary) |> schedule_broadcast()}
   end
 
+  # Insert first: a new build costs one statement; only a resumed or concurrently created
+  # invocation (conflict) needs the read. Schema defaults match the column defaults.
   defp load_or_create!(ctx, id, stream_id) do
-    case Repo.get(Invocation, id) do
-      %Invocation{} = inv ->
-        inv
+    now = DateTime.utc_now()
 
-      nil ->
-        now = DateTime.utc_now()
+    row =
+      %Invocation{
+        id: id,
+        project_id: ctx.project_id,
+        api_key_id: ctx.api_key_id,
+        build_id: blank_to_nil(stream_id && stream_id.build_id),
+        bes_instance_name: ctx.instance_name,
+        keywords: ctx.keywords,
+        started_at: now,
+        last_event_at: now,
+        inserted_at: now,
+        updated_at: now,
+        tags:
+          Conveyor.Ingest.Tags.merge(%{
+            keywords: Conveyor.Ingest.Tags.from_keywords(ctx.keywords),
+            api_key: ctx.api_key_tags
+          })
+      }
+      |> Map.from_struct()
+      |> Map.take(Invocation.__schema__(:fields))
 
-        %Invocation{
-          id: id,
-          project_id: ctx.project_id,
-          api_key_id: ctx.api_key_id,
-          build_id: blank_to_nil(stream_id && stream_id.build_id),
-          bes_instance_name: ctx.instance_name,
-          keywords: ctx.keywords,
-          started_at: now,
-          last_event_at: now,
-          tags:
-            Conveyor.Ingest.Tags.merge(%{
-              keywords: Conveyor.Ingest.Tags.from_keywords(ctx.keywords),
-              api_key: ctx.api_key_tags
-            })
-        }
-        |> Repo.insert!(on_conflict: :nothing, conflict_target: :id)
-        |> then(fn _ -> Repo.get!(Invocation, id) end)
+    case Repo.insert_all(Invocation, [row],
+           on_conflict: :nothing,
+           conflict_target: :id,
+           returning: true
+         ) do
+      {1, [%Invocation{} = inv]} -> inv
+      {0, _} -> Repo.get!(Invocation, id)
     end
   end
 
@@ -288,7 +296,10 @@ defmodule Conveyor.Ingest.Worker do
 
     state =
       if batch.finalize do
-        Conveyor.Artifacts.on_finalized(state.invocation_id)
+        # Only a build that referenced a profile on a remote cache has work to schedule.
+        if state.norm.inv[:profile_status] == "referenced",
+          do: Conveyor.Artifacts.on_finalized(state.invocation_id)
+
         %{state | finalized: true} |> mark_dirty(:summary) |> start_linger()
       else
         state

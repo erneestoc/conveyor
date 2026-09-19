@@ -3,7 +3,7 @@ defmodule Conveyor.Ingest.WriterTest do
 
   import Ecto.Query
 
-  alias Conveyor.Ingest.{Batch, Writer, WriterPool}
+  alias Conveyor.Ingest.{Batch, TagCounter, Writer, WriterPool}
   alias Conveyor.Invocations.{Invocation, Target}
   alias Conveyor.Projects
   alias Conveyor.Repo
@@ -61,6 +61,7 @@ defmodule Conveyor.Ingest.WriterTest do
     inv = Repo.get!(Invocation, id)
     assert inv.last_event_seq == 1 and inv.command == "build" and inv.targets_configured == 1
     assert Repo.aggregate(from(t in Target, where: t.invocation_id == ^id), :count) == 2
+    TagCounter.flush()
     assert [%{count: 1}] = Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k")
 
     # Partial upsert: a later batch touching only status must keep kind.
@@ -92,6 +93,7 @@ defmodule Conveyor.Ingest.WriterTest do
     assert %{tool_logs: %{"a" => "b"}, build_metrics: %{"x" => 1}} =
              Conveyor.Invocations.metrics(id)
 
+    TagCounter.flush()
     assert [%{count: 2}] = Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k")
   end
 
@@ -165,6 +167,7 @@ defmodule Conveyor.Ingest.WriterTest do
     assert %{tool_logs: %{"a" => "b"}, build_metrics: %{"c" => 1}} =
              Conveyor.Invocations.metrics(id)
 
+    TagCounter.flush()
     assert [%{count: 2}] = Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k")
     assert Conveyor.Invocations.raw_frames(Repo.get!(Invocation, id)) == ["x", "y"]
   end
@@ -184,6 +187,7 @@ defmodule Conveyor.Ingest.WriterTest do
         Writer.submit(writer, bad_tags)
         ref = bad_tags.ref
         assert_receive {:batch_committed, ^ref}, 2_000
+        TagCounter.flush()
       end)
 
     assert log =~ "tag counts not updated"
