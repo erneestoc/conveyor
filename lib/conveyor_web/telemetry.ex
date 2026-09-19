@@ -52,6 +52,15 @@ defmodule ConveyorWeb.Telemetry do
         description: "Build events committed to the database"
       ),
       counter("conveyor.ingest.batch.committed.count", description: "Batches committed"),
+      distribution("conveyor.ingest.writer.flush.duration",
+        unit: {:native, :millisecond},
+        reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000]],
+        description: "Group commit duration per writer shard (ms)"
+      ),
+      distribution("conveyor.ingest.writer.flush.events",
+        reporter_options: [buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000]],
+        description: "Events per group commit"
+      ),
       last_value("conveyor.ingest.workers.count",
         description: "Live ingest workers (invocations in flight)"
       ),

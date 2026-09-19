@@ -7,6 +7,7 @@ defmodule ConveyorWeb.MetricsControllerTest do
     assert body =~ "conveyor_ingest_ack_count"
     assert body =~ "conveyor_ingest_ack_latency_us_bucket"
     assert body =~ "conveyor_ingest_workers_count"
+    assert body =~ "conveyor_ingest_writer_flush_duration"
 
     Application.put_env(:conveyor, :metrics_token, "scrape-me")
     on_exit(fn -> Application.delete_env(:conveyor, :metrics_token) end)
