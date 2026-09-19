@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: mix precommit (compile, format, sobelow, deps.audit, 95% coverage)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5440:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      MIX_ENV: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "29"
+          elixir-version: "1.20"
+      - uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: mix-${{ runner.os }}-${{ hashFiles('mix.lock') }}
+          restore-keys: mix-${{ runner.os }}-
+      - run: mix deps.get
+      - run: mix precommit
+      - name: Hex advisories (informational; see docs/security.md for accepted advisories)
+        run: mix hex.audit
+        continue-on-error: true
+      - name: Build assets
+        run: mix assets.setup && mix assets.build
+      - name: Worker parser smoke test (Node)
+        run: |
+          node --input-type=module -e "
+          import {build} from './assets/js/profile_worker.js'
+          import fs from 'node:fs'
+          import zlib from 'node:zlib'
+          const gz = fs.readFileSync('test/fixtures/blobs/c9fb9e145e0fbb8955f0a0f93e7cfa750e3ab9e6e15387e5caacf811cfa7ec86')
+          const json = JSON.parse(zlib.gunzipSync(gz).toString())
+          const b = build(json.traceEvents)
+          if (b.eventCount !== 1297 || b.threads.length < 50) throw new Error('unexpected profile parse result')
+          console.log('profile worker ok', b.eventCount, b.threads.length)
+          "

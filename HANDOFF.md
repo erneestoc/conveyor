@@ -31,7 +31,7 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 - Blob store in dev writes to `tmp/blobs_dev` (test: `tmp/blobs_test`, both git-ignored); `CAS_SINK_ENABLED` is on in dev config.
 - Original implementation only: do not read BuildBuddy or other BES implementations' source.
 
-## 3. Status (2026-09-19, late): commits on `main`
+## 3. Status (2026-09-19): commits on `main`
 
 | Commit | Milestone | Content |
 |---|---|---|
@@ -41,9 +41,9 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 | M3 | Query language | `Conveyor.Query` (parser, Ecto compiler, in-memory evaluator), facets, search UI |
 | M4 | Dashboard | `Conveyor.Metrics.{Scope,Dashboard,Tests}`, `DashboardLive`, `TestsLive`, SVG charts, Metrics tab, `mix conveyor.seed` |
 | M5 | Artifacts + timeline | `Conveyor.Blobs` (Disk/S3), `Conveyor.Artifacts` (+ `Resource`, `BytestreamClient`, `Junit`), gRPC `ByteStreamServer`/`CasServer`/`CapabilitiesServer`/`ActionCacheServer` (CAS sink), `UploadController` + `Plugs.ApiAuth` + `tools/bes-upload-profile`, `Conveyor.Profile` + `Workers.{FetchProfile,ProfileSummary,BlobMaintenance}`, canvas profile timeline (`assets/js/hooks/profile_timeline.js`, `assets/js/profile_worker.js`), test.log/test.xml viewer, cache endpoints in Settings |
-| M6 part 1 | Settings | `SettingsLive`: projects + API keys (create/rotate/revoke), nav link |
+| M6 | Auth + security | `Conveyor.Accounts` (+ `User`, `Scope`), `ConveyorWeb.Plugs.Auth`, `ConveyorWeb.Auth` (on_mount), `AuthController`/`AuthHTML` (OIDC via assent, admin token), `Conveyor.Audit`, `Conveyor.Limits`, `Plugs.SecurityHeaders` (nonce CSP), sobelow + deps.audit in precommit, `.github/workflows/ci.yml`, `docs/security.md`, settings: allowed groups + audit log |
 
-178 tests, 95.6% coverage. Verified with real Bazel 9.2.0 end to end, including
+197 tests, 95.8% coverage. Verified with real Bazel 9.2.0 end to end, including
 `--remote_cache=grpc://localhost:1985 --remote_upload_local_results=false --remote_build_event_upload=minimal --noremote_accept_cached`
 against the CAS sink (profile, test.log, test.xml uploaded; profile timeline + summary rendered).
 
@@ -120,8 +120,11 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - Dashboard "where does build time go" aggregation over `profile_summary` (PLAN §10) is not built.
 - The Tier B canvas is verified via Node (`build()` + a `worker_threads` simulation of the built bundle) and a headless screenshot of the inline path; headless Chrome does not drive Web Worker fetches under `--virtual-time-budget`, and LiveView never connects headless, so use the `data-inline="true"` trick on a temporary page under `priv/static/assets/` for visual checks.
 
-### M6 remainder — auth + security
-- OIDC via `assent` (`Assent.Strategy.OIDC`, discovery, PKCE, state/nonce), `AUTH_MODE=open|oidc`, `users` table, roles viewer/admin from `ADMIN_EMAILS` / `OIDC_ADMIN_GROUPS` (`OIDC_GROUPS_CLAIM`), `ALLOWED_EMAIL_DOMAINS`, per-project `allowed_groups`; gate `/settings` (and `ADMIN_TOKEN` in open mode); `audit_log` table for key/project/login events; per-key limits (concurrent streams, events/s, bytes per invocation → truncate log with marker); CSP + security headers; `sobelow`, `mix hex.audit`, `mix deps.audit` in CI; `docs/security.md` threat model. Known advisory: cowlib 2.20.0 EEF-CVE-2026-43969 (LOW, cookie encoder; not used by gRPC path) — re-check for a fixed release.
+### M6 — done (see PLAN §21). Follow-ups
+- No UI for per-key limit overrides yet (`Projects.update_api_key_limits/2`; defaults via `MAX_STREAMS_PER_KEY`, `MAX_EVENTS_PER_SECOND_PER_KEY`, `MAX_LOG_MB`).
+- Limits are per node (ETS); M7 should either accept N× limits across nodes or route by key.
+- Okta was not verified against a real tenant (only the fake provider); Keycloak is running locally in Docker (`chumti-keycloak`) if a real-provider check is wanted.
+- cowlib EEF-CVE-2026-43969 still open upstream (accepted, see docs/security.md); `mix hex.audit` is informational in CI.
 
 ### M7 — scale campaign + multi-node
 - `bes_loadgen` escript (built on `Conveyor.Bep.Replay`): streams, builds/min, speed, fixture mix, jitter, chaos (drops, duplicates, server restarts), ack-latency percentiles; `mix conveyor.verify` over a run. Add per-ack latency telemetry (`[:conveyor, :ingest, :ack]`) and Prometheus `/metrics`.
@@ -135,6 +138,7 @@ Dockerfile (release, non-root), `docker-compose.yml` (app + Postgres), `Conveyor
 
 1. ~~CAS sink~~ shipped behind `CAS_SINK_ENABLED` (default off).
 2. Bazel version floor (suggest 7.x+).
+   (M6 chose: open mode by default with ADMIN_TOKEN; OIDC generic, not provider-specific.)
 3. Reference hardware for the load-test envelope.
 4. Raw event retention default: 7 vs 14 days.
 5. Two ports (1985 gRPC, 4000 web) vs one multiplexed port — recommended two.
