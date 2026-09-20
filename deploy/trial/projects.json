@@ -1,30 +1,40 @@
 {
   "fixture": {
-    "repo": "https://github.com/erneestoc/conveyor.git", "subdir": "test/fixtures/workspace",
-    "targets": "//...", "test_targets": "//app:pass_test //app:sharded_test //app:uses_greeting_test"
+    "repo": "https://github.com/erneestoc/conveyor.git",
+    "subdir": "test/fixtures/workspace",
+    "targets": "//...",
+    "test_targets": "//app:pass_test //app:sharded_test //app:uses_greeting_test"
   },
   "cpp-tutorial": {
-    "repo": "https://github.com/bazelbuild/examples.git", "subdir": "cpp-tutorial/stage3",
-    "targets": "//...", "test_targets": "//..."
+    "repo": "https://github.com/bazelbuild/examples.git",
+    "subdir": "cpp-tutorial/stage3",
+    "targets": "//...",
+    "test_targets": "//..."
   },
   "buildtools": {
     "repo": "https://github.com/bazelbuild/buildtools.git",
-    "targets": "//buildifier:buildifier //buildozer:buildozer", "test_targets": "//build/... //buildifier/..."
+    "targets": "//buildifier:buildifier //buildozer:buildozer",
+    "test_targets": "//build/... //buildifier/..."
   },
   "abseil": {
     "repo": "https://github.com/abseil/abseil-cpp.git",
-    "targets": "//absl/strings/... //absl/container/...", "test_targets": "//absl/strings/..."
+    "targets": "//absl/strings/... //absl/container/...",
+    "test_targets": "//absl/strings/..."
   },
   "protobuf": {
     "repo": "https://github.com/protocolbuffers/protobuf.git",
-    "targets": "//:protoc //src/google/protobuf:protobuf", "test_targets": "//src/google/protobuf:protobuf_test"
+    "targets": "//:protoc //src/google/protobuf:protobuf",
+    "test_targets": "//src/google/protobuf/io:all //src/google/protobuf/stubs:all"
   },
   "nativelink": {
     "repo": "https://github.com/TraceMachina/nativelink.git",
-    "targets": "//:nativelink", "test_targets": "//nativelink-util:..."
+    "targets": "//:nativelink",
+    "test_targets": "//nativelink-util:...",
+    "notes": "Rust under remote execution fails on the trial worker image (rules_rust toolchain expects host tools not present on the worker); cache mode works."
   },
   "grpc": {
     "repo": "https://github.com/grpc/grpc.git",
-    "targets": "//:grpc++", "test_targets": "//test/core/end2end:..."
+    "targets": "//:grpc++",
+    "test_targets": "//test/core/end2end:..."
   }
 }

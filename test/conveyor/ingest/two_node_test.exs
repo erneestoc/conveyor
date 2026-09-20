@@ -92,4 +92,54 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     assert :ok = await_exit(Conveyor.Ingest.RegistryB, id)
     assert :ok = Verify.check(id, n)
   end
+
+  test "a lifecycle finish handled by a stray worker on another node is recorded, not fenced",
+       %{ctx: ctx_a} do
+    start_supervised!(
+      {Ingest.Supervisor,
+       name: Conveyor.Ingest.SupervisorB,
+       registry: Conveyor.Ingest.RegistryB,
+       worker_supervisor: Conveyor.Ingest.WorkerSupervisorB}
+    )
+
+    ctx_b = %{
+      ctx_a
+      | registry: Conveyor.Ingest.RegistryB,
+        worker_supervisor: Conveyor.Ingest.WorkerSupervisorB
+    }
+
+    id = Replay.uuid()
+    events = Fixture.read!(fixture("clean_build_and_test"))
+    n = length(events)
+    push(ctx_a, id, events, 1..5)
+
+    # Bazel's lifecycle connection lands on node B, which starts a worker of its own.
+    started =
+      {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
+
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
+    assert [{pid_b, _}] = Registry.lookup(Conveyor.Ingest.RegistryB, id)
+
+    # The stream stays on A and finishes there.
+    push(ctx_a, id, events, 6..n)
+
+    marker =
+      {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+
+    assert :ok = Ingest.push_sync(ctx_a, Replay.ordered_event(stream_id(id), n + 1, marker))
+
+    # The finish notification reaches B's stray worker, whose commit is fenced: it must
+    # still be accepted, or Bazel aborts the whole upload.
+    finished =
+      {:invocation_attempt_finished,
+       %V1.BuildEvent.InvocationAttemptFinished{
+         invocation_status: %V1.BuildStatus{result: :COMMAND_SUCCEEDED}
+       }}
+
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 2, finished))
+    assert :ok = await_exit(Conveyor.Ingest.Registry, id)
+    refute Process.alive?(pid_b)
+    assert %{status: "succeeded", stream_finished: true, lifecycle_finished: true} = reload(id)
+    assert :ok = Verify.check(id, n)
+  end
 end

@@ -104,7 +104,18 @@ defmodule Conveyor.Ingest do
     case Registry.lookup(ctx.registry, stream_id.invocation_id) do
       [{pid, _}] ->
         try do
-          GenServer.call(pid, {:lifecycle, :invocation_attempt_finished, obe}, :infinity)
+          case GenServer.call(pid, {:lifecycle, :invocation_attempt_finished, obe}, :infinity) do
+            # Bazel sends lifecycle events and the event stream on separate connections, so
+            # behind a balancer this node may hold a stray worker (started by the
+            # attempt-started event) while another node owns the stream and the row. Its
+            # commit is fenced; the notification itself is still valid, so record it
+            # directly instead of failing the RPC, which would make Bazel abort the upload.
+            {:error, {:fenced, _}} ->
+              mark_lifecycle_finished(:invocation_attempt_finished, stream_id.invocation_id)
+
+            other ->
+              other
+          end
         catch
           :exit, _ ->
             mark_lifecycle_finished(:invocation_attempt_finished, stream_id.invocation_id)

@@ -33,6 +33,9 @@ config :conveyor, Oban,
   queues: [default: 10, maintenance: 2],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
+    # Jobs left "executing" by a node that died or a producer that restarted go back to
+    # available (seen on the AWS trial after an instance refresh).
+    {Oban.Plugins.Lifeline, rescue_after: :timer.minutes(15)},
     {Oban.Plugins.Cron,
      crontab: [
        {"0 * * * *", Conveyor.Workers.PartitionMaintenance},

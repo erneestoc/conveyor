@@ -199,6 +199,8 @@ defmodule ConveyorWeb.Charts do
             }
           end)
 
+        # A series with one point has no line to draw: show the point itself.
+        dots = Enum.map(dots, &Map.put(&1, :lone, length(dots) == 1))
         %{d: d, class: class, label: label, dots: dots}
       end)
 
@@ -258,19 +260,8 @@ defmodule ConveyorWeb.Charts do
         :for={dot <- Enum.flat_map(@paths, & &1.dots)}
         cx={dot.x}
         cy={dot.y}
-        r="4"
-        fill="transparent"
-        pointer-events="all"
-        class={dot.class}
-      >
-        <title>{dot.title}</title>
-      </circle>
-      <circle
-        :for={dot <- Enum.flat_map(@paths, & &1.dots)}
-        cx={dot.x}
-        cy={dot.y}
-        r="4"
-        fill="transparent"
+        r={if(dot.lone, do: "3", else: "4")}
+        fill={if(dot.lone, do: "currentColor", else: "transparent")}
         pointer-events="all"
         class={dot.class}
       >
