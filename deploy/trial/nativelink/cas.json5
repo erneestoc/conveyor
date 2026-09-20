@@ -1,0 +1,53 @@
+// NativeLink CAS + action cache, TLS on 50051 with the trial's private CA.
+{
+  stores: [
+    {
+      name: "CAS_MAIN_STORE",
+      compression: {
+        compression_algorithm: { lz4: {} },
+        backend: {
+          filesystem: {
+            content_path: "/opt/nativelink/data/cas",
+            temp_path: "/opt/nativelink/data/cas-tmp",
+            eviction_policy: { max_bytes: __CAS_BYTES__ },
+          },
+        },
+      },
+    },
+    {
+      name: "AC_MAIN_STORE",
+      filesystem: {
+        content_path: "/opt/nativelink/data/ac",
+        temp_path: "/opt/nativelink/data/ac-tmp",
+        eviction_policy: { max_bytes: 2000000000 },
+      },
+    },
+  ],
+  servers: [
+    {
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50051",
+          tls: {
+            cert_file: "/opt/nativelink/tls/server.crt",
+            key_file: "/opt/nativelink/tls/server.key",
+          },
+          advanced_http: {
+            http2_keep_alive_interval: 60,
+            experimental_http2_keep_alive_timeout: 20,
+            experimental_http2_max_concurrent_streams: 2000,
+            experimental_http2_initial_connection_window_size: 16777216,
+            experimental_http2_initial_stream_window_size: 8388608,
+          },
+        },
+      },
+      services: {
+        cas: [{ cas_store: "CAS_MAIN_STORE" }],
+        ac: [{ ac_store: "AC_MAIN_STORE" }],
+        capabilities: [],
+        bytestream: { cas_stores: { "": "CAS_MAIN_STORE" } },
+        health: {},
+      },
+    },
+  ],
+}

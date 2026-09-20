@@ -1,0 +1,25 @@
+#!/bin/bash
+set -euo pipefail
+dnf install -y docker && systemctl enable --now docker
+mkdir -p /opt/nativelink/tls /opt/nativelink/data
+aws ssm get-parameter --region '${region}' --name '/${name}/nativelink/server.key' --with-decryption --query Parameter.Value --output text > /opt/nativelink/tls/server.key
+aws ssm get-parameter --region '${region}' --name '/${name}/nativelink/server.crt' --query Parameter.Value --output text > /opt/nativelink/tls/server.crt
+aws ssm get-parameter --region '${region}' --name '/${name}/ca.crt' --query Parameter.Value --output text > /opt/nativelink/tls/ca.crt
+chmod 600 /opt/nativelink/tls/server.key
+cat > /opt/nativelink/cas.json5 <<'JSON'
+${cas_json}
+JSON
+cat > /opt/nativelink/scheduler.json5 <<'JSON'
+${sched_json}
+JSON
+sed -i 's/__CAS_BYTES__/${cas_bytes}/' /opt/nativelink/cas.json5
+# Both services on the host network, talking to each other over TLS through localhost,
+# which the certificate covers.
+docker run -d --name nl-cas --restart unless-stopped --network host \
+  --add-host '${cache_host}:127.0.0.1' --add-host '${rbe_host}:127.0.0.1' \
+  -v /opt/nativelink:/opt/nativelink -e RUST_LOG=info \
+  ghcr.io/tracemachina/nativelink:v1.7.1 /opt/nativelink/cas.json5
+docker run -d --name nl-scheduler --restart unless-stopped --network host \
+  --add-host '${cache_host}:127.0.0.1' --add-host '${rbe_host}:127.0.0.1' \
+  -v /opt/nativelink:/opt/nativelink -e RUST_LOG=info \
+  ghcr.io/tracemachina/nativelink:v1.7.1 /opt/nativelink/scheduler.json5

@@ -1,0 +1,22 @@
+#!/bin/bash
+set -euo pipefail
+dnf install -y docker && systemctl enable --now docker
+mkdir -p /etc/conveyor && chmod 755 /etc/conveyor
+cat > /etc/conveyor/rbe-ca.crt <<'CA'
+${rbe_ca}
+CA
+chmod 644 /etc/conveyor/rbe-ca.crt
+aws ecr get-login-password --region '${region}' | docker login --username AWS --password-stdin '${ecr}'
+docker run -d --name conveyor --restart unless-stopped --network host \
+  -v /etc/conveyor:/etc/conveyor:ro \
+  -e DATABASE_URL='${database_url}' \
+  -e SECRET_KEY_BASE='${secret_key_base}' \
+  -e RELEASE_COOKIE='${release_cookie}' \
+  -e PHX_HOST='${phx_host}' -e PORT=4000 -e GRPC_PORT=1985 -e FORCE_SSL=true \
+  -e AUTH_MODE=open -e ADMIN_TOKEN='${admin_token}' -e BES_INGEST_AUTH=api_key \
+  -e BLOB_STORE=s3 -e S3_BUCKET='${bucket}' -e AWS_REGION='${region}' \
+  -e CAS_SINK_ENABLED=true -e POOL_SIZE=40 \
+  -e CLUSTER_STRATEGY=ec2 -e CLUSTER_EC2_TAG=conveyor-cluster -e CLUSTER_EC2_TAG_VALUE='${name}' \
+  -e SHUTDOWN_DRAIN_SECONDS='${drain_seconds}' \
+  --stop-timeout $(( ${drain_seconds} + 15 )) \
+  '${image}'

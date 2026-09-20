@@ -88,7 +88,6 @@ defmodule Conveyor.MixProject do
       {:grpc_server, "~> 1.0"},
       {:grpc, "~> 1.0"},
       {:protobuf, "~> 0.17.0"},
-      {:google_protos, "~> 0.4"},
       # HTTP/2 client adapter for the gRPC client (replay tool, artifact fetching)
       {:mint, "~> 1.9"},
       # Background jobs (retention, partition maintenance, post-processing); exactly-once across nodes

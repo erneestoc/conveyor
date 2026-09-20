@@ -1,0 +1,14 @@
+#!/bin/bash
+set -euo pipefail
+dnf install -y docker && systemctl enable --now docker
+mkdir -p /opt/nativelink/tls /opt/nativelink/data
+aws ssm get-parameter --region '${region}' --name '/${name}/ca.crt' --query Parameter.Value --output text > /opt/nativelink/tls/ca.crt
+cat > /opt/nativelink/worker.json5 <<'JSON'
+${worker_json}
+JSON
+aws ecr get-login-password --region '${region}' | docker login --username AWS --password-stdin '${ecr}'
+# The control host's names resolve to its private address so worker traffic stays in the VPC.
+docker run -d --name nl-worker --restart unless-stopped --network host --privileged \
+  --add-host '${cache_host}:${control_ip}' --add-host '${rbe_host}:${control_ip}' \
+  -v /opt/nativelink:/opt/nativelink -e RUST_LOG=info \
+  '${image}' /opt/nativelink/worker.json5

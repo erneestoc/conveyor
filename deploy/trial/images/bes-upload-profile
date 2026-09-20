@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+# Upload a Bazel JSON profile, a compact execution log and/or a build_event_binary_file
+# to Conveyor.
+#
+# Usage:
+#   bes-upload-profile --server https://conveyor.example.com --key conveyor_... \
+#       --invocation <uuid> [--profile /tmp/profile.gz] [--execution-log /tmp/exec.log.zst] \
+#       [--bep /tmp/build.bep] [--name NAME]
+#
+# The execution log comes from `--execution_log_compact_file=/tmp/exec.log.zst`; Conveyor
+# parses it to explain why each action ran (Actions tab).
+# Typical .bazelrc for machines without a remote cache:
+#   build --profile=/tmp/bazel-profile.gz --build_event_binary_file=/tmp/bazel.bep
+# then, after the build, take the invocation id from the BES results URL Bazel printed
+# (or from `bazel info` / the BEP file) and run this script. CONVEYOR_SERVER and
+# CONVEYOR_API_KEY are honoured as defaults.
+set -euo pipefail
+
+server="${CONVEYOR_SERVER:-}"
+key="${CONVEYOR_API_KEY:-}"
+invocation=""
+profile=""
+execlog=""
+bep=""
+name=""
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --server) server="$2"; shift 2 ;;
+    --key) key="$2"; shift 2 ;;
+    --invocation) invocation="$2"; shift 2 ;;
+    --profile) profile="$2"; shift 2 ;;
+    --execution-log) execlog="$2"; shift 2 ;;
+    --bep) bep="$2"; shift 2 ;;
+    --name) name="$2"; shift 2 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+done
+
+if [[ -z "$server" || -z "$key" || -z "$invocation" ]]; then
+  echo "need --server, --key and --invocation (or CONVEYOR_SERVER / CONVEYOR_API_KEY)" >&2
+  exit 2
+fi
+if [[ -z "$profile" && -z "$bep" && -z "$execlog" ]]; then
+  echo "need --profile, --execution-log and/or --bep" >&2
+  exit 2
+fi
+
+server="${server%/}"
+
+put() {
+  local path="$1" file="$2" type="$3"
+  curl --fail --silent --show-error -X PUT \
+    -H "x-api-key: ${key}" -H "content-type: ${type}" \
+    --data-binary "@${file}" "${server}${path}"
+  echo
+}
+
+# The BEP file first, so the invocation exists before the profile is attached to it.
+if [[ -n "$bep" ]]; then
+  put "/api/v1/invocations/${invocation}/bep" "$bep" "application/octet-stream"
+fi
+
+if [[ -n "$profile" ]]; then
+  if [[ -z "$name" ]]; then
+    case "$profile" in
+      *.gz) name="command.profile.gz" ;;
+      *) name="command.profile.json" ;;
+    esac
+  fi
+  type="application/json"
+  [[ "$profile" == *.gz ]] && type="application/gzip"
+  put "/api/v1/invocations/${invocation}/artifacts/${name}" "$profile" "$type"
+fi
+
+if [[ -n "$execlog" ]]; then
+  put "/api/v1/invocations/${invocation}/artifacts/execution.log.zst" "$execlog" "application/zstd"
+fi

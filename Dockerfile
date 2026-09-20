@@ -1,7 +1,7 @@
 # Conveyor release image. Build: docker build -t conveyor:0.1.0 .
-ARG ELIXIR_VERSION=1.20.3
-ARG OTP_VERSION=29.0.5
-ARG DEBIAN_VERSION=bookworm-20250908-slim
+ARG ELIXIR_VERSION=1.20.4
+ARG OTP_VERSION=29.0.6
+ARG DEBIAN_VERSION=bookworm-20260918-slim
 ARG BUILDER_IMAGE="hexpm/elixir:${ELIXIR_VERSION}-erlang-${OTP_VERSION}-debian-${DEBIAN_VERSION}"
 ARG RUNNER_IMAGE="debian:${DEBIAN_VERSION}"
 
@@ -18,9 +18,11 @@ COPY config/config.exs config/prod.exs config/
 RUN mix deps.compile
 COPY priv priv
 COPY lib lib
+# Compile first: Phoenix extracts colocated hooks and CSS from the modules, and the asset
+# build imports them.
+RUN mix compile
 COPY assets assets
 RUN mix assets.setup && mix assets.deploy
-RUN mix compile
 COPY config/runtime.exs config/
 COPY rel rel
 RUN mix release

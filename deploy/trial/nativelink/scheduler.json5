@@ -1,0 +1,61 @@
+// NativeLink scheduler: execution API on 50052 (TLS), worker API on 50061 (TLS).
+{
+  stores: [
+    {
+      name: "GRPC_CAS_STORE",
+      grpc: {
+        instance_name: "",
+        endpoints: [{ address: "grpcs://cache.rbe.algobien.com:50051", tls_config: { ca_file: "/opt/nativelink/tls/ca.crt" } }],
+        store_type: "cas",
+      },
+    },
+    {
+      name: "GRPC_AC_STORE",
+      grpc: {
+        instance_name: "",
+        endpoints: [{ address: "grpcs://cache.rbe.algobien.com:50051", tls_config: { ca_file: "/opt/nativelink/tls/ca.crt" } }],
+        store_type: "ac",
+      },
+    },
+  ],
+  schedulers: [
+    {
+      name: "MAIN_SCHEDULER",
+      simple: {
+        supported_platform_properties: {
+          cpu_count: "minimum",
+          OSFamily: "priority",
+          "container-image": "priority",
+          ISA: "exact",
+        },
+      },
+    },
+  ],
+  servers: [
+    {
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50052",
+          tls: { cert_file: "/opt/nativelink/tls/server.crt", key_file: "/opt/nativelink/tls/server.key" },
+        },
+      },
+      services: {
+        ac: [{ ac_store: "GRPC_AC_STORE" }],
+        execution: [{ cas_store: "GRPC_CAS_STORE", scheduler: "MAIN_SCHEDULER" }],
+        capabilities: [{ remote_execution: { scheduler: "MAIN_SCHEDULER" } }],
+      },
+    },
+    {
+      listener: {
+        http: {
+          socket_address: "0.0.0.0:50061",
+          tls: { cert_file: "/opt/nativelink/tls/server.crt", key_file: "/opt/nativelink/tls/server.key" },
+        },
+      },
+      services: {
+        worker_api: { scheduler: "MAIN_SCHEDULER" },
+        health: {},
+      },
+    },
+  ],
+}
