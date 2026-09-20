@@ -223,3 +223,30 @@ resource "aws_autoscaling_group" "nl_workers" {
     preferences { min_healthy_percentage = 0 }
   }
 }
+
+# Inside the VPC the NativeLink names resolve to the control instance's private address:
+# security-group references only match private traffic, and it keeps the bytes off the
+# internet gateway. The public records above serve laptops listed in allow_cidrs.
+resource "aws_route53_zone" "rbe_private" {
+  count = var.rbe_enabled ? 1 : 0
+  name  = var.rbe_host
+  vpc {
+    vpc_id = data.aws_vpc.default.id
+  }
+}
+resource "aws_route53_record" "rbe_private" {
+  count   = var.rbe_enabled ? 1 : 0
+  zone_id = aws_route53_zone.rbe_private[0].zone_id
+  name    = var.rbe_host
+  type    = "A"
+  ttl     = 60
+  records = [aws_instance.nl_control[0].private_ip]
+}
+resource "aws_route53_record" "cache_private" {
+  count   = var.rbe_enabled ? 1 : 0
+  zone_id = aws_route53_zone.rbe_private[0].zone_id
+  name    = var.cache_host
+  type    = "A"
+  ttl     = 60
+  records = [aws_instance.nl_control[0].private_ip]
+}

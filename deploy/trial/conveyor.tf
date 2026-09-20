@@ -125,6 +125,11 @@ resource "aws_db_parameter_group" "db" {
     value        = "400"
     apply_method = "pending-reboot"
   }
+  # The release connects without TLS inside the VPC; RDS forces TLS by default since PG 15.
+  parameter {
+    name  = "rds.force_ssl"
+    value = "0"
+  }
 }
 
 # TLS certificate for the UI and the BES endpoint, validated through Route53.
