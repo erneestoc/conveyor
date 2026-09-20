@@ -73,9 +73,14 @@ defmodule ConveyorWeb.DashboardLive do
     scope = Scope.new(socket.assigns.range, project && project.id, socket.assigns.query)
     segments = Scope.segments(scope, Segments.for_project(project))
 
+    summary = Dashboard.summary(scope)
+    previous = Dashboard.summary(Scope.previous(scope))
+
     assign(socket,
       scope: scope,
-      summary: Dashboard.summary(scope),
+      summary: summary,
+      previous: previous,
+      deltas: Dashboard.deltas(summary, previous),
       segment_summaries: Enum.map(segments, &{&1.name, Dashboard.summary(&1)}),
       series: Dashboard.series(scope),
       segment_series: Enum.map(segments, &{&1.name, Dashboard.series(&1)}),
@@ -192,23 +197,59 @@ defmodule ConveyorWeb.DashboardLive do
 
       <div class="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6" id="headline">
         <.tile
+          id="tile-builds"
           label="Builds"
           value={Format.number(@summary.builds)}
           sub={"#{@summary.running} running"}
+          delta={@deltas.builds}
+          previous={Format.number(@previous.builds)}
+          up={:neutral}
         />
         <.tile
+          id="tile-success"
           label="Success rate"
           value={pct(@summary.success_rate)}
           sub={"#{@summary.failed} failed · #{@summary.aborted} aborted"}
           tone={tone(@summary.success_rate)}
+          delta={@deltas.success_rate}
+          previous={pct(@previous.success_rate)}
+          up={:good}
         />
-        <.tile label="p50 duration" value={Format.duration(@summary.p50)} sub="finished builds" />
-        <.tile label="p90 duration" value={Format.duration(@summary.p90)} sub="finished builds" />
-        <.tile label="p99 duration" value={Format.duration(@summary.p99)} sub="finished builds" />
         <.tile
+          id="tile-p50"
+          label="p50 duration"
+          value={Format.duration(@summary.p50)}
+          sub="finished builds"
+          delta={@deltas.p50}
+          previous={Format.duration(@previous.p50)}
+          up={:bad}
+        />
+        <.tile
+          id="tile-p90"
+          label="p90 duration"
+          value={Format.duration(@summary.p90)}
+          sub="finished builds"
+          delta={@deltas.p90}
+          previous={Format.duration(@previous.p90)}
+          up={:bad}
+        />
+        <.tile
+          id="tile-p99"
+          label="p99 duration"
+          value={Format.duration(@summary.p99)}
+          sub="finished builds"
+          delta={@deltas.p99}
+          previous={Format.duration(@previous.p99)}
+          up={:bad}
+        />
+        <.tile
+          id="tile-cache"
           label="Cache hit rate"
           value={pct(@summary.cache_hit_rate)}
           sub={"#{@summary.users} users"}
+          delta={@deltas.cache_hit_rate}
+          previous={pct(@previous.cache_hit_rate)}
+          up={:good}
         />
       </div>
 
@@ -380,20 +421,43 @@ defmodule ConveyorWeb.DashboardLive do
     """
   end
 
+  attr :id, :string, required: true
   attr :label, :string, required: true
   attr :value, :string, required: true
   attr :sub, :string, default: nil
   attr :tone, :atom, default: :neutral
+  attr :delta, :float, default: nil
+  attr :previous, :string, default: nil
+  # Whether an increase is good, bad or neither: colours the delta.
+  attr :up, :atom, default: :neutral
 
   defp tile(assigns) do
     ~H"""
-    <div class="rounded-md border border-base-300 px-3 py-2">
+    <div class="rounded-md border border-base-300 px-3 py-2" id={@id}>
       <div class="text-[11px] uppercase tracking-wide text-base-content/50">{@label}</div>
       <div class={["text-xl font-semibold tabular-nums", tone_text(@tone)]}>{@value}</div>
-      <div :if={@sub} class="text-[11px] text-base-content/50">{@sub}</div>
+      <div class="flex items-baseline justify-between gap-2 text-[11px] text-base-content/50">
+        <span :if={@sub}>{@sub}</span>
+        <span
+          :if={@delta}
+          class={["ml-auto font-mono tabular-nums", delta_text(@delta, @up)]}
+          title={"previous period: #{@previous}"}
+          data-delta={@delta}
+        >{delta_label(@delta)}</span>
+      </div>
     </div>
     """
   end
+
+  defp delta_label(d) when d > 0, do: "▲ #{round(d * 100)}%"
+  defp delta_label(d) when d < 0, do: "▼ #{round(-d * 100)}%"
+  defp delta_label(_), do: "= 0%"
+
+  defp delta_text(d, up) when d == 0 or up == :neutral, do: nil
+  defp delta_text(d, :good) when d > 0, do: tone_text(:good)
+  defp delta_text(_d, :good), do: tone_text(:bad)
+  defp delta_text(d, :bad) when d > 0, do: tone_text(:bad)
+  defp delta_text(_d, :bad), do: tone_text(:good)
 
   defp tone(nil), do: :neutral
   defp tone(rate) when rate >= 0.9, do: :good

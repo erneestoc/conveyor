@@ -71,6 +71,31 @@ defmodule Conveyor.Metrics.Dashboard do
     }
   end
 
+  @delta_keys [:builds, :success_rate, :p50, :p90, :p99, :cache_hit_rate]
+
+  @doc """
+  Relative change of each headline number from `previous` to `current`, as a fraction
+  (`0.25` = up 25 %). `nil` when either side has no value or the previous value is zero.
+  Rates compare as absolute differences in percentage points would mislead, so they are
+  relative too: a success rate going 80 % → 90 % is `+0.125`.
+  """
+  @spec deltas(summary(), summary()) :: %{
+          builds: float() | nil,
+          success_rate: float() | nil,
+          p50: float() | nil,
+          p90: float() | nil,
+          p99: float() | nil,
+          cache_hit_rate: float() | nil
+        }
+  def deltas(current, previous) do
+    Map.new(@delta_keys, fn key -> {key, delta(Map.get(current, key), Map.get(previous, key))} end)
+  end
+
+  defp delta(nil, _previous), do: nil
+  defp delta(_current, nil), do: nil
+  defp delta(_current, previous) when previous == 0, do: nil
+  defp delta(current, previous), do: (current - previous) / previous
+
   @doc """
   Per-bucket series: build counts by status, duration percentiles and cache hit rate.
   Buckets are contiguous over the scope's window (empty buckets are filled in).

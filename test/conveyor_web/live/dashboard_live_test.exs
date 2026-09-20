@@ -46,6 +46,24 @@ defmodule ConveyorWeb.DashboardLiveTest do
     assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/p/nope/dashboard") end
   end
 
+  test "stat tiles show the change against the previous period", %{conn: conn} do
+    {:ok, project} = Projects.create_project(%{slug: "golden-live", name: "Golden"})
+    {:ok, other} = Projects.create_project(%{slug: "golden-live-other", name: "Other"})
+    Conveyor.GoldenData.insert!(project.id, other.id, DateTime.utc_now())
+
+    {:ok, view, _} = live(conn, ~p"/p/golden-live/dashboard?range=7d")
+    assert has_element?(view, "#tile-builds [data-delta='0.5']", "▲ 50%")
+    assert has_element?(view, "#tile-p50 [data-delta='-0.25'].text-emerald-600", "▼ 25%")
+    assert has_element?(view, "#tile-p90 .text-rose-600", "▲ 3%")
+    assert has_element?(view, "#tile-success .text-emerald-600", "▲ 7%")
+    assert has_element?(view, "#tile-cache[title], #tile-cache [title='previous period: 25%']")
+
+    # No builds in the previous period: the tiles show no delta at all.
+    {:ok, view, _} = live(conn, ~p"/p/golden-live-other/dashboard?range=7d")
+    assert has_element?(view, "#tile-builds")
+    refute has_element?(view, "#tile-builds [data-delta]")
+  end
+
   test "tests page lists health rows and filters", %{conn: conn, project: project} do
     {:ok, view, _} = live(conn, ~p"/tests?range=30d")
     assert has_element?(view, "#tests-table")

@@ -36,6 +36,13 @@ defmodule Conveyor.Metrics.Scope do
     }
   end
 
+  @doc "The window of the same length immediately before this one (for period-over-period deltas)."
+  @spec previous(t()) :: t()
+  def previous(%__MODULE__{from: from, to: to} = scope) do
+    length = DateTime.diff(to, from, :microsecond)
+    %{scope | from: DateTime.add(from, -length, :microsecond), to: from}
+  end
+
   @doc "Returns one scope per segment, each with the segment's query added."
   @spec segments(t(), [map()]) :: [t()]
   def segments(%__MODULE__{} = scope, segments) do
