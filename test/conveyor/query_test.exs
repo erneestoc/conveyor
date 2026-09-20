@@ -214,9 +214,6 @@ defmodule Conveyor.QueryTest do
     assert Conveyor.Projects.Segments.for_project(project) ==
              Conveyor.Projects.Segments.defaults()
 
-    assert Conveyor.Projects.Segments.for_project(%{
-             project
-             | settings: %{"segments" => [%{"name" => "X", "query" => "x:1"}]}
-           }) == [%{"name" => "X", "query" => "x:1"}]
+    assert Conveyor.Projects.Segments.for_project(nil) == Conveyor.Projects.Segments.defaults()
   end
 end

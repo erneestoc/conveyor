@@ -64,6 +64,53 @@ defmodule ConveyorWeb.DashboardLiveTest do
     refute has_element?(view, "#tile-builds [data-delta]")
   end
 
+  test "segment chips narrow the dashboard and compare renders two columns", %{
+    conn: conn,
+    project: project
+  } do
+    {:ok, view, _} = live(conn, ~p"/p/#{project.slug}/dashboard?range=30d")
+    assert has_element?(view, "#segment-chip-all[aria-selected=true]")
+    assert has_element?(view, "#segment-chip-CI[aria-selected=false]")
+
+    view |> element("#segment-chip-CI") |> render_click()
+    assert_patch(view, ~p"/p/#{project.slug}/dashboard?range=30d&segment=CI")
+    assert has_element?(view, "#segment-chip-CI[aria-selected=true]")
+    assert has_element?(view, "#tile-builds", "0 running")
+
+    ci =
+      Conveyor.Metrics.Dashboard.summary(
+        Conveyor.Metrics.Scope.new("30d", project.id, Conveyor.Query.parse!("ci:true"))
+      )
+
+    assert render(element(view, "#tile-builds")) =~ Integer.to_string(ci.builds)
+
+    view |> form("#compare-form", a: "Local", b: "CI") |> render_submit()
+    assert_patch(view, ~p"/p/#{project.slug}/dashboard?range=30d&compare=Local%2CCI")
+    assert has_element?(view, "#compare-Local #tile-builds-Local")
+    assert has_element?(view, "#compare-CI #panel-durations-CI")
+    refute has_element?(view, "#segments")
+
+    view |> element("#compare-off") |> render_click()
+    assert_patch(view, ~p"/p/#{project.slug}/dashboard?range=30d")
+    assert has_element?(view, "#segments")
+
+    # Unknown names are ignored; a saved segment replaces the defaults.
+    {:ok, view, _} = live(conn, ~p"/dashboard?segment=Nope&compare=Local,Local")
+    assert has_element?(view, "#segment-chip-all[aria-selected=true]")
+    refute has_element?(view, "#compare")
+
+    {:ok, _} =
+      Conveyor.Projects.Segments.create(project, %{
+        "name" => "Main CI",
+        "query" => "ci:true branch:main"
+      })
+
+    {:ok, view, _} = live(conn, ~p"/p/#{project.slug}/dashboard?segment=Main%20CI")
+    assert has_element?(view, "#segment-chip-Main-CI[aria-selected=true]")
+    refute has_element?(view, "#segment-chip-CI")
+    refute has_element?(view, "#compare-form")
+  end
+
   test "tests page lists health rows and filters", %{conn: conn, project: project} do
     {:ok, view, _} = live(conn, ~p"/tests?range=30d")
     assert has_element?(view, "#tests-table")

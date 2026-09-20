@@ -9,7 +9,7 @@ defmodule ConveyorWeb.SettingsLive do
 
   alias Conveyor.Audit
   alias Conveyor.Projects
-  alias Conveyor.Projects.{ApiKey, Project}
+  alias Conveyor.Projects.{ApiKey, Project, Segments}
   alias ConveyorWeb.Format
 
   @impl true
@@ -31,6 +31,7 @@ defmodule ConveyorWeb.SettingsLive do
     assign(socket,
       projects: projects,
       keys: keys,
+      segments: Map.new(projects, &{&1.id, Segments.list(&1.id)}),
       expiring: Projects.expiring_api_keys(14),
       audit: Audit.recent(50)
     )
@@ -183,6 +184,44 @@ defmodule ConveyorWeb.SettingsLive do
     )
 
     {:noreply, socket |> put_flash(:info, "Cache endpoint removed") |> reload()}
+  end
+
+  def handle_event("create_segment", %{"segment" => attrs}, socket) do
+    project = Projects.get_project!(attrs["project_id"])
+
+    case Segments.create(project, attrs) do
+      {:ok, segment} ->
+        audit(socket, "segment.create",
+          subject: {"segment", segment.id},
+          project_id: project.id,
+          metadata: %{"name" => segment.name, "query" => segment.query}
+        )
+
+        {:noreply, socket |> put_flash(:info, "Segment #{segment.name} saved") |> reload()}
+
+      {:error, changeset} ->
+        message =
+          Enum.map_join(changeset.errors, "; ", fn {field, {msg, _}} -> "#{field} #{msg}" end)
+
+        {:noreply, put_flash(socket, :error, "Could not save the segment: #{message}")}
+    end
+  end
+
+  def handle_event("delete_segment", %{"id" => id}, socket) do
+    {:ok, segment} = id |> Segments.get!() |> Segments.delete()
+
+    audit(socket, "segment.delete",
+      subject: {"segment", segment.id},
+      project_id: segment.project_id,
+      metadata: %{"name" => segment.name}
+    )
+
+    {:noreply, socket |> put_flash(:info, "Segment removed") |> reload()}
+  end
+
+  def handle_event("move_segment", %{"id" => id, "dir" => dir}, socket) do
+    :ok = id |> Segments.get!() |> Segments.move(if(dir == "up", do: :up, else: :down))
+    {:noreply, reload(socket)}
   end
 
   defp audit(socket, action, opts), do: Audit.log(socket.assigns.current_scope, action, opts)
@@ -486,6 +525,72 @@ defmodule ConveyorWeb.SettingsLive do
               />
             </label>
             <.button variant="primary">Save endpoint</.button>
+          </form>
+        </div>
+        <div class="mt-3" id={"segments-#{project.id}"}>
+          <h3 class="text-xs font-semibold">Dashboard segments</h3>
+          <p class="text-[11px] text-base-content/50">
+            Named queries the dashboard splits and compares by. Without any, the defaults are
+            Local (<code>ci!=true</code>) and CI (<code>ci:true</code>).
+          </p>
+          <table class="mt-1 w-full text-xs">
+            <tbody class="divide-y divide-base-300/60">
+              <tr :for={seg <- @segments[project.id] || []} id={"segment-row-#{seg.id}"}>
+                <td class="py-1 font-medium">{seg.name}</td>
+                <td class="py-1 font-mono text-base-content/70">{seg.query}</td>
+                <td class="py-1 text-right whitespace-nowrap">
+                  <button
+                    type="button"
+                    phx-click="move_segment"
+                    phx-value-id={seg.id}
+                    phx-value-dir="up"
+                    title="Move up"
+                    class="mr-1 hover:underline"
+                  >↑</button>
+                  <button
+                    type="button"
+                    phx-click="move_segment"
+                    phx-value-id={seg.id}
+                    phx-value-dir="down"
+                    title="Move down"
+                    class="mr-2 hover:underline"
+                  >↓</button>
+                  <button
+                    type="button"
+                    phx-click="delete_segment"
+                    phx-value-id={seg.id}
+                    class="text-rose-600 hover:underline dark:text-rose-400"
+                  >Remove</button>
+                </td>
+              </tr>
+              <tr :if={(@segments[project.id] || []) == []}>
+                <td colspan="3" class="py-1 text-base-content/50">Using the default segments.</td>
+              </tr>
+            </tbody>
+          </table>
+          <form
+            id={"segment-form-#{project.id}"}
+            phx-submit="create_segment"
+            class="mt-2 flex flex-wrap items-end gap-2 text-xs"
+          >
+            <input type="hidden" name="segment[project_id]" value={project.id} />
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Name</span>
+              <input
+                name="segment[name]"
+                placeholder="Main branch CI"
+                class="rounded border border-base-300 bg-base-100 px-2 py-1"
+              />
+            </label>
+            <label class="flex flex-col gap-1">
+              <span class="text-[11px] text-base-content/60">Query</span>
+              <input
+                name="segment[query]"
+                placeholder="ci:true branch:main"
+                class="w-64 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+              />
+            </label>
+            <.button variant="primary">Add segment</.button>
           </form>
         </div>
       </section>

@@ -124,6 +124,42 @@ defmodule ConveyorWeb.SettingsLiveTest do
     assert Projects.cache_endpoints(Projects.get_project!(project.id)) == %{}
   end
 
+  test "dashboard segments can be added, reordered and removed", %{conn: conn, project: project} do
+    {:ok, view, _} = live(conn, ~p"/settings")
+    assert has_element?(view, "#segments-#{project.id}", "Using the default segments")
+
+    view
+    |> form("#segment-form-#{project.id}", segment: %{name: "Broken", query: "ci:"})
+    |> render_submit()
+
+    assert render(view) =~ "Could not save the segment"
+
+    view
+    |> form("#segment-form-#{project.id}",
+      segment: %{name: "Main CI", query: "ci:true branch:main"}
+    )
+    |> render_submit()
+
+    view
+    |> form("#segment-form-#{project.id}", segment: %{name: "Humans", query: "ai!=true"})
+    |> render_submit()
+
+    [main, humans] = Conveyor.Projects.Segments.list(project.id)
+    assert has_element?(view, "#segment-row-#{main.id}", "ci:true branch:main")
+
+    view |> element("#segment-row-#{humans.id} button[phx-value-dir=up]") |> render_click()
+
+    assert Enum.map(Conveyor.Projects.Segments.list(project.id), & &1.name) == [
+             "Humans",
+             "Main CI"
+           ]
+
+    view |> element("#segment-row-#{main.id} button[phx-click=delete_segment]") |> render_click()
+    refute has_element?(view, "#segment-row-#{main.id}")
+    assert has_element?(view, "#audit-log", "segment.create")
+    assert has_element?(view, "#audit-log", "segment.delete")
+  end
+
   test "settings actions are audited", %{conn: conn, project: project} do
     {:ok, view, _} = live(conn, ~p"/settings")
     assert has_element?(view, "#audit-log", "Nothing yet")
