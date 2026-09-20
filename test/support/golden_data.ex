@@ -12,6 +12,10 @@ defmodule Conveyor.GoldenData do
     800 ms succeeded (10/100)
 
   Plus one 9999 ms build 20 days ago (outside both windows) and one in another project.
+
+  Profile summaries (action phases, ms) exist for the two current CI successes only:
+  the 200 ms build has cache check 50, remote execution 100, download outputs 30; the
+  400 ms build has cache check 20, queued 40, remote execution 200.
   """
 
   alias Conveyor.Invocations.Invocation
@@ -43,7 +47,29 @@ defmodule Conveyor.GoldenData do
     ]
 
     Repo.insert_all(Invocation, current ++ previous ++ outside)
+
+    [first, second | _] = current
+
+    Repo.insert_all(Conveyor.Invocations.Metrics, [
+      metrics(first, [{"cache check", 50}, {"remote execution", 100}, {"download outputs", 30}]),
+      metrics(second, [{"cache check", 20}, {"queued", 40}, {"remote execution", 200}])
+    ])
+
     :ok
+  end
+
+  defp metrics(row, phases) do
+    %{
+      invocation_id: row.id,
+      profile_summary: %{
+        "action_phases" =>
+          Enum.map(phases, fn {name, ms} ->
+            %{"name" => name, "count" => 1, "total_ms" => ms * 1.0}
+          end)
+      },
+      inserted_at: row.started_at,
+      updated_at: row.started_at
+    }
   end
 
   defp row(project_id, now, offset_s, status, duration, hits, executed, ci?) do

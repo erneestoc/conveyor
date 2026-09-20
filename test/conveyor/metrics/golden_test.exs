@@ -108,6 +108,27 @@ defmodule Conveyor.Metrics.GoldenTest do
            } = local
   end
 
+  test "phases over time are exact", %{scope: scope} do
+    phases = Dashboard.phases_over_time(scope)
+    assert length(phases) == 8
+
+    totals =
+      Enum.reduce(phases, %{}, fn row, acc ->
+        row |> Map.delete(:bucket) |> Map.merge(acc, fn _, a, b -> a + b end)
+      end)
+
+    assert totals == %{
+             "cache check" => 70,
+             "queued" => 40,
+             "remote execution" => 300,
+             "download outputs" => 30
+           }
+
+    assert Enum.count(phases, &(map_size(&1) > 1)) == 2
+    assert Enum.all?(Dashboard.phases_over_time(Scope.previous(scope)), &(map_size(&1) == 1))
+    assert length(Dashboard.phases_over_time(Scope.new("24h", -1, [], @now))) == 24
+  end
+
   test "series buckets sum to the window", %{scope: scope} do
     series = Dashboard.series(scope)
     assert length(series) == 8

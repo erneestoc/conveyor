@@ -14,7 +14,31 @@ defmodule ConveyorWeb.Charts do
   @pad_bottom 22
   @pad_top 8
 
-  @doc "Stacked bars per bucket; `series` is a list of `{key, class}` in stacking order."
+  # Action phases in stacking order, with the palette shared by the timeline and the
+  # dashboard. Colours are hex so they can be used as SVG fills and inline backgrounds.
+  @phases [
+    {"cache check", "#0ea5e9"},
+    {"upload inputs", "#f59e0b"},
+    {"queued", "#a3a3a3"},
+    {"remote execution", "#8b5cf6"},
+    {"download outputs", "#14b8a6"},
+    {"local execution", "#10b981"},
+    {"setup", "#f97316"},
+    {"outputs", "#64748b"}
+  ]
+
+  @doc "Action phases as `{name, colour}` in stacking order."
+  @spec phases() :: [{String.t(), String.t()}]
+  def phases, do: @phases
+
+  @doc "The colour of an action phase (grey for unknown names)."
+  @spec phase_color(String.t()) :: String.t()
+  def phase_color(name), do: List.keyfind(@phases, name, 0, {name, "#94a3b8"}) |> elem(1)
+
+  @doc """
+  Stacked bars per bucket; `series` is a list of `{key, class_or_colour}` in stacking order.
+  A colour (`#rrggbb`) is used as the fill directly; anything else is a text colour class.
+  """
   attr :points, :list, required: true, doc: "maps with :bucket and one integer per series key"
   attr :series, :list, required: true
   attr :id, :string, required: true
@@ -46,8 +70,17 @@ defmodule ConveyorWeb.Charts do
           h = v / max * plot_h
           y = @pad_top + plot_h - stacked / max * plot_h - h
 
-          {[%{x: x, y: y, w: bar_w, h: h, class: class, title: "#{key}: #{v}"} | acc],
-           stacked + v}
+          {[
+             %{
+               x: x,
+               y: y,
+               w: bar_w,
+               h: h,
+               class: class,
+               title: "#{key}: #{assigns.label_fun.(v)}"
+             }
+             | acc
+           ], stacked + v}
         end)
         |> elem(0)
       end)
@@ -99,8 +132,8 @@ defmodule ConveyorWeb.Charts do
         y={b.y}
         width={b.w}
         height={b.h}
-        class={b.class}
-        fill="currentColor"
+        class={if(colour?(b.class), do: nil, else: b.class)}
+        fill={if(colour?(b.class), do: b.class, else: "currentColor")}
       >
         <title>{b.title}</title>
       </rect>
@@ -291,19 +324,22 @@ defmodule ConveyorWeb.Charts do
     """
   end
 
-  @doc "A legend for series classes."
-  attr :items, :list, required: true, doc: "list of {label, class}"
+  @doc "A legend for series classes or colours."
+  attr :items, :list, required: true, doc: "list of {label, class_or_colour}"
 
   def legend(assigns) do
     ~H"""
     <div class="flex flex-wrap gap-3 text-[11px] text-base-content/60">
-      <span :for={{label, class} <- @items} class="inline-flex items-center gap-1"><span class={[
-        "inline-block size-2 rounded-sm bg-current",
-        class
-      ]}></span>{label}</span>
+      <span :for={{label, class} <- @items} class="inline-flex items-center gap-1"><span
+        class={["inline-block size-2 rounded-sm", !colour?(class) && "bg-current", class]}
+        style={colour?(class) && "background: #{class}"}
+      ></span>{label}</span>
     </div>
     """
   end
+
+  defp colour?("#" <> _), do: true
+  defp colour?(_), do: false
 
   # --- helpers -----------------------------------------------------------------------------
 

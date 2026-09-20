@@ -6,7 +6,7 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   import Ecto.Query
 
-  alias Conveyor.Invocations.Target
+  alias Conveyor.Invocations.{Metrics, Target}
   alias Conveyor.Metrics.Scope
   alias Conveyor.Repo
 
@@ -165,6 +165,33 @@ defmodule Conveyor.Metrics.Dashboard do
     end
   end
 
+  @doc """
+  Where action time went per bucket: the `action_phases` of every finished build's profile
+  summary, summed by phase name (milliseconds). Each row is `%{bucket: dt, "cache check" => ms, …}`
+  with only the phases present; buckets without profiles are filled in empty.
+  """
+  @spec phases_over_time(Scope.t()) :: [map()]
+  def phases_over_time(scope) do
+    bucket = Scope.bucket(scope)
+
+    rows =
+      scope
+      |> Scope.finished()
+      |> join(:inner, [i], m in Metrics, on: m.invocation_id == i.id)
+      |> join(
+        :inner,
+        [i, m],
+        p in fragment("jsonb_array_elements(? -> 'action_phases')", m.profile_summary),
+        on: true
+      )
+      |> phase_buckets(bucket)
+      |> Repo.all()
+      |> Enum.group_by(&to_utc(elem(&1, 0)), fn {_, name, ms} -> {name, round(to_number(ms))} end)
+
+    for b <- buckets(scope.from, scope.to, bucket),
+        do: Map.merge(%{bucket: b}, Map.new(Map.get(rows, b, [])))
+  end
+
   @doc "Failed builds grouped by Bazel exit code name."
   @spec failure_breakdown(Scope.t()) :: [{String.t(), non_neg_integer()}]
   def failure_breakdown(scope) do
@@ -289,6 +316,32 @@ defmodule Conveyor.Metrics.Dashboard do
     query
     |> group_by([i], fragment("date_trunc('day', ?)", i.started_at))
     |> select([i], %{bucket: fragment("date_trunc('day', ?)", i.started_at)})
+  end
+
+  defp phase_buckets(query, :hour) do
+    query
+    |> group_by([i, m, p], [
+      fragment("date_trunc('hour', ?)", i.started_at),
+      fragment("? ->> 'name'", p)
+    ])
+    |> select([i, m, p], {
+      fragment("date_trunc('hour', ?)", i.started_at),
+      fragment("? ->> 'name'", p),
+      sum(fragment("(? ->> 'total_ms')::float", p))
+    })
+  end
+
+  defp phase_buckets(query, :day) do
+    query
+    |> group_by([i, m, p], [
+      fragment("date_trunc('day', ?)", i.started_at),
+      fragment("? ->> 'name'", p)
+    ])
+    |> select([i, m, p], {
+      fragment("date_trunc('day', ?)", i.started_at),
+      fragment("? ->> 'name'", p),
+      sum(fragment("(? ->> 'total_ms')::float", p))
+    })
   end
 
   defp buckets(from, to, unit) do

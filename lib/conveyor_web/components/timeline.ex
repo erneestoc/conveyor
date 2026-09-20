@@ -241,19 +241,8 @@ defmodule ConveyorWeb.Timeline do
     """
   end
 
-  @phase_colors %{
-    "cache check" => "#0ea5e9",
-    "upload inputs" => "#f59e0b",
-    "queued" => "#a3a3a3",
-    "remote execution" => "#8b5cf6",
-    "download outputs" => "#14b8a6",
-    "local execution" => "#10b981",
-    "setup" => "#f97316",
-    "outputs" => "#64748b"
-  }
-
   @doc false
-  def phase_color(name), do: Map.get(@phase_colors, name, "#94a3b8")
+  defdelegate phase_color(name), to: ConveyorWeb.Charts
 
   attr :summary, :map, required: true
 

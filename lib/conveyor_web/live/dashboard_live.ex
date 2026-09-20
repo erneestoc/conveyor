@@ -123,7 +123,8 @@ defmodule ConveyorWeb.DashboardLive do
       slowest: Dashboard.slowest_builds(scope, 8),
       versions: Dashboard.versions(scope),
       failing_targets: Dashboard.top_failing_targets(scope, 8),
-      by_hour: Dashboard.builds_by_hour(scope)
+      by_hour: Dashboard.builds_by_hour(scope),
+      phases: Dashboard.phases_over_time(scope)
     }
   end
 
@@ -467,6 +468,24 @@ defmodule ConveyorWeb.DashboardLive do
           {"p90", "text-amber-500"},
           {"p99", "text-rose-500"}
         ]} />
+      </.panel>
+      <.panel title="Where action time goes" id={"panel-phases#{@sfx}"}>
+        <p
+          :if={Enum.all?(@data.phases, &(map_size(&1) == 1))}
+          class="py-6 text-center text-xs text-base-content/50"
+          id={"phases-empty#{@sfx}"}
+        >
+          No profiles in this window. Upload profiles (see the Bazel setup docs) to see cache
+          checks, queueing, execution and downloads over time.
+        </p>
+        <.stacked_bars
+          :if={Enum.any?(@data.phases, &(map_size(&1) > 1))}
+          id={"chart-phases#{@sfx}"}
+          points={@data.phases}
+          series={phases()}
+          label_fun={&Format.duration/1}
+        />
+        <.legend :if={Enum.any?(@data.phases, &(map_size(&1) > 1))} items={phases()} />
       </.panel>
       <.panel title="Remote cache hit rate" id={"panel-cache#{@sfx}"}>
         <.lines
