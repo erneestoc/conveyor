@@ -133,11 +133,9 @@ if config_env() == :prod do
       String.to_integer(System.get_env("MAX_EVENTS_PER_SECOND_PER_KEY", "5000")),
     max_log_bytes: String.to_integer(System.get_env("MAX_LOG_MB", "256")) * 1024 * 1024
 
-  # Behind a TLS terminator, FORCE_SSL=true redirects http to https and sends HSTS.
-  if System.get_env("FORCE_SSL") in ~w(true 1) do
-    config :conveyor, ConveyorWeb.Endpoint,
-      force_ssl: [rewrite_on: [:x_forwarded_proto], hsts: true, host: nil]
-  end
+  # Behind a layer-7 TLS terminator that sets x-forwarded-proto, FORCE_SSL=true redirects
+  # http to https and sends HSTS (health paths stay reachable over plain HTTP).
+  config :conveyor, :force_ssl, System.get_env("FORCE_SSL") in ~w(true 1)
 
   config :conveyor,
          :shutdown_drain_seconds,

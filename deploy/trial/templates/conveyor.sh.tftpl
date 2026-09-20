@@ -12,7 +12,7 @@ docker run -d --name conveyor --restart unless-stopped --network host \
   -e DATABASE_URL='${database_url}' \
   -e SECRET_KEY_BASE='${secret_key_base}' \
   -e RELEASE_COOKIE='${release_cookie}' \
-  -e PHX_HOST='${phx_host}' -e PORT=4000 -e GRPC_PORT=1985 -e FORCE_SSL=true \
+  -e PHX_HOST='${phx_host}' -e PORT=4000 -e GRPC_PORT=1985 \
   -e AUTH_MODE=open -e ADMIN_TOKEN='${admin_token}' -e BES_INGEST_AUTH=api_key \
   -e BLOB_STORE=s3 -e S3_BUCKET='${bucket}' -e AWS_REGION='${region}' \
   -e CAS_SINK_ENABLED=true -e POOL_SIZE=40 \

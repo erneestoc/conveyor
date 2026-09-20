@@ -13,7 +13,7 @@ shown.
 | `PHX_HOST` | `example.com` | public hostname of the UI, used in links Bazel prints |
 | `PORT` | `4000` | HTTP listener |
 | `GRPC_PORT` | `1985` | Build Event Service listener |
-| `FORCE_SSL` | `false` | redirect HTTP to HTTPS and send HSTS (behind a TLS terminator) |
+| `FORCE_SSL` | `false` | redirect HTTP to HTTPS and send HSTS; only behind a layer-7 terminator that sets `x-forwarded-proto` (an ingress or ALB). Leave off behind a layer-4 balancer such as an NLB, which terminates TLS without adding the header. Health paths are never redirected. |
 | `POOL_SIZE` | `40` | PostgreSQL connections per node |
 | `ECTO_IPV6` | `false` | connect to PostgreSQL over IPv6 |
 | `SHUTDOWN_DRAIN_SECONDS` | `30` | how long SIGTERM waits for open streams |

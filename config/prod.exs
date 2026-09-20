@@ -7,17 +7,9 @@ import Config
 # before starting your production server.
 config :conveyor, ConveyorWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
-# Force using SSL in production. This also sets the "strict-security-transport" header,
-# known as HSTS. If you have a health check endpoint, you may want to exclude it below.
-# Note `:force_ssl` is required to be set at compile-time.
-config :conveyor, ConveyorWeb.Endpoint,
-  force_ssl: [
-    rewrite_on: [:x_forwarded_proto],
-    exclude: [
-      # paths: ["/health"],
-      hosts: ["localhost", "127.0.0.1"]
-    ]
-  ]
+# HTTPS redirects and HSTS are a runtime decision (FORCE_SSL, see runtime.exs and
+# ConveyorWeb.Plugs.ForceSSL): a layer-4 balancer sends no x-forwarded-proto header and a
+# compile-time Plug.SSL would redirect forever.
 
 # Do not print debug messages in production
 config :logger, level: :info

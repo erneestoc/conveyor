@@ -7,6 +7,9 @@
   #    Conveyor.Blobs.valid_digest?/1 (64 lowercase hex chars) or from a fixture path given
   #    on the command line by the operator.
   #  - SQL.Query: partition DDL interpolates names derived from dates only.
-  ignore: ["Traversal.FileModule", "SQL.Query"],
+  #  - Config.HTTPS: the HTTPS redirect is a runtime switch (FORCE_SSL →
+  #    ConveyorWeb.Plugs.ForceSSL) because a compile-time Plug.SSL loops behind a layer-4
+  #    balancer; TLS itself terminates at the balancer or ingress.
+  ignore: ["Traversal.FileModule", "SQL.Query", "Config.HTTPS"],
   threshold: "low"
 ]
