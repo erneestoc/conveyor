@@ -155,6 +155,35 @@ defmodule Conveyor.Metrics.GoldenTest do
              [{1, 12, 1}, {2, 12, 1}, {3, 12, 1}, {4, 12, 1}, {6, 12, 1}, {7, 12, 1}]
   end
 
+  test "execution log reports are exact", %{scope: scope} do
+    assert Dashboard.cache_by_mnemonic(scope) == [
+             %{mnemonic: "Compile", spawns: 3, hits: 1, hit_rate: 1 / 3},
+             %{mnemonic: "Genrule", spawns: 2, hits: 0, hit_rate: 0.0},
+             %{mnemonic: "TestRunner", spawns: 2, hits: 0, hit_rate: 0.0}
+           ]
+
+    assert [%{mnemonic: "Compile"}] = Dashboard.cache_by_mnemonic(scope, 1)
+
+    assert Dashboard.top_cache_missing_targets(scope) == [
+             %{label: "//app:a", misses: 2},
+             %{label: "//app:b", misses: 2},
+             %{label: "//app:d", misses: 2}
+           ]
+
+    assert Dashboard.non_hermetic(scope) == [%{label: "//app:a", mnemonic: "Genrule", count: 1}]
+
+    bytes = Dashboard.remote_bytes(scope)
+    assert length(bytes) == 8
+    assert Enum.sum(Enum.map(bytes, &(&1.sent || 0))) == 320
+    assert Enum.sum(Enum.map(bytes, &(&1.fetched || 0))) == 49
+    assert Enum.count(bytes, &is_nil(&1.sent)) == 6
+
+    previous = Scope.previous(scope)
+    assert Dashboard.cache_by_mnemonic(previous) == []
+    assert Dashboard.non_hermetic(previous) == []
+    assert Enum.all?(Dashboard.remote_bytes(previous), &is_nil(&1.sent))
+  end
+
   test "series buckets sum to the window", %{scope: scope} do
     series = Dashboard.series(scope)
     assert length(series) == 8

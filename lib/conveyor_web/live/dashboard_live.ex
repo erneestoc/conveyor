@@ -127,7 +127,11 @@ defmodule ConveyorWeb.DashboardLive do
       phases: Dashboard.phases_over_time(scope),
       queue: Dashboard.queue_trend(scope),
       regressions: Dashboard.target_regressions(scope, limit: 8),
-      mnemonics: Dashboard.actions_by_mnemonic(scope, 10)
+      mnemonics: Dashboard.actions_by_mnemonic(scope, 10),
+      cache_by_mnemonic: Dashboard.cache_by_mnemonic(scope, 10),
+      cache_missing: Dashboard.top_cache_missing_targets(scope, 8),
+      non_hermetic: Dashboard.non_hermetic(scope, 8),
+      remote_bytes: Dashboard.remote_bytes(scope)
     }
   end
 
@@ -622,6 +626,100 @@ defmodule ConveyorWeb.DashboardLive do
             </tr>
           </tbody>
         </table>
+      </.panel>
+      <.panel title="Remote cache by mnemonic" id={"panel-cache-mnemonics#{@sfx}"}>
+        <p
+          :if={@data.cache_by_mnemonic == []}
+          class="text-xs text-base-content/50"
+          id={"exec-empty#{@sfx}"}
+        >
+          No execution logs in this window. Upload
+          <code class="font-mono">--execution_log_compact_file</code>
+          logs to see cache hits per
+          mnemonic, cache-missing targets and non-hermetic actions.
+        </p>
+        <table :if={@data.cache_by_mnemonic != []} class="w-full text-xs">
+          <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/50">
+            <tr>
+              <th class="py-1 font-medium">Mnemonic</th><th class="py-1 text-right font-medium">
+                Spawns
+              </th><th class="py-1 text-right font-medium">
+                Cache hits
+              </th><th class="py-1 text-right font-medium">Hit rate</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-base-300/60">
+            <tr :for={m <- @data.cache_by_mnemonic} id={"cache-mnemonic#{@sfx}-#{m.mnemonic}"}>
+              <td class="py-1 font-mono">{m.mnemonic}</td>
+              <td class="py-1 text-right font-mono tabular-nums">{Format.number(m.spawns)}</td>
+              <td class="py-1 text-right font-mono tabular-nums">{Format.number(m.hits)}</td>
+              <td class={["py-1 text-right font-mono tabular-nums", tone_text(tone(m.hit_rate))]}>
+                {pct(m.hit_rate)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </.panel>
+      <.panel title="Top cache-missing targets" id={"panel-cache-missing#{@sfx}"}>
+        <p :if={@data.cache_missing == []} class="text-xs text-base-content/50">
+          No execution logs in this window.
+        </p>
+        <.hbars
+          :if={@data.cache_missing != []}
+          id={"chart-cache-missing#{@sfx}"}
+          items={Enum.map(@data.cache_missing, &{&1.label, &1.misses})}
+          class="text-amber-500"
+        />
+      </.panel>
+      <.panel title="Non-hermetic actions" id={"panel-non-hermetic#{@sfx}"}>
+        <p class="mb-2 text-[11px] text-base-content/50">
+          Same inputs as an earlier build, different outputs: timestamps, randomness or
+          undeclared inputs. They defeat the cache every time.
+        </p>
+        <table class="w-full text-xs">
+          <tbody class="divide-y divide-base-300/60">
+            <tr
+              :for={n <- @data.non_hermetic}
+              id={"non-hermetic#{@sfx}-#{slug(n.label)}-#{n.mnemonic}"}
+            >
+              <td class="max-w-xs truncate py-1 font-mono">{n.label}</td>
+              <td class="py-1 font-mono text-base-content/60">{n.mnemonic}</td>
+              <td class="py-1 text-right font-mono tabular-nums">{n.count}×</td>
+            </tr>
+            <tr :if={@data.non_hermetic == []}>
+              <td class="py-1 text-base-content/50">
+                None found in this window's execution logs.
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </.panel>
+      <.panel title="Remote traffic" id={"panel-remote-bytes#{@sfx}"}>
+        <p
+          :if={Enum.all?(@data.remote_bytes, &is_nil(&1.sent))}
+          class="py-6 text-center text-xs text-base-content/50"
+          id={"remote-bytes-empty#{@sfx}"}
+        >
+          No execution logs in this window.
+        </p>
+        <.lines
+          :if={Enum.any?(@data.remote_bytes, &(&1.sent != nil))}
+          id={"chart-remote-bytes#{@sfx}"}
+          points={@data.remote_bytes}
+          series={[
+            {:sent, "text-amber-500", "inputs sent"},
+            {:fetched, "text-sky-500", "outputs fetched"}
+          ]}
+          label_fun={&Format.bytes/1}
+        />
+        <.legend items={[
+          {"inputs sent to remote execution", "text-amber-500"},
+          {"outputs fetched from the cache", "text-sky-500"}
+        ]} />
+        <p class="mt-1 text-[11px] text-base-content/50">
+          Estimated from execution logs: input bytes of remote executions, output bytes of
+          cache hits and remote executions.
+        </p>
       </.panel>
       <.panel title="When builds start (UTC)" id={"panel-hours#{@sfx}"}>
         <.heatmap id={"chart-hours#{@sfx}"} cells={@data.heatmap} />

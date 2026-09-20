@@ -6,7 +6,8 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   import Ecto.Query
 
-  alias Conveyor.Invocations.{Metrics, Target}
+  alias Conveyor.ExecLog.Spawn
+  alias Conveyor.Invocations.{Invocation, Metrics, Target}
   alias Conveyor.Metrics.Scope
   alias Conveyor.Repo
 
@@ -441,6 +442,114 @@ defmodule Conveyor.Metrics.Dashboard do
     end)
     |> Enum.sort_by(&{-&1.executed, &1.mnemonic})
     |> Enum.take(limit)
+  end
+
+  # --- execution log reports (spawns) ---------------------------------------------------------
+
+  @doc "Remote cache hit rate per mnemonic across the scope's execution logs, busiest first."
+  @spec cache_by_mnemonic(Scope.t(), pos_integer()) :: [map()]
+  def cache_by_mnemonic(scope, limit \\ 10) do
+    scope
+    |> spawns()
+    |> group_by([s], s.mnemonic)
+    |> select([s], %{
+      mnemonic: s.mnemonic,
+      spawns: count(s.id),
+      hits: fragment("count(*) FILTER (WHERE ?)", s.cache_hit)
+    })
+    |> order_by([s], desc: count(s.id), asc: s.mnemonic)
+    |> limit(^limit)
+    |> Repo.all()
+    |> Enum.map(&Map.put(&1, :hit_rate, &1.hits / &1.spawns))
+  end
+
+  @doc "Targets whose spawns missed the remote cache most often (executed instead)."
+  @spec top_cache_missing_targets(Scope.t(), pos_integer()) :: [map()]
+  def top_cache_missing_targets(scope, limit \\ 10) do
+    scope
+    |> spawns()
+    |> where([s], not s.cache_hit)
+    |> group_by([s], s.target_label)
+    |> select([s], %{label: s.target_label, misses: count(s.id)})
+    |> order_by([s], desc: count(s.id), asc: s.target_label)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  @doc """
+  Non-hermetic actions: spawns in the scope whose inputs are identical (same digest) to an
+  earlier spawn of the same action in another build of the project, but whose outputs
+  differ. Grouped by target and mnemonic, most occurrences first.
+  """
+  @spec non_hermetic(Scope.t(), pos_integer()) :: [map()]
+  def non_hermetic(scope, limit \\ 10) do
+    scope
+    |> spawns()
+    |> join(:inner, [s, i], p in Spawn,
+      on:
+        p.inputs_digest == s.inputs_digest and p.target_label == s.target_label and
+          p.mnemonic == s.mnemonic and p.primary_output == s.primary_output and
+          p.invocation_id != s.invocation_id and p.id < s.id and
+          p.outputs_digest != s.outputs_digest
+    )
+    |> join(:inner, [s, i, p], pi in Invocation,
+      on: pi.id == p.invocation_id and pi.project_id == i.project_id
+    )
+    |> group_by([s], [s.target_label, s.mnemonic])
+    |> select([s], %{label: s.target_label, mnemonic: s.mnemonic, count: count(s.id, :distinct)})
+    |> order_by([s], desc: count(s.id, :distinct), asc: s.target_label)
+    |> limit(^limit)
+    |> Repo.all()
+  end
+
+  @doc """
+  Remote traffic per bucket estimated from execution logs: bytes of inputs sent for remote
+  executions (`runner` "remote", not a cache hit) and bytes of outputs fetched (cache hits
+  and remote executions). `nil` for buckets without logs.
+  """
+  @spec remote_bytes(Scope.t()) :: [map()]
+  def remote_bytes(scope) do
+    bucket = Scope.bucket(scope)
+
+    rows =
+      scope
+      |> spawns()
+      |> remote_buckets(bucket)
+      |> Repo.all()
+      |> Map.new(fn {b, sent, fetched} ->
+        {to_utc(b), {round(to_number(sent || 0)), round(to_number(fetched || 0))}}
+      end)
+
+    for b <- buckets(scope.from, scope.to, bucket) do
+      case Map.get(rows, b) do
+        nil -> %{bucket: b, sent: nil, fetched: nil}
+        {sent, fetched} -> %{bucket: b, sent: sent, fetched: fetched}
+      end
+    end
+  end
+
+  defp spawns(scope) do
+    Spawn |> join(:inner, [s], i in subquery(Scope.finished(scope)), on: i.id == s.invocation_id)
+  end
+
+  defp remote_buckets(query, :hour) do
+    query
+    |> group_by([s, i], fragment("date_trunc('hour', ?)", i.started_at))
+    |> select([s, i], {
+      fragment("date_trunc('hour', ?)", i.started_at),
+      sum(s.input_bytes) |> filter(s.runner == "remote" and not s.cache_hit),
+      sum(s.output_bytes) |> filter(s.runner == "remote" or s.cache_hit)
+    })
+  end
+
+  defp remote_buckets(query, :day) do
+    query
+    |> group_by([s, i], fragment("date_trunc('day', ?)", i.started_at))
+    |> select([s, i], {
+      fragment("date_trunc('day', ?)", i.started_at),
+      sum(s.input_bytes) |> filter(s.runner == "remote" and not s.cache_hit),
+      sum(s.output_bytes) |> filter(s.runner == "remote" or s.cache_hit)
+    })
   end
 
   # --- helpers -------------------------------------------------------------------------------
