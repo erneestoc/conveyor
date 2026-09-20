@@ -169,6 +169,18 @@ defmodule Conveyor.Ingest.Worker do
     end
   end
 
+  def handle_call({:lifecycle, :invocation_attempt_started, _obe}, _from, state),
+    do: {:reply, :ok, state}
+
+  def handle_call({:lifecycle, :invocation_attempt_finished, _obe}, from, state) do
+    state = %{state | lifecycle_finished: true}
+    state = update_in(state.norm, &Normalizer.set(&1, %{lifecycle_finished: true}))
+    state = %{state | batch: Batch.add_waiter(state.batch, {:reply, from}, nil)}
+    {:noreply, flush(state)}
+  end
+
+  def handle_call(:summary, _from, state), do: {:reply, summary(state.norm, state), state}
+
   # Behind a balancer a retried stream can land on a node whose worker was started by a
   # lifecycle event and never saw the events another node committed. With nothing buffered
   # or in flight, such a worker resumes from the row instead of rejecting the sequence.
@@ -186,18 +198,6 @@ defmodule Conveyor.Ingest.Worker do
       {:error, state}
     end
   end
-
-  def handle_call({:lifecycle, :invocation_attempt_started, _obe}, _from, state),
-    do: {:reply, :ok, state}
-
-  def handle_call({:lifecycle, :invocation_attempt_finished, _obe}, from, state) do
-    state = %{state | lifecycle_finished: true}
-    state = update_in(state.norm, &Normalizer.set(&1, %{lifecycle_finished: true}))
-    state = %{state | batch: Batch.add_waiter(state.batch, {:reply, from}, nil)}
-    {:noreply, flush(state)}
-  end
-
-  def handle_call(:summary, _from, state), do: {:reply, summary(state.norm, state), state}
 
   # --- absorbing one event ---------------------------------------------------------------
 
