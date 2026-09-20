@@ -2,8 +2,9 @@ defmodule ConveyorWeb.UploadController do
   @moduledoc """
   HTTP upload API, authenticated with an `upload`-scoped key:
 
-    * `PUT /api/v1/invocations/:id/artifacts/:name` — attach a file (typically the
-      JSON profile from `--profile`) to a build. The body is the raw file.
+    * `PUT /api/v1/invocations/:id/artifacts/:name` — attach a file to a build. The body
+      is the raw file. Profiles (`--profile`, `*.profile.gz`) are summarized and execution
+      logs (`--execution_log_compact_file`, any name containing `exec log`) are parsed.
     * `PUT /api/v1/invocations/:id/bep` — ingest a `--build_event_binary_file` after
       the fact (air-gapped CI, or a build that ran with no BES connection).
   """
@@ -26,6 +27,7 @@ defmodule ConveyorWeb.UploadController do
          {:ok, blob} <- store_body(conn, name) do
       artifact = Artifacts.attach(inv, name, blob, "upload")
       if Artifacts.profile_name?(name), do: Artifacts.profile_available(inv, blob, name)
+      if Conveyor.ExecLog.name?(name), do: Conveyor.ExecLog.available(inv, blob)
 
       Conveyor.Audit.log(key, "upload.artifact",
         subject: {"invocation", inv.id},

@@ -71,6 +71,7 @@ defmodule Conveyor.Invocations.Invocation do
     field :profile_status, :string, default: "none"
     field :profile_uri, :string
     field :profile_blob, :string
+    field :exec_log_status, :string, default: "none"
     has_one :metrics, Conveyor.Invocations.Metrics
     timestamps(type: :utc_datetime_usec)
   end

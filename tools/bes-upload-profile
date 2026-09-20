@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Upload a Bazel JSON profile (and optionally a build_event_binary_file) to Conveyor.
+# Upload a Bazel JSON profile, a compact execution log and/or a build_event_binary_file
+# to Conveyor.
 #
 # Usage:
 #   bes-upload-profile --server https://conveyor.example.com --key conveyor_... \
-#       --invocation <uuid> --profile /tmp/profile.gz [--bep /tmp/build.bep] [--name NAME]
+#       --invocation <uuid> [--profile /tmp/profile.gz] [--execution-log /tmp/exec.log.zst] \
+#       [--bep /tmp/build.bep] [--name NAME]
 #
+# The execution log comes from `--execution_log_compact_file=/tmp/exec.log.zst`; Conveyor
+# parses it to explain why each action ran (Actions tab).
 # Typical .bazelrc for machines without a remote cache:
 #   build --profile=/tmp/bazel-profile.gz --build_event_binary_file=/tmp/bazel.bep
 # then, after the build, take the invocation id from the BES results URL Bazel printed
@@ -16,6 +20,7 @@ server="${CONVEYOR_SERVER:-}"
 key="${CONVEYOR_API_KEY:-}"
 invocation=""
 profile=""
+execlog=""
 bep=""
 name=""
 
@@ -25,9 +30,10 @@ while [[ $# -gt 0 ]]; do
     --key) key="$2"; shift 2 ;;
     --invocation) invocation="$2"; shift 2 ;;
     --profile) profile="$2"; shift 2 ;;
+    --execution-log) execlog="$2"; shift 2 ;;
     --bep) bep="$2"; shift 2 ;;
     --name) name="$2"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -36,8 +42,8 @@ if [[ -z "$server" || -z "$key" || -z "$invocation" ]]; then
   echo "need --server, --key and --invocation (or CONVEYOR_SERVER / CONVEYOR_API_KEY)" >&2
   exit 2
 fi
-if [[ -z "$profile" && -z "$bep" ]]; then
-  echo "need --profile and/or --bep" >&2
+if [[ -z "$profile" && -z "$bep" && -z "$execlog" ]]; then
+  echo "need --profile, --execution-log and/or --bep" >&2
   exit 2
 fi
 
@@ -66,4 +72,8 @@ if [[ -n "$profile" ]]; then
   type="application/json"
   [[ "$profile" == *.gz ]] && type="application/gzip"
   put "/api/v1/invocations/${invocation}/artifacts/${name}" "$profile" "$type"
+fi
+
+if [[ -n "$execlog" ]]; then
+  put "/api/v1/invocations/${invocation}/artifacts/execution.log.zst" "$execlog" "application/zstd"
 fi

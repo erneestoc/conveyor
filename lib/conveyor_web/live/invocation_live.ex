@@ -49,6 +49,8 @@ defmodule ConveyorWeb.InvocationLive do
        targets_by_key: %{},
        tests_by_key: %{},
        action_count: 0,
+       exec_log: nil,
+       exec_summary: Conveyor.ExecLog.summary(inv),
        timeline_actions: [],
        profile_summary: %{},
        test_file: nil,
@@ -128,7 +130,7 @@ defmodule ConveyorWeb.InvocationLive do
 
       socket
       |> mark_loaded(:actions)
-      |> assign(action_count: length(actions))
+      |> assign(action_count: length(actions), exec_log: exec_log_view(socket.assigns.invocation))
       |> stream(:actions, actions, reset: true)
     end
   end
@@ -326,7 +328,9 @@ defmodule ConveyorWeb.InvocationLive do
      assign(socket,
        invocation: inv,
        artifacts: Conveyor.Artifacts.list(inv),
-       profile_summary: profile_summary(inv)
+       profile_summary: profile_summary(inv),
+       exec_summary: Conveyor.ExecLog.summary(inv),
+       exec_log: if(loaded?(socket, :actions), do: exec_log_view(inv))
      )}
   end
 
@@ -334,6 +338,16 @@ defmodule ConveyorWeb.InvocationLive do
     {:noreply,
      push_event(socket, "log:append", %{text: IO.iodata_to_binary(chunks), offset: offset})}
   end
+
+  # The execution log explanation is computed when the Actions tab opens (it diffs input
+  # lists against the previous build), and shown in a fixed order: what ran first.
+  defp exec_log_view(%{exec_log_status: "parsed"} = inv) do
+    explained = Conveyor.ExecLog.explain(inv)
+    order = %{inputs_changed: 0, same_inputs: 1, new: 2, no_previous: 3, cache_hit: 4}
+    %{explained | rows: Enum.sort_by(explained.rows, &{order[&1.reason], &1.spawn.id})}
+  end
+
+  defp exec_log_view(_inv), do: nil
 
   defp apply_targets(socket, []), do: socket
 
@@ -574,6 +588,18 @@ defmodule ConveyorWeb.InvocationLive do
             <.stat label="Actions">{Format.number(@invocation.actions_executed)}</.stat>
             <.stat label="Cache hits">{Format.cache_hit_rate(@invocation) || "—"}</.stat>
             <.stat label="Critical path">{Format.duration(@invocation.critical_path_ms)}</.stat>
+            <.stat label="Execution log">
+              <span :if={is_nil(@exec_summary)} class="text-base-content/40">—</span>
+              <.link
+                :if={@exec_summary}
+                patch={tab_path(@invocation, "actions")}
+                id="stat-exec-log"
+                class="hover:underline"
+                title="spawns that executed vs served from the remote cache"
+              >
+                {Format.number(@exec_summary.executed)} ran · {Format.number(@exec_summary.cache_hits)} cached
+              </.link>
+            </.stat>
           </div>
         </div>
 
@@ -642,6 +668,11 @@ defmodule ConveyorWeb.InvocationLive do
           </div>
           <.targets :if={@tab == "targets"} streams={@streams} count={map_size(@targets_by_key)} />
           <.tests :if={@tab == "tests"} groups={test_groups(@tests_by_key)} test_file={@test_file} />
+          <.exec_log_section
+            :if={@tab == "actions"}
+            status={@invocation.exec_log_status}
+            exec_log={@exec_log}
+          />
           <.actions
             :if={@tab == "actions"}
             streams={@streams}
@@ -1080,6 +1111,154 @@ defmodule ConveyorWeb.InvocationLive do
     </div>
     """
   end
+
+  attr :status, :string, required: true
+  attr :exec_log, :map, default: nil
+
+  defp exec_log_section(assigns) do
+    ~H"""
+    <section id="exec-log" class="mb-4">
+      <h2 class="mb-1 text-sm font-semibold">Why did it run?</h2>
+      <p :if={@status == "none"} id="exec-log-hint" class="text-xs text-base-content/60">
+        Upload Bazel's compact execution log to see every spawn with the inputs that changed
+        since the previous build: add
+        <code class="font-mono">--execution_log_compact_file=/tmp/exec.log.zst</code>
+        to the command and upload the file with
+        <code class="font-mono">tools/bes-upload-profile --execution-log /tmp/exec.log.zst</code>
+        (a <code class="font-mono">PUT</code>
+        to <code class="font-mono">/api/v1/invocations/:id/artifacts/execution.log.zst</code>).
+      </p>
+      <p :if={@status == "available"} id="exec-log-pending" class="text-xs text-base-content/60">
+        Execution log uploaded, parsing…
+      </p>
+      <p
+        :if={@status == "failed"}
+        id="exec-log-failed"
+        class="text-xs text-rose-600 dark:text-rose-400"
+      >
+        The uploaded execution log could not be parsed (is it a <code class="font-mono">--execution_log_compact_file</code>?).
+      </p>
+      <div :if={@exec_log}>
+        <p id="exec-log-summary" class="mb-2 text-xs text-base-content/70">
+          {length(@exec_log.rows)} spawns:
+          <span
+            :for={{reason, n} <- Enum.sort_by(@exec_log.counts, &reason_order(elem(&1, 0)))}
+            class="mr-2"
+          >
+            <b class="font-medium">{n}</b> {reason_summary(reason)}
+          </span>
+          <span :if={@exec_log.previous} class="text-base-content/50">
+            · compared with
+            <.link navigate={~p"/invocation/#{@exec_log.previous.id}/actions"} class="hover:underline">
+              the previous build
+            </.link>
+          </span>
+          <span :if={is_nil(@exec_log.previous)} class="text-base-content/50">
+            · no earlier build of this project (and branch) has an execution log to compare with
+          </span>
+        </p>
+        <div class="overflow-x-auto rounded-md border border-base-300">
+          <table class="w-full text-sm">
+            <thead class="bg-base-200/60 text-left text-[11px] uppercase tracking-wide text-base-content/60">
+              <tr>
+                <th class="px-3 py-2 font-medium">Why</th>
+                <th class="px-3 py-2 font-medium">Mnemonic</th>
+                <th class="px-3 py-2 font-medium">Target / output</th>
+                <th class="px-3 py-2 font-medium">Runner</th>
+                <th class="px-3 py-2 text-right font-medium">Duration</th>
+              </tr>
+            </thead>
+            <tbody id="spawns" class="divide-y divide-base-300/70">
+              <tr
+                :for={r <- Enum.take(@exec_log.rows, 500)}
+                id={"spawn-#{r.spawn.id}"}
+                class="align-top"
+                data-reason={r.reason}
+              >
+                <td class={["whitespace-nowrap px-3 py-1.5 text-xs font-medium", reason_class(r)]}>
+                  {reason_label(r)}
+                </td>
+                <td class="px-3 py-1.5 font-mono text-xs">{r.spawn.mnemonic}</td>
+                <td class="px-3 py-1.5 font-mono text-[13px]">
+                  <div>{r.spawn.target_label}</div>
+                  <div class="truncate text-xs text-base-content/50" title={r.spawn.primary_output}>
+                    {r.spawn.primary_output}
+                  </div>
+                  <details
+                    :if={r.changed != [] or r.added != [] or r.removed != []}
+                    class="mt-1 text-xs"
+                  >
+                    <summary class="cursor-pointer text-base-content/60">
+                      {length(r.changed)} changed · {length(r.added)} added · {length(r.removed)} removed
+                    </summary>
+                    <ul class="mt-1 rounded bg-base-200 p-2">
+                      <li :for={p <- Enum.take(r.changed, 30)}>~ {p}</li>
+                      <li
+                        :for={p <- Enum.take(r.added, 30)}
+                        class="text-emerald-700 dark:text-emerald-400"
+                      >
+                        + {p}
+                      </li>
+                      <li
+                        :for={p <- Enum.take(r.removed, 30)}
+                        class="text-rose-700 dark:text-rose-400"
+                      >
+                        − {p}
+                      </li>
+                      <li
+                        :if={length(r.changed) + length(r.added) + length(r.removed) > 90}
+                        class="text-base-content/50"
+                      >
+                        … and more
+                      </li>
+                    </ul>
+                  </details>
+                </td>
+                <td class="px-3 py-1.5 text-xs text-base-content/70">{r.spawn.runner}</td>
+                <td class="px-3 py-1.5 text-right font-mono text-xs tabular-nums">
+                  {Format.duration(r.spawn.total_ms)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <p :if={length(@exec_log.rows) > 500} class="mt-1 text-xs text-base-content/50">
+          Showing the first 500 spawns (those that ran first).
+        </p>
+      </div>
+    </section>
+    """
+  end
+
+  defp reason_order(reason),
+    do: %{inputs_changed: 0, same_inputs: 1, new: 2, no_previous: 3, cache_hit: 4}[reason]
+
+  defp reason_summary(:cache_hit), do: "remote cache hits"
+  defp reason_summary(:inputs_changed), do: "ran because inputs changed"
+  defp reason_summary(:same_inputs), do: "ran again with identical inputs"
+  defp reason_summary(:new), do: "new actions"
+  defp reason_summary(:no_previous), do: "ran (nothing to compare with)"
+
+  defp reason_label(%{reason: :cache_hit}), do: "cache hit"
+
+  defp reason_label(%{reason: :inputs_changed} = r),
+    do: "#{length(r.changed) + length(r.added) + length(r.removed)} inputs changed"
+
+  defp reason_label(%{reason: :same_inputs, outputs_changed?: true}),
+    do: "same inputs, outputs differ"
+
+  defp reason_label(%{reason: :same_inputs}), do: "same inputs"
+  defp reason_label(%{reason: :new}), do: "new action"
+  defp reason_label(%{reason: :no_previous}), do: "ran"
+
+  defp reason_class(%{reason: :cache_hit}), do: "text-emerald-600 dark:text-emerald-400"
+  defp reason_class(%{reason: :inputs_changed}), do: "text-sky-700 dark:text-sky-400"
+
+  defp reason_class(%{reason: :same_inputs, outputs_changed?: true}),
+    do: "text-rose-600 dark:text-rose-400"
+
+  defp reason_class(%{reason: :same_inputs}), do: "text-amber-600 dark:text-amber-400"
+  defp reason_class(_), do: "text-base-content/70"
 
   attr :streams, :map, required: true
   attr :count, :integer, required: true

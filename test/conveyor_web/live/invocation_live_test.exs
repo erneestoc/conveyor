@@ -78,6 +78,52 @@ defmodule ConveyorWeb.InvocationLiveTest do
     assert_push_event(view, "log:append", %{text: "more output\n", offset: ^bytes})
   end
 
+  test "actions tab explains spawns from the execution log", %{
+    conn: conn,
+    ok_id: newer_id,
+    test_id: older_id,
+    failed_id: failed_id
+  } do
+    {:ok, view, _} = live(conn, ~p"/invocation/#{failed_id}/actions")
+    assert has_element?(view, "#exec-log-hint", "--execution_log_compact_file")
+    refute has_element?(view, "#stat-exec-log")
+
+    {:ok, clean} = Conveyor.ExecLog.parse(File.read!("test/fixtures/execlog/clean.log.zst"))
+    {:ok, changed} = Conveyor.ExecLog.parse(File.read!("test/fixtures/execlog/changed.log.zst"))
+    Conveyor.ExecLog.store!(Conveyor.Invocations.get!(older_id), clean)
+    Conveyor.ExecLog.store!(Conveyor.Invocations.get!(newer_id), changed)
+
+    {:ok, view, _} = live(conn, ~p"/invocation/#{newer_id}/actions")
+    assert has_element?(view, "#exec-log-summary", "8 spawns")
+    assert has_element?(view, "#exec-log-summary", "4 ran because inputs changed")
+    assert has_element?(view, "#exec-log-summary a[href='/invocation/#{older_id}/actions']")
+    assert has_element?(view, "#spawns tr[data-reason=inputs_changed]", "2 inputs changed")
+
+    assert has_element?(
+             view,
+             "#spawns tr[data-reason=inputs_changed] details li",
+             "~ app/pass.sh"
+           )
+
+    assert has_element?(view, "#spawns tr[data-reason=same_inputs]", "same inputs")
+
+    {:ok, view, _} = live(conn, ~p"/invocation/#{older_id}/actions")
+    assert has_element?(view, "#exec-log-summary", "12 spawns")
+    assert has_element?(view, "#exec-log-summary", "no earlier build")
+    assert has_element?(view, "#spawns tr[data-reason=no_previous]")
+
+    {:ok, view, _} = live(conn, ~p"/invocation/#{newer_id}")
+    assert has_element?(view, "#stat-exec-log", "8 ran · 0 cached")
+
+    # Status changes arrive over PubSub (the parse worker broadcasts artifacts_changed).
+    Conveyor.ExecLog.set_status(Conveyor.Invocations.get!(failed_id), "available")
+    {:ok, view, _} = live(conn, ~p"/invocation/#{failed_id}/actions")
+    assert has_element?(view, "#exec-log-pending")
+    Conveyor.ExecLog.set_status(Conveyor.Invocations.get!(failed_id), "failed")
+    send(view.pid, {:artifacts_changed, failed_id})
+    assert has_element?(view, "#exec-log-failed")
+  end
+
   test "live digests update the header and the open tab", %{conn: conn, ok_id: id} do
     {:ok, view, _} = live(conn, ~p"/invocation/#{id}/targets")
 

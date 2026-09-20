@@ -20,6 +20,7 @@ protoc $INC $OPTS \
   priv/protos/bazel/src/main/protobuf/strategy_policy.proto \
   priv/protos/bazel/src/main/protobuf/invocation_policy.proto \
   priv/protos/bazel/src/main/protobuf/action_cache.proto \
+  priv/protos/bazel/src/main/protobuf/spawn.proto \
   priv/protos/bazel/src/main/java/com/google/devtools/build/lib/packages/metrics/package_load_metrics.proto \
   priv/protos/bazel/src/main/java/com/google/devtools/build/lib/buildeventstream/proto/build_event_stream.proto \
   priv/protos/remote-apis/build/bazel/semver/semver.proto \

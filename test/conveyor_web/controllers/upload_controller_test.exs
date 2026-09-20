@@ -1,5 +1,6 @@
 defmodule ConveyorWeb.UploadControllerTest do
   use ConveyorWeb.LiveCase, async: false
+  use Oban.Testing, repo: Conveyor.Repo
 
   alias Conveyor.{Artifacts, Blobs, Invocations, Projects}
   alias Conveyor.Bep.Fixture
@@ -143,6 +144,21 @@ defmodule ConveyorWeb.UploadControllerTest do
     assert_raise ConveyorWeb.NotFoundError, fn ->
       get(build_conn(), ~p"/invocation/#{id}/download/profile")
     end
+  end
+
+  test "recognises execution logs and schedules parsing", %{conn: conn, id: id, upload_key: key} do
+    body = File.read!("test/fixtures/execlog/clean.log.zst")
+
+    put_raw(conn, ~p"/api/v1/invocations/#{id}/artifacts/execution.log.zst", body, [
+      {"x-api-key", key},
+      {"content-type", "application/zstd"}
+    ])
+    |> json_response(201)
+
+    assert Invocations.get!(id).exec_log_status == "available"
+    assert_enqueued(worker: Conveyor.Workers.ParseExecLog, args: %{invocation_id: id})
+    assert {:ok, 12} = perform_job(Conveyor.Workers.ParseExecLog, %{invocation_id: id})
+    assert Invocations.get!(id).exec_log_status == "parsed"
   end
 
   test "validates names, ownership and size", %{conn: conn, id: id, upload_key: key} do

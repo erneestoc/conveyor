@@ -55,6 +55,31 @@ Without a remote cache, run with `--remote_cache=grpcs://conveyor.example.com:19
 referenced files and never treats Conveyor as a cache for outputs. Or upload a profile
 after the fact with `tools/bes-upload-profile`.
 
+## Why did it rebuild? (execution log)
+
+Bazel's compact execution log records every spawn with the digest of each input and
+output, its runner, cache status and timings. Conveyor diffs it against the previous build
+of the same project (same `branch` tag when the build has one) and shows, per spawn, the
+inputs that changed, the spawns that ran again with identical inputs (cache misses or
+non-hermetic actions — "outputs differ" flags the latter), and new actions.
+
+```
+build --execution_log_compact_file=/tmp/exec.log.zst
+```
+
+After the build, upload the file to the invocation (an `upload`-scoped key):
+
+```sh
+tools/bes-upload-profile --server https://conveyor.example.com --key conveyor_... \
+    --invocation <uuid> --execution-log /tmp/exec.log.zst
+# or: curl -X PUT -H "x-api-key: conveyor_..." --data-binary @/tmp/exec.log.zst \
+#        https://conveyor.example.com/api/v1/invocations/<uuid>/artifacts/execution.log.zst
+```
+
+Any artifact name containing `execution.log`, `exec_log` or `execlog` is parsed. The log
+only lists spawns that ran or were served from the remote cache; actions skipped by
+Bazel's local action cache do not appear, so a fully incremental build has an empty log.
+
 ## Versions
 
 Conveyor's protocol definitions come from Bazel 9.2 and are backwards compatible; builds
