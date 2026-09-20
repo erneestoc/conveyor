@@ -81,8 +81,7 @@ defmodule Conveyor.Metrics.DashboardTest do
     assert [{_, _} | _] = Dashboard.versions(scope)
     targets = Dashboard.top_failing_targets(scope, 3)
     assert Enum.all?(targets, &(&1.failures > 0 and is_binary(&1.last_invocation_id)))
-    assert length(Dashboard.builds_by_hour(scope)) == 24
-    assert Enum.sum(Enum.map(Dashboard.builds_by_hour(scope), &elem(&1, 1))) == 200
+    assert Enum.sum(Enum.map(Dashboard.starts_heatmap(scope), &elem(&1, 2))) == 200
   end
 
   test "queries narrow the scope", %{project: project} do

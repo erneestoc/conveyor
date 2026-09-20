@@ -15,7 +15,13 @@ defmodule Conveyor.GoldenData do
 
   Profile summaries (action phases, ms) exist for the two current CI successes only:
   the 200 ms build has cache check 50, remote execution 100, download outputs 30; the
-  400 ms build has cache check 20, queued 40, remote execution 200.
+  400 ms build has cache check 20, queued 40, remote execution 200. Their action
+  summaries: TestRunner 9 created / 5 executed and Genrule 3 / 2, then TestRunner 4 / 1;
+  profile mnemonics: TestRunner 500 ms and Genrule 100 ms, then TestRunner 250 ms.
+
+  Targets (successful, timed) on the three finished CI/Local builds of each window:
+  `//app:slow` 300/400/500 ms now vs 200/200/300 ms before (median doubled), `//lib:ok`
+  100 ms in every run, `//app:once` 900 ms in one current run only.
   """
 
   alias Conveyor.Invocations.Invocation
@@ -51,24 +57,70 @@ defmodule Conveyor.GoldenData do
     [first, second | _] = current
 
     Repo.insert_all(Conveyor.Invocations.Metrics, [
-      metrics(first, [{"cache check", 50}, {"remote execution", 100}, {"download outputs", 30}]),
-      metrics(second, [{"cache check", 20}, {"queued", 40}, {"remote execution", 200}])
+      metrics(
+        first,
+        [{"cache check", 50}, {"remote execution", 100}, {"download outputs", 30}],
+        [{"TestRunner", 9, 5}, {"Genrule", 3, 2}],
+        [{"TestRunner", 500}, {"Genrule", 100}]
+      ),
+      metrics(
+        second,
+        [{"cache check", 20}, {"queued", 40}, {"remote execution", 200}],
+        [{"TestRunner", 4, 1}],
+        [{"TestRunner", 250}]
+      )
     ])
+
+    targets =
+      Enum.zip(Enum.take(current, 3), [300, 400, 500]) ++
+        Enum.zip(Enum.take(previous, 3), [200, 200, 300])
+
+    Repo.insert_all(
+      Conveyor.Invocations.Target,
+      Enum.flat_map(targets, fn {row, slow} ->
+        [target(row, "//app:slow", slow), target(row, "//lib:ok", 100)]
+      end) ++ [target(hd(current), "//app:once", 900)]
+    )
 
     :ok
   end
 
-  defp metrics(row, phases) do
+  defp metrics(row, phases, action_data, mnemonics) do
     %{
       invocation_id: row.id,
+      build_metrics: %{
+        "actionSummary" => %{
+          "actionData" =>
+            Enum.map(action_data, fn {m, created, executed} ->
+              %{
+                "mnemonic" => m,
+                "actionsCreated" => to_string(created),
+                "actionsExecuted" => to_string(executed)
+              }
+            end)
+        }
+      },
       profile_summary: %{
-        "action_phases" =>
-          Enum.map(phases, fn {name, ms} ->
-            %{"name" => name, "count" => 1, "total_ms" => ms * 1.0}
-          end)
+        "action_phases" => totals(phases),
+        "mnemonics" => totals(mnemonics)
       },
       inserted_at: row.started_at,
       updated_at: row.started_at
+    }
+  end
+
+  defp totals(pairs),
+    do:
+      Enum.map(pairs, fn {name, ms} -> %{"name" => name, "count" => 1, "total_ms" => ms * 1.0} end)
+
+  defp target(row, label, duration) do
+    %{
+      invocation_id: row.id,
+      label: label,
+      status: "success",
+      first_seen_at: row.started_at,
+      completed_at: DateTime.add(row.started_at, duration, :millisecond),
+      duration_ms: duration
     }
   end
 

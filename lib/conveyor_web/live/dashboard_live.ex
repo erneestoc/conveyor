@@ -123,8 +123,11 @@ defmodule ConveyorWeb.DashboardLive do
       slowest: Dashboard.slowest_builds(scope, 8),
       versions: Dashboard.versions(scope),
       failing_targets: Dashboard.top_failing_targets(scope, 8),
-      by_hour: Dashboard.builds_by_hour(scope),
-      phases: Dashboard.phases_over_time(scope)
+      heatmap: Dashboard.starts_heatmap(scope),
+      phases: Dashboard.phases_over_time(scope),
+      queue: Dashboard.queue_trend(scope),
+      regressions: Dashboard.target_regressions(scope, limit: 8),
+      mnemonics: Dashboard.actions_by_mnemonic(scope, 10)
     }
   end
 
@@ -553,12 +556,75 @@ defmodule ConveyorWeb.DashboardLive do
           </tbody>
         </table>
       </.panel>
-      <.panel title="Builds by hour (UTC)" id={"panel-hours#{@sfx}"}>
-        <.stacked_bars
-          id={"chart-hours#{@sfx}"}
-          points={Enum.map(@data.by_hour, fn {h, n} -> %{bucket: "#{h}h", builds: n} end)}
-          series={[{:builds, "text-primary"}]}
+      <.panel title="Queue time per build" id={"panel-queue#{@sfx}"}>
+        <p
+          :if={Enum.all?(@data.queue, &is_nil(&1.queued))}
+          class="py-6 text-center text-xs text-base-content/50"
+          id={"queue-empty#{@sfx}"}
+        >
+          No profiles in this window.
+        </p>
+        <.lines
+          :if={Enum.any?(@data.queue, &(&1.queued != nil))}
+          id={"chart-queue#{@sfx}"}
+          points={@data.queue}
+          series={[{:queued, "text-amber-500", "queued per build"}]}
         />
+        <p class="mt-1 text-[11px] text-base-content/50">
+          Time actions spent waiting for a remote executor, averaged over profiled builds. A
+          rising line means the executor pool is short of capacity.
+        </p>
+      </.panel>
+      <.panel title="Slower targets than last period" id={"panel-regressions#{@sfx}"}>
+        <table class="w-full text-xs">
+          <tbody class="divide-y divide-base-300/60">
+            <tr :for={r <- @data.regressions} id={"regression#{@sfx}-#{slug(r.label)}"}>
+              <td class="max-w-xs truncate py-1 font-mono">{r.label}</td>
+              <td class="py-1 text-right font-mono tabular-nums text-base-content/60">
+                {Format.duration(r.previous_p50)}
+              </td>
+              <td class="py-1 text-right font-mono tabular-nums">{Format.duration(r.p50)}</td>
+              <td class="py-1 text-right tabular-nums text-rose-600 dark:text-rose-400">
+                ▲ {round((r.p50 / r.previous_p50 - 1) * 100)}%
+              </td>
+              <td class="py-1 text-right text-base-content/50">{r.runs} runs</td>
+            </tr>
+            <tr :if={@data.regressions == []}>
+              <td class="py-1 text-base-content/50">
+                No target's median duration rose more than 20% (3+ timed runs in both periods).
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </.panel>
+      <.panel title="Actions by mnemonic" id={"panel-mnemonics#{@sfx}"}>
+        <table class="w-full text-xs">
+          <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/50">
+            <tr>
+              <th class="py-1 font-medium">Mnemonic</th><th class="py-1 text-right font-medium">
+                Executed
+              </th><th class="py-1 text-right font-medium">
+                Created
+              </th><th class="py-1 text-right font-medium">Action time</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-base-300/60">
+            <tr :for={m <- @data.mnemonics}>
+              <td class="py-1 font-mono">{m.mnemonic}</td>
+              <td class="py-1 text-right font-mono tabular-nums">{Format.number(m.executed)}</td>
+              <td class="py-1 text-right font-mono tabular-nums text-base-content/60">
+                {Format.number(m.created)}
+              </td>
+              <td class="py-1 text-right font-mono tabular-nums">{Format.duration(m.time_ms)}</td>
+            </tr>
+            <tr :if={@data.mnemonics == []}>
+              <td class="py-1 text-base-content/50">No build metrics in this window.</td>
+            </tr>
+          </tbody>
+        </table>
+      </.panel>
+      <.panel title="When builds start (UTC)" id={"panel-hours#{@sfx}"}>
+        <.heatmap id={"chart-hours#{@sfx}"} cells={@data.heatmap} />
       </.panel>
       <.panel title="Bazel versions" id={"panel-versions#{@sfx}"}>
         <.hbars id={"chart-versions#{@sfx}"} items={@data.versions} />

@@ -289,18 +289,158 @@ defmodule Conveyor.Metrics.Dashboard do
     |> Repo.all()
   end
 
-  @doc "Sum of build time by hour of day (UTC), to show when the team builds."
-  @spec builds_by_hour(Scope.t()) :: [{non_neg_integer(), non_neg_integer()}]
-  def builds_by_hour(scope) do
+  @doc """
+  When builds start: a 7 × 24 grid of counts by ISO weekday (1 = Monday) and UTC hour.
+  Returns `{weekday, hour, count}` for every cell (zeros included).
+  """
+  @spec starts_heatmap(Scope.t()) :: [{1..7, 0..23, non_neg_integer()}]
+  def starts_heatmap(scope) do
     rows =
       scope
       |> Scope.base()
-      |> group_by([i], fragment("extract(hour from ?)::int", i.started_at))
-      |> select([i], {fragment("extract(hour from ?)::int", i.started_at), count(i.id)})
+      |> group_by([i], [
+        fragment("extract(isodow from ?)::int", i.started_at),
+        fragment("extract(hour from ?)::int", i.started_at)
+      ])
+      |> select([i], {
+        {fragment("extract(isodow from ?)::int", i.started_at),
+         fragment("extract(hour from ?)::int", i.started_at)},
+        count(i.id)
+      })
       |> Repo.all()
       |> Map.new()
 
-    for h <- 0..23, do: {h, Map.get(rows, h, 0)}
+    for d <- 1..7, h <- 0..23, do: {d, h, Map.get(rows, {d, h}, 0)}
+  end
+
+  @doc """
+  Targets whose median duration in the scope rose more than `threshold` (a fraction, default
+  0.2) against the previous period, with at least `min_runs` timed runs on both sides.
+  Sorted by the ratio, largest first.
+  """
+  @spec target_regressions(Scope.t(), keyword()) :: [map()]
+  def target_regressions(scope, opts \\ []) do
+    factor = 1.0 + Keyword.get(opts, :threshold, 0.2)
+    min_runs = Keyword.get(opts, :min_runs, 3)
+    limit = Keyword.get(opts, :limit, 10)
+    current = target_medians(scope)
+    previous = target_medians(Scope.previous(scope))
+
+    from(c in subquery(current),
+      join: p in subquery(previous),
+      on: c.label == p.label,
+      where: c.runs >= ^min_runs and p.runs >= ^min_runs and p.p50 > 0,
+      where: c.p50 > p.p50 * type(^factor, :float),
+      order_by: [desc: fragment("? / ?", c.p50, p.p50)],
+      limit: ^limit,
+      select: %{
+        label: c.label,
+        p50: c.p50,
+        previous_p50: p.p50,
+        runs: c.runs,
+        previous_runs: p.runs
+      }
+    )
+    |> Repo.all()
+    |> Enum.map(&%{&1 | p50: to_ms(&1.p50), previous_p50: to_ms(&1.previous_p50)})
+  end
+
+  defp target_medians(scope) do
+    ids = scope |> Scope.finished() |> select([i], i.id)
+
+    Target
+    |> where([t], t.invocation_id in subquery(ids))
+    |> where([t], not is_nil(t.duration_ms) and t.status == "success")
+    |> group_by([t], t.label)
+    |> select([t], %{
+      label: t.label,
+      runs: count(t.id),
+      p50: fragment("percentile_cont(0.5) WITHIN GROUP (ORDER BY ?)::float", t.duration_ms)
+    })
+  end
+
+  @doc """
+  Queue time per bucket as an RBE capacity signal: the "queued" phase total divided by the
+  number of profiled builds in the bucket (ms per build; `nil` without profiles).
+  """
+  @spec queue_trend(Scope.t()) :: [%{bucket: DateTime.t(), queued: integer() | nil}]
+  def queue_trend(scope) do
+    bucket = Scope.bucket(scope)
+
+    rows =
+      scope
+      |> Scope.finished()
+      |> join(:inner, [i], m in Metrics, on: m.invocation_id == i.id)
+      |> join(
+        :inner,
+        [i, m],
+        p in fragment("jsonb_array_elements(? -> 'action_phases')", m.profile_summary),
+        on: true
+      )
+      |> queue_buckets(bucket)
+      |> Repo.all()
+      |> Map.new(fn {b, queued, builds} ->
+        {to_utc(b), round(to_number(queued || 0) / max(builds, 1))}
+      end)
+
+    for b <- buckets(scope.from, scope.to, bucket), do: %{bucket: b, queued: Map.get(rows, b)}
+  end
+
+  @doc """
+  Work by action mnemonic across the scope: actions created and executed (from Bazel's
+  action summary) and action time (from profile summaries when present), busiest first.
+  """
+  @spec actions_by_mnemonic(Scope.t(), pos_integer()) :: [map()]
+  def actions_by_mnemonic(scope, limit \\ 10) do
+    base =
+      scope |> Scope.finished() |> join(:inner, [i], m in Metrics, on: m.invocation_id == i.id)
+
+    counts =
+      base
+      |> join(
+        :inner,
+        [i, m],
+        a in fragment(
+          "jsonb_array_elements(? -> 'actionSummary' -> 'actionData')",
+          m.build_metrics
+        ),
+        on: true
+      )
+      |> group_by([i, m, a], fragment("? ->> 'mnemonic'", a))
+      |> select([i, m, a], {
+        fragment("? ->> 'mnemonic'", a),
+        sum(fragment("coalesce((? ->> 'actionsCreated')::bigint, 0)", a)),
+        sum(fragment("coalesce((? ->> 'actionsExecuted')::bigint, 0)", a))
+      })
+      |> Repo.all()
+
+    time =
+      base
+      |> join(
+        :inner,
+        [i, m],
+        p in fragment("jsonb_array_elements(? -> 'mnemonics')", m.profile_summary),
+        on: true
+      )
+      |> group_by([i, m, p], fragment("? ->> 'name'", p))
+      |> select(
+        [i, m, p],
+        {fragment("? ->> 'name'", p), sum(fragment("(? ->> 'total_ms')::float", p))}
+      )
+      |> Repo.all()
+      |> Map.new(fn {name, ms} -> {name, round(to_number(ms))} end)
+
+    counts
+    |> Enum.map(fn {name, created, executed} ->
+      %{
+        mnemonic: name,
+        created: round(to_number(created)),
+        executed: round(to_number(executed)),
+        time_ms: Map.get(time, name)
+      }
+    end)
+    |> Enum.sort_by(&{-&1.executed, &1.mnemonic})
+    |> Enum.take(limit)
   end
 
   # --- helpers -------------------------------------------------------------------------------
@@ -341,6 +481,28 @@ defmodule Conveyor.Metrics.Dashboard do
       fragment("date_trunc('day', ?)", i.started_at),
       fragment("? ->> 'name'", p),
       sum(fragment("(? ->> 'total_ms')::float", p))
+    })
+  end
+
+  defp queue_buckets(query, :hour) do
+    query
+    |> group_by([i], fragment("date_trunc('hour', ?)", i.started_at))
+    |> select([i, m, p], {
+      fragment("date_trunc('hour', ?)", i.started_at),
+      sum(fragment("(? ->> 'total_ms')::float", p))
+      |> filter(fragment("? ->> 'name' = 'queued'", p)),
+      count(i.id, :distinct)
+    })
+  end
+
+  defp queue_buckets(query, :day) do
+    query
+    |> group_by([i], fragment("date_trunc('day', ?)", i.started_at))
+    |> select([i, m, p], {
+      fragment("date_trunc('day', ?)", i.started_at),
+      sum(fragment("(? ->> 'total_ms')::float", p))
+      |> filter(fragment("? ->> 'name' = 'queued'", p)),
+      count(i.id, :distinct)
     })
   end
 

@@ -324,6 +324,39 @@ defmodule ConveyorWeb.Charts do
     """
   end
 
+  @doc "A weekday × hour heatmap; `cells` are `{weekday, hour, count}` with ISO weekdays."
+  attr :cells, :list, required: true
+  attr :id, :string, required: true
+
+  def heatmap(assigns) do
+    max = assigns.cells |> Enum.map(&elem(&1, 2)) |> Enum.max(fn -> 0 end) |> max(1)
+    rows = assigns.cells |> Enum.group_by(&elem(&1, 0)) |> Enum.sort()
+    assigns = assign(assigns, max: max, rows: rows, days: ~w(Mon Tue Wed Thu Fri Sat Sun))
+
+    ~H"""
+    <div id={@id} class="text-[10px] text-base-content/50">
+      <div
+        :for={{day, cells} <- @rows}
+        class="mb-0.5 grid items-center gap-0.5"
+        style="grid-template-columns: 2rem repeat(24, minmax(0, 1fr))"
+      >
+        <span>{Enum.at(@days, day - 1)}</span>
+        <span
+          :for={{_, hour, n} <- Enum.sort_by(cells, &elem(&1, 1))}
+          class="h-4 rounded-sm bg-primary"
+          style={"opacity: #{if n == 0, do: 0.06, else: Float.round(0.15 + 0.85 * n / @max, 2)}"}
+          title={"#{Enum.at(@days, day - 1)} #{hour}:00 UTC · #{n} builds"}
+          data-count={n}
+        ></span>
+      </div>
+      <div class="grid gap-0.5" style="grid-template-columns: 2rem repeat(24, minmax(0, 1fr))">
+        <span></span>
+        <span :for={h <- 0..23}>{if rem(h, 3) == 0, do: "#{h}h"}</span>
+      </div>
+    </div>
+    """
+  end
+
   @doc "A legend for series classes or colours."
   attr :items, :list, required: true, doc: "list of {label, class_or_colour}"
 

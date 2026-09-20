@@ -18,7 +18,7 @@ defmodule ConveyorWeb.DashboardLiveTest do
     {:ok, view, _} = live(conn, ~p"/dashboard")
 
     for id <-
-          ~w(headline segments panel-builds panel-durations panel-phases phases-empty panel-cache panel-strategy panel-failures panel-targets panel-users panel-slowest panel-hours panel-versions segment-Local segment-CI) do
+          ~w(headline segments panel-builds panel-durations panel-phases phases-empty panel-cache panel-strategy panel-failures panel-targets panel-users panel-slowest panel-hours panel-queue queue-empty panel-regressions panel-mnemonics panel-versions segment-Local segment-CI) do
       assert has_element?(view, "##{id}"), id
     end
 
@@ -59,6 +59,10 @@ defmodule ConveyorWeb.DashboardLiveTest do
     assert has_element?(view, "#tile-cache[title], #tile-cache [title='previous period: 25%']")
     assert has_element?(view, "#chart-phases rect[fill='#8b5cf6']")
     refute has_element?(view, "#phases-empty")
+    assert has_element?(view, "#chart-queue")
+    assert has_element?(view, "#regression--app-slow", "▲ 100%")
+    assert has_element?(view, "#panel-mnemonics td", "TestRunner")
+    assert has_element?(view, "#chart-hours [data-count='1'][title*='UTC · 1 builds']")
 
     # No builds in the previous period: the tiles show no delta at all.
     {:ok, view, _} = live(conn, ~p"/p/golden-live-other/dashboard?range=7d")

@@ -129,6 +129,32 @@ defmodule Conveyor.Metrics.GoldenTest do
     assert length(Dashboard.phases_over_time(Scope.new("24h", -1, [], @now))) == 24
   end
 
+  test "queue trend, regressions, mnemonics and heatmap are exact", %{scope: scope} do
+    queue = Dashboard.queue_trend(scope)
+    assert length(queue) == 8
+    assert Enum.map(queue, & &1.queued) |> Enum.reject(&is_nil/1) |> Enum.sort() == [0, 40]
+
+    assert [%{label: "//app:slow", p50: 400, previous_p50: 200, runs: 3, previous_runs: 3}] =
+             Dashboard.target_regressions(scope)
+
+    assert Dashboard.target_regressions(scope, threshold: 1.5) == []
+    assert Dashboard.target_regressions(Scope.previous(scope)) == []
+
+    assert Dashboard.actions_by_mnemonic(scope) == [
+             %{mnemonic: "TestRunner", created: 13, executed: 6, time_ms: 750},
+             %{mnemonic: "Genrule", created: 3, executed: 2, time_ms: 100}
+           ]
+
+    assert [%{mnemonic: "TestRunner"}] = Dashboard.actions_by_mnemonic(scope, 1)
+
+    cells = Dashboard.starts_heatmap(scope)
+    assert length(cells) == 168
+    # @now is Friday 2026-09-18 12:00 UTC; the six current builds start 1..6 days earlier
+    # at noon, so every weekday but Friday has one build at 12:00.
+    assert Enum.filter(cells, fn {_, _, n} -> n > 0 end) |> Enum.sort() ==
+             [{1, 12, 1}, {2, 12, 1}, {3, 12, 1}, {4, 12, 1}, {6, 12, 1}, {7, 12, 1}]
+  end
+
   test "series buckets sum to the window", %{scope: scope} do
     series = Dashboard.series(scope)
     assert length(series) == 8
