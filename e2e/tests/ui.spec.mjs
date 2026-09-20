@@ -65,6 +65,13 @@ test("log viewer: lines render, filter works, follow toggles", async ({page}) =>
   await expect(viewer.locator("[data-log-status]")).not.toContainText("match")
   await viewer.locator("[data-log-follow]").click()
   await expect(viewer.locator("[data-log-follow]")).toHaveAttribute("aria-pressed", /true|false/)
+  // Virtualized rows sit at a fixed line height: a long line must scroll, never wrap
+  // over the next row.
+  const heights = await page.locator("[data-log-content] [data-line]").evaluateAll(rows => rows.map(r => r.getBoundingClientRect().height))
+  expect(heights.length).toBeGreaterThan(0)
+  expect(new Set(heights.map(h => Math.round(h))).size).toBe(1)
+  const wrap = await page.locator("[data-log-content]").evaluate(el => getComputedStyle(el).whiteSpace)
+  expect(wrap).toBe("pre")
 })
 
 test("dashboard and tests pages render their numbers", async ({page}) => {

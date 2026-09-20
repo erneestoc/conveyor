@@ -107,6 +107,11 @@
 /* Build log viewer: terminal-like surface with ANSI colour classes emitted by the JS hook */
 .log-viewer { font-variant-ligatures: none; }
 .log-viewer .ln { color: color-mix(in oklab, currentColor 35%, transparent); user-select: none; }
+/* Rows are placed at a fixed line height by the virtualizer, so a line must never wrap:
+   long lines scroll horizontally. (The class in the hook's template string is not
+   reliably picked up by Tailwind's scanner, hence a plain rule.) */
+.log-viewer [data-log-content] { white-space: pre; width: max-content; min-width: 100%; }
+.log-viewer [data-line] { white-space: pre; }
 .ansi-bold { font-weight: 600; }
 .ansi-dim { opacity: .7; }
 .ansi-italic { font-style: italic; }
