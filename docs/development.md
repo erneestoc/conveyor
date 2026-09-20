@@ -48,3 +48,41 @@ test/fixtures/bep/     recorded builds used by tests, the replayer, the seed and
 `HANDOFF.md` in the repository is the running notebook for contributors: conventions,
 gotchas, measurements and what to build next. `PLAN.md` is the roadmap with per-milestone
 implementation notes.
+
+## Provability: golden data, properties, contract tests, mutation checks
+
+- **Golden data.** `Conveyor.GoldenData` (test/support) is a hand-written dataset whose
+  dashboard numbers are computed by hand in the moduledoc of
+  `test/conveyor/metrics/golden_test.exs` and asserted exactly. Extend it rather than
+  seeding random data when a new panel needs exact expectations.
+- **Two nodes in one test.** `test/conveyor/ingest/two_node_test.exs` starts a second
+  `Conveyor.Ingest.Supervisor` (its own registry and worker supervisor, sharing the
+  writers) against the same database, streams a build to instance A, resumes it on B while
+  A's worker is alive, and checks that A is fenced, B completes and the oracle passes.
+- **Properties.** `test/conveyor/ingest/property_test.exs` (StreamData): the normalizer's
+  log bytes/lines/text for any sequence of progress events, with and without a log cap,
+  and the writer's cross-batch merge of target rows equalling sequential application with
+  one row per key.
+- **Contract tests on demand.** Excluded by default (`ExUnit.start(exclude: [:s3])`):
+
+  ```sh
+  # any S3-compatible store; MinIO locally:
+  S3_TEST_BUCKET=conveyor-test S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_PATH_STYLE=true \
+    AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... mix test --only s3
+  ```
+
+  OIDC against a real provider is a manual check for now (`AUTH_MODE=oidc` with the
+  provider's issuer and client, sign in through the browser); the fake provider covers the
+  flow in CI.
+
+### Mutation spot checks
+
+Break one guarantee at a time and the named test must fail; restore the file afterwards.
+Verified 2026-09-19 (each mutation applied alone, listed tests run, file restored):
+
+| Guarantee | Mutation | Must fail |
+|---|---|---|
+| Fenced commits | `lib/conveyor/ingest/writer.ex`, `update_invocation!/1`: drop `and i.last_event_seq == ^expected` from the `where` | `writer_test` "commits a group of batches and notifies each submitter; fenced batches fail alone", `worker_test` "a fenced worker fails its stream", `two_node_test` |
+| Acks only after commit | `lib/conveyor/ingest/worker.ex`, `handle_call({:push, …})`, `true ->` branch: add `send(acker, {:ack, seq})` before `absorb/2` | `worker_test` "deduplicates resent events, rejects gaps, and rehydrates after a restart" and "a fenced worker fails its stream" |
+| Scrubbing | `lib/conveyor/ingest/scrub.ex`: replace the `@env_re` `Regex.replace` step with `Function.identity/1` | `scrub_test` "redacts credential-like environment variables Bazel copies into the command line" |
+| Dedup of resent events | `lib/conveyor/ingest/worker.ex`, `seq < state.expected_seq ->` branch: reply `{:error, :out_of_order}` instead of acking | `worker_test` "deduplicates resent events, rejects gaps, and rehydrates after a restart", `ingest_end_to_end_test` "replayed builds are persisted exactly once, including after a dropped connection" |

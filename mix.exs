@@ -96,6 +96,7 @@ defmodule Conveyor.MixProject do
       # OIDC login (M6)
       {:assent, "~> 0.3.1"},
       # Test coverage gate (95% minimum, see coveralls.json)
+      {:stream_data, "~> 1.1", only: [:test]},
       {:excoveralls, "~> 0.18", only: :test},
       # Security tooling (M6): static analysis and dependency advisories, run by mix precommit
       {:sobelow, "~> 0.14", only: [:dev, :test], runtime: false},

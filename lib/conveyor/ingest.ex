@@ -10,7 +10,11 @@ defmodule Conveyor.Ingest do
   alias Google.Devtools.Build.V1, as: V1
 
   defmodule Context do
-    @moduledoc "Who is sending: the project (always decided server-side) and the API key, if any."
+    @moduledoc """
+    Who is sending: the project (always decided server-side) and the API key, if any.
+    `registry` and `worker_supervisor` name the ingest instance the stream lands on; tests
+    start a second instance against the same database to exercise cross-node fencing.
+    """
     defstruct project_id: nil,
               project_slug: nil,
               api_key_id: nil,
@@ -18,7 +22,9 @@ defmodule Conveyor.Ingest do
               keywords: [],
               instance_name: nil,
               peer: nil,
-              limits: nil
+              limits: nil,
+              registry: Conveyor.Ingest.Registry,
+              worker_supervisor: Conveyor.Ingest.WorkerSupervisor
 
     @type t :: %__MODULE__{}
   end
@@ -88,14 +94,14 @@ defmodule Conveyor.Ingest do
   # must not resurrect a worker for a finished build, so only a live worker is called and
   # the row is updated directly otherwise.
   def lifecycle(
-        %Context{},
+        %Context{} = ctx,
         %V1.OrderedBuildEvent{
           stream_id: stream_id,
           event: %V1.BuildEvent{event: {:invocation_attempt_finished, _}}
         } = obe
       )
       when stream_id.invocation_id != "" do
-    case Registry.lookup(Conveyor.Ingest.Registry, stream_id.invocation_id) do
+    case Registry.lookup(ctx.registry, stream_id.invocation_id) do
       [{pid, _}] ->
         try do
           GenServer.call(pid, {:lifecycle, :invocation_attempt_finished, obe}, :infinity)
@@ -126,13 +132,13 @@ defmodule Conveyor.Ingest do
   @doc "Finds or starts the worker for an invocation."
   @spec worker(Context.t(), String.t(), V1.StreamId.t()) :: {:ok, pid()} | {:error, term()}
   def worker(ctx, invocation_id, stream_id) do
-    case Registry.lookup(Conveyor.Ingest.Registry, invocation_id) do
+    case Registry.lookup(ctx.registry, invocation_id) do
       [{pid, _}] ->
         {:ok, pid}
 
       [] ->
         case DynamicSupervisor.start_child(
-               Conveyor.Ingest.WorkerSupervisor,
+               ctx.worker_supervisor,
                {Worker, {ctx, invocation_id, stream_id}}
              ) do
           {:ok, pid} -> {:ok, pid}

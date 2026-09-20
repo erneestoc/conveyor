@@ -21,10 +21,13 @@ defmodule Conveyor.Ingest.Worker do
   alias Google.Devtools.Build.V1, as: V1
 
   def start_link({ctx, invocation_id, stream_id}) do
-    GenServer.start_link(__MODULE__, {ctx, invocation_id, stream_id}, name: via(invocation_id))
+    GenServer.start_link(__MODULE__, {ctx, invocation_id, stream_id},
+      name: via(ctx.registry, invocation_id)
+    )
   end
 
-  def via(invocation_id), do: {:via, Registry, {Conveyor.Ingest.Registry, invocation_id}}
+  def via(registry \\ Conveyor.Ingest.Registry, invocation_id),
+    do: {:via, Registry, {registry, invocation_id}}
 
   @doc "Current in-memory summary of the invocation (for tests and debugging)."
   def summary(invocation_id), do: GenServer.call(via(invocation_id), :summary)
