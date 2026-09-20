@@ -52,7 +52,7 @@ defmodule ConveyorWeb.DownloadController do
 
     case Conveyor.Blobs.stream(inv.profile_blob, chunk_size: 256 * 1024) do
       {:ok, chunks} ->
-        {chunks, conn} = maybe_gzip_encoding(chunks, conn)
+        conn = maybe_gzip_encoding(conn, inv.profile_blob)
 
         conn
         |> put_resp_content_type("application/json")
@@ -66,12 +66,27 @@ defmodule ConveyorWeb.DownloadController do
     end
   end
 
-  # Peeks at the first chunk: a gzip magic number means we can pass the bytes through
-  # with a content-encoding header instead of inflating them on the server.
-  defp maybe_gzip_encoding(chunks, conn) do
-    case Enum.take(chunks, 1) do
-      [<<0x1F, 0x8B, _::binary>>] -> {chunks, put_resp_header(conn, "content-encoding", "gzip")}
-      _ -> {chunks, conn}
+  # A gzipped profile is passed through with a content-encoding header instead of being
+  # inflated on the server. The blob's content type decides; when it is unknown (a CAS sink
+  # upload carries none) the first bytes are read through a separate, short stream: the
+  # stream being sent must never be enumerated twice, since the S3 adapter's stream is
+  # one-shot (it deletes its temporary file when it completes).
+  defp maybe_gzip_encoding(conn, digest) do
+    gzip? =
+      case Conveyor.Blobs.get(digest) do
+        %{content_type: "application/gzip"} -> true
+        %{content_type: "application/x-gzip"} -> true
+        %{content_type: type} when is_binary(type) and type != "application/octet-stream" -> false
+        _ -> gzip_magic?(digest)
+      end
+
+    if gzip?, do: put_resp_header(conn, "content-encoding", "gzip"), else: conn
+  end
+
+  defp gzip_magic?(digest) do
+    case Conveyor.Blobs.stream(digest, chunk_size: 2) do
+      {:ok, peek} -> match?([<<0x1F, 0x8B>> | _], Enum.take(peek, 1))
+      _ -> false
     end
   end
 

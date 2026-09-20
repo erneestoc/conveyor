@@ -87,7 +87,7 @@ touch_file() { # append a harmless line to a source file
   log "modified $f"
 }
 
-sources() { git ls-files | grep -E '\.(cc|cpp|c|h|hpp|go|rs|java|py|ts|proto)$' | grep -vE '(^|/)(test|tests|testdata|third_party|external)/' ; }
+sources() { git ls-files | grep -E '\.(cc|cpp|c|h|hpp|go|rs|java|py|ts|proto|sh)$' | grep -vE '(^|/)(testdata|third_party|external)/' ; }
 
 pick_leaf() { sources | grep -vE '\.(h|hpp)$' | shuf -n1 --random-source=<(yes); }
 
@@ -106,15 +106,19 @@ pick_wide() {
 
 pick_buildfile() { git ls-files | grep -E '(^|/)BUILD(\.bazel)?$' | shuf -n1 --random-source=<(yes); }
 
+# Target strings hold several labels separated by spaces.
+read -ra build_targets <<< "$TARGETS"
+read -ra test_targets <<< "$TEST_TARGETS"
+
 IFS=',' read -ra steps <<< "$WORKLOAD"
 for step in "${steps[@]}"; do
   case "$step" in
-    clean)     bazel clean --expunge >/dev/null 2>&1; run_bazel clean build "$TARGETS" ;;
-    noop)      run_bazel noop build "$TARGETS" ;;
-    leaf)      f=$(pick_leaf); [[ -n "$f" ]] && touch_file "$f"; run_bazel leaf build "$TARGETS" ;;
-    wide)      f=$(pick_wide); [[ -n "$f" ]] && touch_file "$f"; run_bazel wide build "$TARGETS" ;;
-    buildfile) f=$(pick_buildfile); [[ -n "$f" ]] && touch_file "$f"; run_bazel buildfile build "$TARGETS" ;;
-    test)      run_bazel test test "$TEST_TARGETS" ;;
+    clean)     bazel clean --expunge >/dev/null 2>&1; run_bazel clean build "${build_targets[@]}" ;;
+    noop)      run_bazel noop build "${build_targets[@]}" ;;
+    leaf)      f=$(pick_leaf); [[ -n "$f" ]] && touch_file "$f"; run_bazel leaf build "${build_targets[@]}" ;;
+    wide)      f=$(pick_wide); [[ -n "$f" ]] && touch_file "$f"; run_bazel wide build "${build_targets[@]}" ;;
+    buildfile) f=$(pick_buildfile); [[ -n "$f" ]] && touch_file "$f"; run_bazel buildfile build "${build_targets[@]}" ;;
+    test)      run_bazel test test "${test_targets[@]}" ;;
     *)         log "unknown step $step" ;;
   esac
 done

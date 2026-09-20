@@ -73,8 +73,9 @@ def wait(arns, poll=30):
 def logs(arn):
     tf = tf_outputs()
     task_id = arn.rsplit("/", 1)[-1]
-    print(sh("aws", "logs", "get-log-events", "--log-group-name", f"/{tf['ecs_cluster'].removesuffix('-builders')}/builders",
-             "--log-stream-name", f"build/builder/{task_id}", "--output", "text", "--query", "events[].message"))
+    out = sh("aws", "logs", "get-log-events", "--log-group-name", f"/{tf['ecs_cluster'].removesuffix('-builders')}/builders",
+             "--log-stream-name", f"build/builder/{task_id}", "--output", "json", "--query", "events[].message")
+    print("\n".join(json.loads(out)))
 
 
 def list_tasks():

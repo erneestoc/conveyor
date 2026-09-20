@@ -5,6 +5,42 @@ defmodule ConveyorWeb.DownloadControllerTest do
     %{id: ingest_fixture!("test_failure", context())}
   end
 
+  test "streams a profile from a one-shot blob store without reading it twice", %{
+    conn: conn,
+    id: id
+  } do
+    prev = Application.get_env(:conveyor, Conveyor.Blobs)
+    on_exit(fn -> Application.put_env(:conveyor, Conveyor.Blobs, prev) end)
+
+    Application.put_env(:conveyor, Conveyor.Blobs,
+      adapter: Conveyor.Blobs.OneShot,
+      opts: [dir: prev[:dir]]
+    )
+
+    inv = Conveyor.Invocations.get!(id)
+    gz = :zlib.gzip("{\"traceEvents\":[]}")
+
+    # Typed by name (an upload or a fetch): the header comes from the content type.
+    {:ok, blob} = Conveyor.Blobs.put(gz, content_type: "application/gzip")
+    :ok = Conveyor.Artifacts.profile_available(inv, blob)
+    resp = get(conn, ~p"/invocation/#{id}/download/profile")
+    assert get_resp_header(resp, "content-encoding") == ["gzip"]
+    assert response(resp, 200) == gz
+
+    # Untyped (a CAS sink upload): the magic number is read through a separate stream.
+    {:ok, untyped} = Conveyor.Blobs.put(gz <> "x", content_type: nil)
+    :ok = Conveyor.Artifacts.profile_available(Conveyor.Invocations.get!(id), untyped)
+    resp = get(conn, ~p"/invocation/#{id}/download/profile")
+    assert get_resp_header(resp, "content-encoding") == ["gzip"]
+    assert response(resp, 200) == gz <> "x"
+
+    {:ok, json} = Conveyor.Blobs.put("{}", content_type: nil)
+    :ok = Conveyor.Artifacts.profile_available(Conveyor.Invocations.get!(id), json)
+    resp = get(conn, ~p"/invocation/#{id}/download/profile")
+    assert get_resp_header(resp, "content-encoding") == []
+    assert response(resp, 200) == "{}"
+  end
+
   test "lists artifacts on the details tab", %{conn: conn, id: id} do
     {:ok, view, html} = live(conn, ~p"/invocation/#{id}/details")
     assert html =~ "None. Upload with"
