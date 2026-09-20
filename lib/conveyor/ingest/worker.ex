@@ -59,6 +59,7 @@ defmodule Conveyor.Ingest.Worker do
     state = %{
       ctx: ctx,
       invocation_id: id,
+      stream_id: stream_id,
       day: day,
       norm: norm,
       expected_seq: inv.last_event_seq + 1,
@@ -137,11 +138,17 @@ defmodule Conveyor.Ingest.Worker do
         {:reply, :ok, state}
 
       seq > state.expected_seq ->
-        Logger.warning(
-          "invocation #{state.invocation_id}: got seq #{seq}, expected #{state.expected_seq}"
-        )
+        case takeover(state, seq) do
+          {:ok, fresh} ->
+            handle_call({:push, obe, acker}, from, fresh)
 
-        {:reply, {:error, :out_of_order}, state}
+          {:error, state} ->
+            Logger.warning(
+              "invocation #{state.invocation_id}: got seq #{seq}, expected #{state.expected_seq}"
+            )
+
+            {:reply, {:error, :out_of_order}, state}
+        end
 
       true ->
         state = absorb(state, obe)
@@ -159,6 +166,24 @@ defmodule Conveyor.Ingest.Worker do
         else
           {:reply, :ok, state}
         end
+    end
+  end
+
+  # Behind a balancer a retried stream can land on a node whose worker was started by a
+  # lifecycle event and never saw the events another node committed. With nothing buffered
+  # or in flight, such a worker resumes from the row instead of rejecting the sequence.
+  defp takeover(%{inflight: inflight, batch: batch} = state, seq) do
+    if inflight == %{} and Batch.empty?(batch) do
+      for t <- [state.idle_timer, state.flush_timer, state.broadcast_timer],
+          t != nil,
+          do: Process.cancel_timer(t)
+
+      {:noreply, fresh} =
+        handle_continue(:load, Map.take(state, [:ctx, :invocation_id, :stream_id]))
+
+      if fresh.expected_seq == seq, do: {:ok, fresh}, else: {:error, fresh}
+    else
+      {:error, state}
     end
   end
 

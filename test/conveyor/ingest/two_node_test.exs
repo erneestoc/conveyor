@@ -142,4 +142,51 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     assert %{status: "succeeded", stream_finished: true, lifecycle_finished: true} = reload(id)
     assert :ok = Verify.check(id, n)
   end
+
+  test "a retried stream landing on a stray worker resumes from the row", %{ctx: ctx_a} do
+    start_supervised!(
+      {Ingest.Supervisor,
+       name: Conveyor.Ingest.SupervisorB,
+       registry: Conveyor.Ingest.RegistryB,
+       worker_supervisor: Conveyor.Ingest.WorkerSupervisorB}
+    )
+
+    ctx_b = %{
+      ctx_a
+      | registry: Conveyor.Ingest.RegistryB,
+        worker_supervisor: Conveyor.Ingest.WorkerSupervisorB
+    }
+
+    id = Replay.uuid()
+    events = Fixture.read!(fixture("clean_build_and_test"))
+    n = length(events)
+    push(ctx_a, id, events, 1..5)
+
+    started =
+      {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
+
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
+    push(ctx_a, id, events, 6..n)
+
+    # Bazel retries the stream after a hiccup and the balancer picks node B, whose worker
+    # still expects seq 6: it must catch up from the database, not reject seq n + 1.
+    marker =
+      {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+
+    assert :ok = Ingest.push_sync(ctx_b, Replay.ordered_event(stream_id(id), n + 1, marker))
+    assert :ok = await_exit(Conveyor.Ingest.RegistryB, id)
+    assert %{status: "succeeded", stream_finished: true} = reload(id)
+    assert :ok = Verify.check(id, n)
+
+    # A real gap is still rejected after the reload.
+    other = Replay.uuid()
+    push(ctx_a, other, events, 1..3)
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(other), 1, started))
+
+    assert {:error, :out_of_order} =
+             Ingest.push_sync(
+               ctx_b,
+               Replay.ordered_event(stream_id(other), 9, Enum.at(events, 8))
+             )
+  end
 end
