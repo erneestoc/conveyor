@@ -40,7 +40,7 @@ common=(
   --bes_backend="$BES_BACKEND" --bes_results_url="$CONVEYOR_SERVER/invocation/"
   --bes_header="x-api-key=$api_key" --bes_upload_mode=wait_for_upload_complete --bes_timeout=180s
   --build_event_upload_max_retries=10 --tls_certificate=/tmp/tls-bundle.pem
-  --build_metadata=project="$PROJECT" --build_metadata=mode="$MODE" --build_metadata=wave="$WAVE"
+  --build_metadata=repo="$PROJECT" --build_metadata=mode="$MODE" --build_metadata=wave="$WAVE"
   --build_metadata=commit="$commit" --build_metadata=ci=true --build_metadata=branch=main
   --build_metadata=USER=trial --build_metadata=team=trial --build_metadata=host="$(hostname)"
   --generate_json_trace_profile --execution_log_compact_file=/tmp/exec.log.zst
@@ -78,10 +78,10 @@ run_bazel() { # step, command, targets...
   echo "$step $id $code" >> /tmp/results.txt
 }
 
-touch_file() { # append a harmless line to a source file
+touch_file() { # append a harmless line to a source file (comment syntax by file type)
   local f="$1"
-  case "$f" in
-    *.py|*.sh|*.bzl|BUILD|BUILD.bazel|*.bazel|*.txt|*.toml|*.yaml|*.yml) printf '\n# conveyor trial %s\n' "$(date +%s)" >> "$f" ;;
+  case "$(basename "$f")" in
+    *.py|*.sh|*.bzl|BUILD|BUILD.bazel|WORKSPACE|MODULE.bazel|*.bazel|*.txt|*.toml|*.yaml|*.yml) printf '\n# conveyor trial %s\n' "$(date +%s)" >> "$f" ;;
     *) printf '\n// conveyor trial %s\n' "$(date +%s)" >> "$f" ;;
   esac
   log "modified $f"

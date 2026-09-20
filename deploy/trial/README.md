@@ -37,7 +37,7 @@ Sign in at `https://conveyor.algobien.com/auth/login` with `terraform output -ra
 
 `projects.json` lists the projects (repo, optional subdirectory, build and test targets).
 `runner.py` starts one Fargate task per project × mode × repetition; each task runs the
-workload steps in one Bazel output base and tags every invocation with `project`, `mode`,
+workload steps in one Bazel output base and tags every invocation with `repo`, `mode`,
 `workload`, `wave`, `commit`, `ci=true`:
 
 ```sh
