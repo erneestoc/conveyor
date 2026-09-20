@@ -60,3 +60,55 @@ Measured on a 50 MB curses-style log with 722k raw lines:
 - **Not yet measured**: the UI with 200 concurrent viewers during ingest (LiveView does
   not run headless, so it needs a browser-side load tool), and the reference-hardware
   envelope.
+
+## AWS trial with real open-source builds (2026-09-20)
+
+Stack: `deploy/trial` (Terraform) — Conveyor 2 × m6g.large behind an NLB with TLS on 443
+and 1985, RDS PostgreSQL 17 `db.m6g.large`, S3 blobs; a self-hosted NativeLink v1.7.1
+(CAS + scheduler on a c6i.xlarge, 4 × c6i.2xlarge workers) with a private CA served over
+TLS; ECS Fargate builder tasks (8 vCPU / 32 GB) running real Bazel builds in three modes
+(`local`, `cache` = NativeLink as remote cache, `rbe` = plus remote execution) through a
+workload of clean build, no-op rebuild, leaf edit, wide edit, BUILD edit and tests.
+
+Projects: the fixture workspace, `bazelbuild/examples` (cpp-tutorial), `bazelbuild/buildtools`
+(Go), `abseil/abseil-cpp`, `protocolbuffers/protobuf`, `TraceMachina/nativelink` (Rust),
+`grpc/grpc`.
+
+Results (four waves, about two hours):
+
+| | |
+|---|---|
+| Invocations streamed | 420 (144 + 96 + 168 in three waves, then grpc) |
+| Profiles fetched from NativeLink over TLS with the private CA | 415 of 415 finished builds |
+| Execution logs uploaded and parsed | 374 of 420; 30,026 spawns stored |
+| Concurrency wave | 28 Fargate tasks at once (168 builds); Conveyor nodes peaked at 66 % CPU, RDS at 16 % CPU with 82 connections, 58 concurrent TLS flows on the NLB |
+| grpc `//:grpc++` clean build | 13 min local / cache-miss, **3 m 41 s with 1,706 actions on remote execution** |
+| abseil clean build after one warm-up | 672 of 1,177 actions served from the remote cache; tests returned as cached results |
+| Remote cache hit rate by mnemonic (wave 2) | GoCompilePkg 99 %, CppLink 96 %, CppCompile 51 %, Rustc 23 % |
+
+What the dashboards showed on real data: the top cache-missing targets were LLVM's
+`compiler-rt` builtins and `libcxx` (toolchain builds that every clean build repeats), the
+non-hermetic report flagged abseil's test actions (same inputs, different outputs — test
+output timestamps), and the phase vocabulary of the timeline (cache check, upload inputs,
+queued, remote execution, download outputs) matched NativeLink's real profiles.
+
+Bugs found by the trial and fixed in the same day (each with a test):
+
+- **Profiles from S3 failed to load in the browser** (`ERR_INCOMPLETE_CHUNKED_ENCODING`):
+  the download controller peeked at the stream to detect gzip, which consumed the S3
+  adapter's one-shot stream. Fixed by deciding from the blob's content type.
+- **`force_ssl` at compile time** looped behind a layer-4 balancer and could not be turned
+  off at runtime. Replaced by a runtime plug.
+- **Lifecycle events behind a balancer**: Bazel's lifecycle RPC and event stream use
+  separate connections. A node holding a stray worker started by the attempt-started event
+  fenced the attempt-finished commit (builds left `in_progress`) and rejected a retried
+  stream with FAILED_PRECONDITION (a 13-minute grpc build's upload was abandoned). Fixed:
+  the finish is recorded directly when fenced, and a stray worker resumes from the row
+  when a sequence ahead of its own arrives.
+- **Execution-log parse jobs orphaned by an instance refresh** stayed `executing`; Oban's
+  Lifeline plugin now rescues them.
+
+Known limits recorded for later: NativeLink's Rust remote execution failed with "Invalid
+cross-device link" when rustc renames its archive across the worker's mount namespace
+(cache mode works); the execution-log parser takes about 6 s for a 2 MB protobuf log on a
+laptop, so large logs queue behind the ten Oban slots per node.
