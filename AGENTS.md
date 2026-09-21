@@ -447,3 +447,32 @@ And **never** do this:
 <!-- phoenix:liveview-end -->
 
 <!-- usage-rules-end -->
+## Infrastructure rules (AWS trial / staging stack)
+
+- **Terraform owns the infrastructure.** Everything deployed lives in `deploy/trial/*.tf`;
+  state is in S3 (`conveyor-trial-tfstate-<account>`, locked). Change infrastructure by
+  editing the `.tf` files and running `terraform plan` / `terraform apply` from
+  `deploy/trial` — never by hand with the console or `aws` commands. If a manual change
+  was unavoidable, mirror it in the `.tf` files the same day so `terraform plan` is clean.
+- **Credentials:** `~/keys.txt` (`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`, IAM user
+  `terraform`, region `us-east-1`). The account also hosts another product's production
+  resources: only touch resources with the `project = conveyor-trial` tag or names starting
+  with `conveyor-trial`, and never widen IAM or security groups beyond the stack.
+- **Defaults are the deployed shape.** `main.tf` variable defaults describe what should be
+  running (today: one `t4g.medium` node, `db.t3.micro`, NativeLink off). Temporary shapes
+  (soak windows, NativeLink) are passed as `-var` flags and must not be left as defaults; a
+  plain `terraform apply` must be safe to run at any time.
+- **Images** are built on the laptop and pushed to ECR (`deploy/trial/images/README.md`);
+  the Conveyor image is `<ecr>/conveyor-trial/conveyor:trial` built from the repo root with
+  `--platform linux/arm64`. After a push, roll the nodes with
+  `aws autoscaling start-instance-refresh` (the launch template does not change).
+- **`aws` commands are for operations, not provisioning:** instance refreshes, SSM
+  (`bin/conveyor rpc` on a node with `DIST_PORT_MIN=9101 DIST_PORT_MAX=9101`), ECS
+  `run-task` through `runner.py`, CloudWatch, Cost Explorer, ECR pushes.
+- **Cost discipline:** the stack is billed while it exists (about $2.30/day in the staging
+  shape). Stop it between sessions when nobody inspects it (`-var conveyor_count=0` plus
+  `aws rds stop-db-instance`), tear NativeLink and builders down after every run, and check
+  `aws ec2 describe-instances` for `conveyor-trial-*` before ending a session.
+- **Secrets** stay in Terraform state and SSM Parameter Store (`/conveyor-trial/*`); never
+  in the repository, user-data or logs. The private CA key is in SSM; the CA certificate is
+  a Terraform output.

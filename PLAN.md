@@ -648,3 +648,21 @@ Agreed direction with the user: (1) explain rebuilds from input digests, (2) bro
 **Explain the rebuild (core of M9).** Ingest Bazel's compact execution log (`--execution_log_compact_file`, uploaded through the artifact API or the CAS sink); store per action: target, mnemonic, input path→digest map (deduplicated), output digests, cache status, runner. Diff view on the Actions tab: "rebuilt because these N inputs changed" with paths; dashboard report of non-hermetic targets (same inputs, different outputs or re-executed). Also feeds bytes up/down and cache hit per target.
 
 **Browser tests.** Settings: create project, create/rotate/revoke API key, cache endpoint form with TLS modes; auth: admin token in open mode, OIDC through the fake provider (needs it enabled in dev) or Keycloak in CI.
+
+## 23. M10 (agreed 2026-09-21): project boundary, hardening, plumbing, product separation
+
+Outcome of the AWS trial (docs/scale.md "AWS trial"): the product works on real builds and
+real remote execution, and the first production deployment surfaced five defects, all fixed
+the same day. Not multi-tenant for sale, but one organization with several products that
+must be genuinely separated. The execution order and pass criteria are in HANDOFF §7 "M10":
+
+1. Project as the hard boundary — scoping in the data layer for every read path, per-project
+   retention and blob prefix, a router-walking cross-project 404 test.
+2. Fragile parts — no stray lifecycle workers, a chaos soak behind the balancer with the
+   loadgen and node kills, root cause and alert for the Oban stall.
+3. Plumbing — opt-in database TLS, Caddy single-node TLS (drops the NLB), execution-log
+   parser interning and caps, a rehearsed backup/restore, Prometheus alert rules.
+4. Product separation in the UI — project home, per-project admin groups, compare and
+   previous-build confined to project and branch.
+
+Infrastructure rules for the staging stack are in AGENTS.md ("Infrastructure rules").
