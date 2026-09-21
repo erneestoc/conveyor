@@ -59,7 +59,7 @@ fetched by Conveyor through the cache endpoint with the private CA) or uploaded 
 ## Tear-down
 
 ```sh
-terraform apply -var rbe_enabled=false -var nl_workers=0        # keep Conveyor, drop NativeLink
+terraform apply -var rbe_enabled=true -var nl_workers=4          # bring NativeLink up (off by default)
 terraform destroy                                               # everything (RDS without a final snapshot)
 ```
 

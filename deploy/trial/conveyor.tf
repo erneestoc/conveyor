@@ -113,7 +113,7 @@ resource "aws_db_instance" "db" {
   skip_final_snapshot          = true
   apply_immediately            = true
   backup_retention_period      = 1
-  performance_insights_enabled = true
+  performance_insights_enabled = false
   parameter_group_name         = aws_db_parameter_group.db.name
 }
 
