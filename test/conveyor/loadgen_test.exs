@@ -143,6 +143,7 @@ defmodule Conveyor.LoadgenTest do
              opts[:drop_after] == 3
 
     assert CLI.loadgen_opts([])[:streams] == 10
+    assert CLI.loadgen_opts([])[:tls] == false and CLI.loadgen_opts(tls: true)[:tls] == true
 
     report_path =
       Path.join(System.tmp_dir!(), "loadgen-#{System.unique_integer([:positive])}.json")

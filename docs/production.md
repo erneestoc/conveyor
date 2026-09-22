@@ -18,6 +18,9 @@ on your own hardware before committing to a size (`mix conveyor.loadgen --help`)
   for the UI and `reverse_proxy h2c://127.0.0.1:1986` on `:1985` for gRPC, with Conveyor
   on `GRPC_PORT=1986`); Caddy obtains the certificate from Let's Encrypt and serves h2 to
   Bazel. `deploy/trial` does exactly this in its staging shape (`edge = "caddy"`).
+- **Network Load Balancer**: turn cross-zone load balancing on (it is off by default) or
+  keep a node in every zone the balancer has an address in; otherwise connections that
+  land in an empty zone are accepted and hang until Bazel's deadline (found on the trial).
 - **Load balancer**: gRPC (HTTP/2) on `GRPC_PORT` (1985) and HTTP on `PORT`. Bazel opens
   one HTTP/2 connection per build. Deregistration delay must exceed
   `SHUTDOWN_DRAIN_SECONDS` so a draining node receives no new streams.

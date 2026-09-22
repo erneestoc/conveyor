@@ -53,7 +53,8 @@ defmodule Conveyor.Loadgen.CLI do
       drop_after: opts[:drop_after],
       duplicate_every: opts[:duplicate_every],
       retries: opts[:retries] || 0,
-      api_key: opts[:api_key]
+      api_key: opts[:api_key],
+      tls: opts[:tls] || false
     ]
   end
 

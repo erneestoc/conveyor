@@ -171,6 +171,8 @@ resource "aws_lb" "nlb" {
   load_balancer_type = "network"
   subnets            = local.subnets
   security_groups    = [aws_security_group.lb.id]
+  # Off by default: a connection arriving in a zone without a healthy node would hang.
+  enable_cross_zone_load_balancing = true
 }
 resource "aws_lb_target_group" "web" {
   count                = var.edge == "nlb" ? 1 : 0
