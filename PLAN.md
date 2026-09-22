@@ -745,3 +745,34 @@ for the table inserts), pool per writer shard rather than a shared pool, and
 Expected together: 3–5× more builds per Postgres vCPU (1, 2, 7), 2–3× less storage and
 WAL (3), 3× more open streams per node (5), UI cost independent of build volume (6).
 Order: 0, 1, 2, 6, 3, 5, 4, 7 — the first three are Postgres, the visible limit today.
+
+**Status (2026-09-22, measured with `bench/run.sh`, ledger in docs/capacity.md):**
+
+- **0 harness — done.** Native PostgreSQL 17 (`bench/pg.sh`) instead of Docker's 2-vCPU VM
+  changed the picture: Postgres spends ≈ 0.7 vCPU at 17.5k events/s, so the node's CPU
+  (5.6 vCPU) and memory were the ceilings, not the database. Order was re-derived from
+  the measurements: 1, 5, 4, 3 kept; 2 and 7 deferred; 6 next.
+- **1 fewer statements — done** (`9dec872`): round trips −24 % flat out, −32 % paced,
+  transactions −42 %, WAL −3.5 %; Postgres CPU within noise (its first version planned
+  every raw statement per call and cost more than it saved; `cache_statement:` fixed it).
+- **5 streams per node — done in part** (`f033389`): hibernate on quiet ticks and drop
+  wide columns after finalize; 610 → 443 KB per paced stream, peak RSS with 10k lingering
+  workers 3.2 → 1.85 GB. Not done: ETS-held maps, capped in-flight lists, HTTP/2 window
+  measurement (cowboy+grpc processes hold ≈ 40 KB per stream, workers ≈ 118 KB even
+  hibernated, mostly the `options` map — a jsonb `||` merge of option deltas would drop it).
+- **4 ingest CPU — the big one, done in part** (`f49e528`): the scrubber's five regex
+  passes were 70 % of the absorb path; a byte-search prefilter took the node from 5.5 to
+  3.4 vCPU (3,135 → 5,843 events/s per app vCPU, ack p99 425 → 217 ms). Remaining absorb
+  cost is the protobuf decoder's UTF-8 validation of every string field (≈ 30 %); decode-
+  once, zstd context reuse and ack coalescing are not done.
+- **3 raw storage — dictionary done** (`c9248a8`): `priv/zstd/bep-1.dict`, storage per
+  build −10 % (event segments −38 %), WAL −10 %. Not done: moving old segments to the blob
+  store (raw retention stays a Postgres size lever).
+- **2 narrow hot row — deferred with evidence:** the fenced update is ≈ 10 % of Postgres
+  execution time and Postgres is not the bottleneck on native hardware; revisit only if a
+  networked database shows it.
+- **6 rollups — not started.** Baseline on 100k invocations (Docker Postgres): 17 panels in
+  ≈ 2 s per dashboard load, `actions_by_mnemonic` 0.8–1.0 s, `phases_over_time` 0.3 s.
+- **7 connection budget — deferred:** Postgrex does not pipeline; pool per shard has no
+  measured motivation while Postgres sits under 1 vCPU.
+
