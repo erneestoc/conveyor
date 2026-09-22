@@ -30,10 +30,18 @@ never the build.
 
 ## Retention and storage
 
-Nightly at 02:00 UTC builds older than `RETENTION_DAYS` are deleted in batches; hourly
-the raw segment partitions older than `RETENTION_RAW_DAYS` are dropped and upcoming
-partitions created; at 03:30 unpinned blobs older than `CAS_TTL_DAYS` are pruned. All
-three are Oban jobs; failures retry and show in the logs.
+Nightly at 02:00 UTC builds older than `RETENTION_DAYS` (or the project's own retention,
+set in Settings) are deleted in batches per project; hourly the raw segment partitions
+older than `RETENTION_RAW_DAYS` are dropped and upcoming partitions created; at 03:30
+unpinned blobs older than `CAS_TTL_DAYS` and blobs no remaining build references (their
+builds were retained away) are pruned. All three are Oban jobs; failures retry and show
+in the logs.
+
+Blobs are stored per project under the project's key prefix (`<S3_PREFIX>/<prefix>/` in
+S3, `<BLOB_DIR>/<prefix>/` on disk; the prefix is the slug unless changed in Settings), so
+one project's data can be listed, given a bucket lifecycle rule or removed on its own.
+Projects never share blobs. Blobs written before 0.2 sit in the old flat layout and stay
+readable; new writes go under the prefix.
 
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).

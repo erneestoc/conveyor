@@ -50,9 +50,9 @@ defmodule ConveyorWeb.DownloadController do
     if inv.profile_status != "available" or is_nil(inv.profile_blob),
       do: raise(ConveyorWeb.NotFoundError, "profile not available")
 
-    case Conveyor.Blobs.stream(inv.profile_blob, chunk_size: 256 * 1024) do
+    case Conveyor.Blobs.stream(inv.project_id, inv.profile_blob, chunk_size: 256 * 1024) do
       {:ok, chunks} ->
-        conn = maybe_gzip_encoding(conn, inv.profile_blob)
+        conn = maybe_gzip_encoding(conn, inv)
 
         conn
         |> put_resp_content_type("application/json")
@@ -71,20 +71,20 @@ defmodule ConveyorWeb.DownloadController do
   # upload carries none) the first bytes are read through a separate, short stream: the
   # stream being sent must never be enumerated twice, since the S3 adapter's stream is
   # one-shot (it deletes its temporary file when it completes).
-  defp maybe_gzip_encoding(conn, digest) do
+  defp maybe_gzip_encoding(conn, %{project_id: project_id, profile_blob: digest}) do
     gzip? =
-      case Conveyor.Blobs.get(digest) do
+      case Conveyor.Blobs.get(project_id, digest) do
         %{content_type: "application/gzip"} -> true
         %{content_type: "application/x-gzip"} -> true
         %{content_type: type} when is_binary(type) and type != "application/octet-stream" -> false
-        _ -> gzip_magic?(digest)
+        _ -> gzip_magic?(project_id, digest)
       end
 
     if gzip?, do: put_resp_header(conn, "content-encoding", "gzip"), else: conn
   end
 
-  defp gzip_magic?(digest) do
-    case Conveyor.Blobs.stream(digest, chunk_size: 2) do
+  defp gzip_magic?(project_id, digest) do
+    case Conveyor.Blobs.stream(project_id, digest, chunk_size: 2) do
       {:ok, peek} -> match?([<<0x1F, 0x8B>> | _], Enum.take(peek, 1))
       _ -> false
     end
@@ -108,7 +108,7 @@ defmodule ConveyorWeb.DownloadController do
     artifact =
       Conveyor.Artifacts.get(inv, name) || raise ConveyorWeb.NotFoundError, "no artifact #{name}"
 
-    case Conveyor.Blobs.stream(artifact.digest) do
+    case Conveyor.Blobs.stream(inv.project_id, artifact.digest) do
       {:ok, chunks} ->
         conn =
           conn

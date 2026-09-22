@@ -43,6 +43,86 @@ defmodule Conveyor.Projects do
   @spec get_project_by_slug(String.t()) :: Project.t() | nil
   def get_project_by_slug(slug), do: Repo.get_by(Project, slug: slug)
 
+  # --- storage settings: retention and blob prefix -------------------------------------
+
+  @prefix_re ~r/^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/
+  @max_retention_days 3650
+
+  @doc """
+  Sets the project's retention (`"retention_days"`, blank = the global `RETENTION_DAYS`)
+  and blob key prefix (`"blob_prefix"`, blank = the slug). Blobs already stored keep the
+  prefix they were written under, so a change never orphans them.
+  """
+  @spec put_storage(Project.t(), map()) :: {:ok, Project.t()} | {:error, String.t()}
+  def put_storage(%Project{} = project, attrs) do
+    with {:ok, days} <- parse_retention(attrs["retention_days"]),
+         {:ok, prefix} <- parse_prefix(attrs["blob_prefix"]) do
+      settings =
+        project.settings
+        |> put_or_drop("retention_days", days)
+        |> put_or_drop("blob_prefix", prefix)
+
+      case update_project(project, %{settings: settings}) do
+        {:ok, project} -> {:ok, project}
+        {:error, changeset} -> {:error, inspect(changeset.errors)}
+      end
+    end
+  end
+
+  defp put_or_drop(settings, key, nil), do: Map.delete(settings, key)
+  defp put_or_drop(settings, key, value), do: Map.put(settings, key, value)
+
+  defp parse_retention(nil), do: {:ok, nil}
+
+  defp parse_retention(value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        {:ok, nil}
+
+      text ->
+        case Integer.parse(text) do
+          {days, ""} when days >= 1 and days <= @max_retention_days ->
+            {:ok, days}
+
+          _ ->
+            {:error, "retention must be a whole number of days from 1 to #{@max_retention_days}"}
+        end
+    end
+  end
+
+  defp parse_prefix(nil), do: {:ok, nil}
+
+  defp parse_prefix(value) when is_binary(value) do
+    case String.trim(value) do
+      "" ->
+        {:ok, nil}
+
+      p when byte_size(p) <= 64 ->
+        if Regex.match?(@prefix_re, p), do: {:ok, p}, else: prefix_error()
+
+      _ ->
+        prefix_error()
+    end
+  end
+
+  defp prefix_error,
+    do: {:error, "blob prefix must be lowercase letters, digits, dots, dashes or underscores"}
+
+  @doc "Days this project keeps builds, or nil for the global default."
+  @spec retention_days(Project.t()) :: pos_integer() | nil
+  def retention_days(%Project{settings: settings}), do: Map.get(settings || %{}, "retention_days")
+
+  @doc """
+  The key prefix a project's blobs are stored under (its slug unless overridden). Takes a
+  project or a project id; blob writes call this once per blob.
+  """
+  @spec blob_prefix(Project.t() | integer()) :: String.t()
+  def blob_prefix(%Project{slug: slug, settings: settings}),
+    do: Map.get(settings || %{}, "blob_prefix") || slug
+
+  def blob_prefix(project_id) when is_integer(project_id),
+    do: project_id |> get_project!() |> blob_prefix()
+
   @spec create_project(map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
   def create_project(attrs), do: %Project{} |> Project.changeset(attrs) |> Repo.insert()
 

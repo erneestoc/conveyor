@@ -160,6 +160,31 @@ defmodule ConveyorWeb.SettingsLiveTest do
     assert has_element?(view, "#audit-log", "segment.delete")
   end
 
+  test "storage settings: retention days and blob prefix", %{conn: conn, project: project} do
+    {:ok, view, _} = live(conn, ~p"/settings")
+
+    view
+    |> form("#storage-form-#{project.id}", %{"retention_days" => "30", "blob_prefix" => "main"})
+    |> render_submit()
+
+    assert has_element?(view, "#flash-info", "Storage settings updated")
+    project = Projects.get_project!(project.id)
+    assert Projects.retention_days(project) == 30 and Projects.blob_prefix(project) == "main"
+
+    assert has_element?(
+             view,
+             "#storage-form-#{project.id} input[name=retention_days][value='30']"
+           )
+
+    view
+    |> form("#storage-form-#{project.id}", %{"retention_days" => "never", "blob_prefix" => ""})
+    |> render_submit()
+
+    assert has_element?(view, "#flash-error", "whole number of days")
+    assert Projects.retention_days(Projects.get_project!(project.id)) == 30
+    assert [%{action: "project.storage"}] = Conveyor.Audit.recent(1)
+  end
+
   test "settings actions are audited", %{conn: conn, project: project} do
     {:ok, view, _} = live(conn, ~p"/settings")
     assert has_element?(view, "#audit-log", "Nothing yet")

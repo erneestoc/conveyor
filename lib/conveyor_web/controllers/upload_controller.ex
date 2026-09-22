@@ -97,7 +97,10 @@ defmodule ConveyorWeb.UploadController do
           Artifacts.content_type(name)
       end
 
-    case Blobs.put(body_stream(conn), source: "upload", content_type: content_type) do
+    case Blobs.put(conn.assigns.api_key.project_id, body_stream(conn),
+           source: "upload",
+           content_type: content_type
+         ) do
       {:ok, blob} -> {:ok, blob}
       {:error, reason} -> {:error, 500, "could not store artifact: #{inspect(reason)}"}
     end

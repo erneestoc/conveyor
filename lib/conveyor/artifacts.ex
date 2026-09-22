@@ -37,7 +37,7 @@ defmodule Conveyor.Artifacts do
   def fetch(%Invocation{} = inv, %{"uri" => uri} = file) when is_binary(uri) do
     with {:ok, ref} <- Resource.parse_uri(uri) do
       cond do
-        Blobs.exists?(ref.hash) ->
+        Blobs.exists?(inv.project_id, ref.hash) ->
           {:ok, ref.hash}
 
         ref.size > config(:max_bytes, 512 * 1024 * 1024) ->
@@ -49,8 +49,8 @@ defmodule Conveyor.Artifacts do
     end
   end
 
-  def fetch(%Invocation{}, %{"contents" => contents}) when is_binary(contents) do
-    with {:ok, blob} <- Blobs.put(contents, source: "fetch") do
+  def fetch(%Invocation{} = inv, %{"contents" => contents}) when is_binary(contents) do
+    with {:ok, blob} <- Blobs.put(inv.project_id, contents, source: "fetch") do
       {:ok, blob.digest}
     end
   end
@@ -65,7 +65,11 @@ defmodule Conveyor.Artifacts do
         {:error, :endpoint_not_configured}
 
       endpoint ->
-        with {:ok, blob} <- BytestreamClient.fetch(endpoint, ref, content_type: content_type) do
+        with {:ok, blob} <-
+               BytestreamClient.fetch(endpoint, ref,
+                 project_id: inv.project_id,
+                 content_type: content_type
+               ) do
           {:ok, blob.digest}
         end
     end
@@ -104,7 +108,7 @@ defmodule Conveyor.Artifacts do
   @spec attach(Invocation.t() | String.t(), String.t(), Blobs.Blob.t(), String.t()) ::
           Artifact.t()
   def attach(inv, name, %Blobs.Blob{} = blob, source) do
-    Blobs.pin(blob.digest)
+    Blobs.pin(blob.project_id, blob.digest)
     now = DateTime.utc_now()
 
     row = %{
@@ -145,8 +149,8 @@ defmodule Conveyor.Artifacts do
       %Invocation{profile_status: "referenced", profile_uri: uri} = inv when is_binary(uri) ->
         case Resource.parse_uri(uri) do
           {:ok, %Resource{hash: hash}} ->
-            if Blobs.exists?(hash),
-              do: profile_available(inv, Blobs.get(hash)),
+            if Blobs.exists?(inv.project_id, hash),
+              do: profile_available(inv, Blobs.get(inv.project_id, hash)),
               else: enqueue_profile_fetch(inv)
 
           {:error, reason} ->
@@ -179,7 +183,7 @@ defmodule Conveyor.Artifacts do
 
     case fetch(inv, %{"uri" => uri, "name" => name}) do
       {:ok, digest} ->
-        profile_available(inv, Blobs.get(digest))
+        profile_available(inv, Blobs.get(inv.project_id, digest))
         :ok
 
       {:error, reason}

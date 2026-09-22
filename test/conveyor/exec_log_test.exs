@@ -148,7 +148,7 @@ defmodule Conveyor.ExecLogTest do
   end
 
   test "the worker parses the uploaded artifact and reports failures", %{newer: inv} do
-    {:ok, blob} = Blobs.put(File.read!(@clean), content_type: "application/zstd")
+    {:ok, blob} = Blobs.put(inv.project_id, File.read!(@clean), content_type: "application/zstd")
     Artifacts.attach(inv, "execution.log.zst", blob, "upload")
     Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
 
@@ -172,7 +172,7 @@ defmodule Conveyor.ExecLogTest do
 
     assert {:cancel, :no_log} = perform_job(ParseExecLog, %{invocation_id: other.id})
 
-    {:ok, junk} = Blobs.put("not a log", content_type: "application/octet-stream")
+    {:ok, junk} = Blobs.put(inv.project_id, "not a log", content_type: "application/octet-stream")
     Artifacts.attach(other, "exec.log", junk, "upload")
     assert {:cancel, :malformed} = perform_job(ParseExecLog, %{invocation_id: other.id})
     assert Repo.get!(Invocation, other.id).exec_log_status == "failed"

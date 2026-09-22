@@ -148,7 +148,7 @@ defmodule Conveyor.Artifacts.BytestreamClient do
             {:trailers, _} -> ""
           end)
 
-        Blobs.put(chunks,
+        Blobs.put(Keyword.fetch!(opts, :project_id), chunks,
           digest: ref.hash,
           source: "fetch",
           content_type: Keyword.get(opts, :content_type)

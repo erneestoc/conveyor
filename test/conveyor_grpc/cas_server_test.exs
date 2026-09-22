@@ -29,10 +29,14 @@ defmodule Conveyor.Grpc.CasServerTest do
     assert caps.high_api_version.major == 2
   end
 
-  test "find missing, batch update and batch read", %{channel: channel, meta: meta} do
+  test "find missing, batch update and batch read", %{
+    channel: channel,
+    meta: meta,
+    project: project
+  } do
     a = "blob a #{System.unique_integer()}"
     b = "blob b #{System.unique_integer()}"
-    {:ok, _} = Blobs.put(a)
+    {:ok, _} = Blobs.put(project.id, a)
 
     assert {:ok, %RE.FindMissingBlobsResponse{missing_blob_digests: [missing]}} =
              RE.ContentAddressableStorage.Stub.find_missing_blobs(
@@ -74,8 +78,8 @@ defmodule Conveyor.Grpc.CasServerTest do
              %{status: %{code: 3}}
            ] = responses
 
-    assert Blobs.get(Blobs.digest(b)).source == "cas"
-    assert Blobs.get(Blobs.digest(b)).expires_at != nil
+    assert Blobs.get(project.id, Blobs.digest(b)).source == "cas"
+    assert Blobs.get(project.id, Blobs.digest(b)).expires_at != nil
 
     assert {:ok, %RE.BatchReadBlobsResponse{responses: [ra, rb, rmissing]}} =
              RE.ContentAddressableStorage.Stub.batch_read_blobs(

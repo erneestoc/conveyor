@@ -356,7 +356,9 @@ defmodule Conveyor.Seed do
   end
 
   defp put_profile!(inv, gz) do
-    {:ok, blob} = Conveyor.Blobs.put(gz, content_type: "application/gzip", source: "fetch")
+    {:ok, blob} =
+      Conveyor.Blobs.put(inv.project_id, gz, content_type: "application/gzip", source: "fetch")
+
     :ok = Conveyor.Artifacts.profile_available(inv, blob)
 
     Conveyor.Workers.ProfileSummary.perform(%Oban.Job{args: %{"invocation_id" => inv.id}})

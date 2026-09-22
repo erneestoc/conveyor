@@ -65,6 +65,9 @@ defmodule Conveyor.Blobs.S3Test do
 
     assert S3.url("d", bucket: "b", endpoint: "https://r2.example.com") ==
              "https://b.r2.example.com/blobs/d"
+
+    assert S3.url("d", bucket: "b", project_prefix: "mobile") ==
+             "https://b.s3.us-east-1.amazonaws.com/blobs/mobile/d"
   end
 
   describe "against an S3-compatible server" do

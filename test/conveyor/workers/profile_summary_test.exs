@@ -28,7 +28,9 @@ defmodule Conveyor.Workers.ProfileSummaryTest do
   end
 
   test "summarizes an available profile into the metrics row", %{inv: inv} do
-    {:ok, blob} = Blobs.put(File.read!(@fixture), content_type: "application/gzip")
+    {:ok, blob} =
+      Blobs.put(inv.project_id, File.read!(@fixture), content_type: "application/gzip")
+
     Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
     :ok = Artifacts.profile_available(inv, blob)
     assert_enqueued(worker: ProfileSummary, args: %{invocation_id: inv.id})
@@ -47,20 +49,24 @@ defmodule Conveyor.Workers.ProfileSummaryTest do
     assert {:cancel, :no_invocation} =
              perform_job(ProfileSummary, %{invocation_id: Ecto.UUID.generate()})
 
-    {:ok, blob} = Blobs.put("{\"traceEvents\": [{\"bad\": }]}")
+    {:ok, blob} = Blobs.put(inv.project_id, "{\"traceEvents\": [{\"bad\": }]}")
     :ok = Artifacts.profile_available(inv, blob)
 
     assert {:cancel, {:malformed_profile, _}} =
              perform_job(ProfileSummary, %{invocation_id: inv.id})
 
-    :ok = Blobs.delete(blob.digest)
+    :ok = Blobs.delete(inv.project_id, blob.digest)
     assert {:cancel, :blob_missing} = perform_job(ProfileSummary, %{invocation_id: inv.id})
   end
 
   test "blob maintenance prunes expired uploads" do
-    {:ok, blob} = Blobs.put("expired #{System.unique_integer()}", source: "cas", ttl_seconds: -10)
+    project = Projects.ensure_default_project!()
+
+    {:ok, blob} =
+      Blobs.put(project.id, "expired #{System.unique_integer()}", source: "cas", ttl_seconds: -10)
+
     assert {:ok, %{pruned: n}} = BlobMaintenance.perform(%Oban.Job{})
     assert n >= 1
-    refute Blobs.exists?(blob.digest)
+    refute Blobs.exists?(project.id, blob.digest)
   end
 end

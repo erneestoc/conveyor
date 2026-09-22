@@ -19,7 +19,7 @@ defmodule Conveyor.Grpc.ByteStreamServer do
   def read(%BS.ReadRequest{} = req, stream) do
     ref = parse!(Resource.parse_read(req.resource_name))
 
-    case Blobs.stream(ref.hash, chunk_size: @chunk) do
+    case Blobs.stream(project_id(stream), ref.hash, chunk_size: @chunk) do
       {:ok, chunks} ->
         chunks
         |> slice(req.read_offset, req.read_limit)
@@ -36,8 +36,9 @@ defmodule Conveyor.Grpc.ByteStreamServer do
   end
 
   @spec write(Enumerable.t(), GRPC.Server.Stream.t()) :: any()
-  def write(requests, _stream) do
+  def write(requests, stream) do
     sink_enabled!()
+    project_id = project_id(stream)
     {:ok, holder} = Agent.start_link(fn -> nil end)
 
     data =
@@ -50,7 +51,7 @@ defmodule Conveyor.Grpc.ByteStreamServer do
         req.data
       end)
 
-    result = Blobs.put(data, source: "cas", ttl_seconds: cas_ttl_seconds())
+    result = Blobs.put(project_id, data, source: "cas", ttl_seconds: cas_ttl_seconds())
     ref = Agent.get(holder, & &1)
     Agent.stop(holder)
 
@@ -87,13 +88,17 @@ defmodule Conveyor.Grpc.ByteStreamServer do
     ref = parse!(Resource.parse_write(req.resource_name))
 
     response =
-      case Blobs.get(ref.hash) do
+      case Blobs.get(project_id(stream), ref.hash) do
         %{size: size} -> %BS.QueryWriteStatusResponse{committed_size: size, complete: true}
         nil -> %BS.QueryWriteStatusResponse{committed_size: 0, complete: false}
       end
 
     response |> GRPC.Stream.unary(materializer: stream) |> GRPC.Stream.run()
   end
+
+  @doc "The project of the authenticated caller (`Conveyor.Grpc.AuthInterceptor`)."
+  @spec project_id(GRPC.Server.Stream.t()) :: integer()
+  def project_id(%{local: %{ctx: %{project_id: id}}}), do: id
 
   @doc "Raises UNIMPLEMENTED unless the CAS sink is enabled."
   def sink_enabled! do

@@ -57,8 +57,9 @@ defmodule Conveyor.Artifacts.BytestreamClientTest do
       "bearer_token" => "s3cret"
     }
 
-    assert {:ok, blob} = BytestreamClient.fetch(endpoint, ref)
-    assert {:ok, ^data} = Blobs.read(blob.digest)
+    project = Conveyor.Projects.ensure_default_project!()
+    assert {:ok, blob} = BytestreamClient.fetch(endpoint, ref, project_id: project.id)
+    assert {:ok, ^data} = Blobs.read(project.id, blob.digest)
     assert FakeCache.headers()["authorization"] == "Bearer s3cret"
   end
 
@@ -89,18 +90,20 @@ defmodule Conveyor.Artifacts.BytestreamClientTest do
       }
     }
 
-    assert {:ok, blob} = BytestreamClient.fetch(mtls, ref)
-    assert {:ok, ^data} = Blobs.read(blob.digest)
-    :ok = Blobs.delete(blob.digest)
+    project = Conveyor.Projects.ensure_default_project!()
+    assert {:ok, blob} = BytestreamClient.fetch(mtls, ref, project_id: project.id)
+    assert {:ok, ^data} = Blobs.read(project.id, blob.digest)
+    :ok = Blobs.delete(project.id, blob.digest)
 
     # Without a client certificate the listener refuses the handshake; plaintext cannot talk TLS.
     assert {:error, _} =
              BytestreamClient.fetch(
                %{"tls" => %{"mode" => "custom_ca", "ca_file" => certs.server_ca}},
-               ref
+               ref,
+               project_id: project.id
              )
 
-    assert {:error, _} = BytestreamClient.fetch(%{"tls" => false}, ref)
+    assert {:error, _} = BytestreamClient.fetch(%{"tls" => false}, ref, project_id: project.id)
   end
 
   test "project endpoint configuration normalizes the connection model" do

@@ -1,6 +1,8 @@
 defmodule Conveyor.Blobs.Disk do
   @moduledoc """
-  Blob adapter storing each blob at `<dir>/<d0d1>/<d2d3>/<digest>`.
+  Blob adapter storing each blob at `<dir>/<project_prefix>/<d0d1>/<d2d3>/<digest>`
+  (`<dir>/<d0d1>/<d2d3>/<digest>` when no `:project_prefix` is given: the layout used
+  before blobs were per project).
 
   Writes go to a temporary file in the same directory and are renamed into place, so a
   crash mid-write never leaves a partial blob under its final name.
@@ -48,6 +50,10 @@ defmodule Conveyor.Blobs.Disk do
   @doc "Absolute path of a blob under the configured directory."
   def path(digest, opts) do
     <<a::binary-size(2), b::binary-size(2), _::binary>> = digest
-    Path.join([Keyword.fetch!(opts, :dir), a, b, digest])
+
+    case Keyword.get(opts, :project_prefix) do
+      nil -> Path.join([Keyword.fetch!(opts, :dir), a, b, digest])
+      prefix -> Path.join([Keyword.fetch!(opts, :dir), prefix, a, b, digest])
+    end
   end
 end

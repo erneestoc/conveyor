@@ -12,7 +12,7 @@ defmodule Conveyor.Workers.ParseExecLog do
     with %{} = inv <- Invocations.get(id) || {:cancel, :no_invocation},
          %{} = artifact <-
            Enum.find(Artifacts.list(inv), &ExecLog.name?(&1.name)) || {:cancel, :no_log},
-         {:ok, binary} <- Blobs.read(artifact.digest),
+         {:ok, binary} <- Blobs.read(inv.project_id, artifact.digest),
          {:ok, parsed} <- parse(inv, binary) do
       count = ExecLog.store!(inv, parsed)
 

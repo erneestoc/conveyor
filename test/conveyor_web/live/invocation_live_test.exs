@@ -196,7 +196,11 @@ defmodule ConveyorWeb.InvocationLiveTest do
         "c9fb9e145e0fbb8955f0a0f93e7cfa750e3ab9e6e15387e5caacf811cfa7ec86"
       ])
 
-    {:ok, blob} = Conveyor.Blobs.put(File.read!(fixture), content_type: "application/gzip")
+    {:ok, blob} =
+      Conveyor.Blobs.put(context().project_id, File.read!(fixture),
+        content_type: "application/gzip"
+      )
+
     inv = Conveyor.Invocations.get!(id)
     :ok = Conveyor.Artifacts.profile_available(inv, blob)
 
@@ -232,7 +236,10 @@ defmodule ConveyorWeb.InvocationLiveTest do
     for digest <-
           ~w(b5a25a43f146a8201e71729b95aec18cbebc3d47a61be6f6f11523d46d0d755c 94a90e1beb50bfb773239210a2b21dfc0b3fbb709b3fce460f1886fc891868bc) do
       {:ok, _} =
-        Conveyor.Blobs.put(File.read!(Path.join([File.cwd!(), "test/fixtures/blobs", digest])))
+        Conveyor.Blobs.put(
+          context().project_id,
+          File.read!(Path.join([File.cwd!(), "test/fixtures/blobs", digest]))
+        )
     end
 
     id = ingest_fixture!("remote_cache_upload", ctx)

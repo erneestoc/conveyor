@@ -249,7 +249,7 @@ defmodule ConveyorWeb.InvocationLive do
 
   defp load_test_file(inv, file, name) do
     with {:ok, digest} <- Conveyor.Artifacts.fetch(inv, file),
-         {:ok, chunks} <- Conveyor.Blobs.stream(digest) do
+         {:ok, chunks} <- Conveyor.Blobs.stream(inv.project_id, digest) do
       {content, truncated} = take_bytes(chunks, @test_file_max)
 
       if String.ends_with?(name, ".xml") do

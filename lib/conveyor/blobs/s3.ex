@@ -11,6 +11,8 @@ defmodule Conveyor.Blobs.S3 do
     * `:path_style` — `true` puts the bucket in the path (MinIO default), `false` uses
       virtual-host addressing (AWS default)
     * `:prefix` — key prefix inside the bucket (default `"blobs"`)
+    * `:project_prefix` — the project's own prefix under it (set by `Conveyor.Blobs`;
+      absent for blobs stored before prefixes existed)
     * `:access_key_id`, `:secret_access_key`, `:session_token`
   """
   @behaviour Conveyor.Blobs.Adapter
@@ -138,11 +140,16 @@ defmodule Conveyor.Blobs.S3 do
     end
   end
 
-  @doc "Object URL for a digest under the configured bucket, prefix and addressing style."
+  @doc "Object URL for a digest under the configured bucket, prefixes and addressing style."
   def url(digest, opts) do
     bucket = Keyword.fetch!(opts, :bucket)
     region = Keyword.get(opts, :region, "us-east-1")
-    key = Path.join(Keyword.get(opts, :prefix, "blobs"), digest)
+
+    key =
+      case Keyword.get(opts, :project_prefix) do
+        nil -> Path.join(Keyword.get(opts, :prefix, "blobs"), digest)
+        project -> Path.join([Keyword.get(opts, :prefix, "blobs"), project, digest])
+      end
 
     case {Keyword.get(opts, :endpoint), Keyword.get(opts, :path_style, false)} do
       {nil, false} ->

@@ -40,7 +40,7 @@ shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `RETENTION_DAYS` | `90` | builds older than this are deleted nightly, with their targets, tests, actions and metrics |
+| `RETENTION_DAYS` | `90` | builds older than this are deleted nightly, with their targets, tests, actions and metrics; a project can set its own days in Settings |
 | `RETENTION_RAW_DAYS` | `14` | raw event and log segments are dropped by daily partition after this |
 | `CAS_TTL_DAYS` | `14` | uploads through the CAS sink that no build references are pruned after this |
 | `ARTIFACT_MAX_MB` | `512` | largest artifact fetched or accepted |
@@ -54,7 +54,7 @@ shown.
 | `S3_BUCKET` | required for s3 | |
 | `S3_REGION` | `AWS_REGION` or `us-east-1` | |
 | `S3_ENDPOINT`, `S3_PATH_STYLE` | unset, `false` | S3-compatible stores (MinIO, R2, Ceph) |
-| `S3_PREFIX` | `blobs` | key prefix |
+| `S3_PREFIX` | `blobs` | key prefix; every project stores under `<S3_PREFIX>/<project prefix>/` (the slug unless changed in Settings) |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | unset | static credentials; otherwise the instance role or IRSA (IMDSv2) |
 | `CAS_SINK_ENABLED` | `false` | serve a minimal ByteStream/CAS endpoint on the gRPC port so Bazel can upload profiles and test logs directly |
 

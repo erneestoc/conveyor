@@ -174,6 +174,27 @@ defmodule ConveyorWeb.SettingsLive do
     {:noreply, socket |> put_flash(:info, "Project access updated") |> reload()}
   end
 
+  def handle_event("put_storage", %{"project_id" => project_id} = params, socket) do
+    project = Projects.get_project!(project_id)
+
+    case Projects.put_storage(project, Map.take(params, ["retention_days", "blob_prefix"])) do
+      {:ok, project} ->
+        audit(socket, "project.storage",
+          subject: {"project", project.id},
+          project_id: project.id,
+          metadata: %{
+            "retention_days" => Projects.retention_days(project),
+            "blob_prefix" => Projects.blob_prefix(project)
+          }
+        )
+
+        {:noreply, socket |> put_flash(:info, "Storage settings updated") |> reload()}
+
+      {:error, message} ->
+        {:noreply, put_flash(socket, :error, message)}
+    end
+  end
+
   def handle_event("delete_cache_endpoint", %{"project_id" => project_id, "host" => host}, socket) do
     {:ok, project} = project_id |> Projects.get_project!() |> Projects.delete_cache_endpoint(host)
 
@@ -404,6 +425,44 @@ defmodule ConveyorWeb.SettingsLive do
             />
           </label>
           <.button variant="primary">Save access</.button>
+        </form>
+
+        <form
+          id={"storage-form-#{project.id}"}
+          phx-submit="put_storage"
+          class="mt-4 flex flex-wrap items-end gap-2 border-t border-base-300/60 pt-3 text-xs"
+        >
+          <input type="hidden" name="project_id" value={project.id} />
+          <label class="flex flex-col gap-1">
+            <span class="text-[11px] text-base-content/60">
+              Keep builds for (days; empty = server default {Application.get_env(
+                :conveyor,
+                :retention_days,
+                90
+              )})
+            </span>
+            <input
+              name="retention_days"
+              type="number"
+              min="1"
+              max="3650"
+              value={Projects.retention_days(project)}
+              placeholder={Application.get_env(:conveyor, :retention_days, 90)}
+              class="w-32 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+            />
+          </label>
+          <label class="flex flex-col gap-1">
+            <span class="text-[11px] text-base-content/60">
+              Blob key prefix (profiles, logs and cache uploads live under it; empty = slug)
+            </span>
+            <input
+              name="blob_prefix"
+              value={project.settings["blob_prefix"]}
+              placeholder={project.slug}
+              class="w-64 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+            />
+          </label>
+          <.button variant="primary">Save storage</.button>
         </form>
 
         <div id={"cache-endpoints-#{project.id}"} class="mt-4 border-t border-base-300/60 pt-3">

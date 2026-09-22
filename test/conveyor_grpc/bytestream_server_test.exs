@@ -50,7 +50,7 @@ defmodule Conveyor.Grpc.ByteStreamServerTest do
     end
   end
 
-  test "write, query and read a blob", %{channel: channel, meta: meta} do
+  test "write, query and read a blob", %{channel: channel, meta: meta, project: project} do
     data = :crypto.strong_rand_bytes(200_000)
     hash = Blobs.digest(data)
     resource = "uploads/#{Ecto.UUID.generate()}/blobs/#{hash}/#{byte_size(data)}"
@@ -68,7 +68,7 @@ defmodule Conveyor.Grpc.ByteStreamServerTest do
     assert {:ok, %BS.WriteResponse{committed_size: 200_000}} =
              upload(channel, meta, resource, chunks)
 
-    blob = Blobs.get(hash)
+    blob = Blobs.get(project.id, hash)
     assert blob.source == "cas"
     assert blob.expires_at != nil
 
@@ -118,10 +118,11 @@ defmodule Conveyor.Grpc.ByteStreamServerTest do
 
   @tag :capture_log
   test "uploads require the sink to be enabled; reads always work", %{
+    project: project,
     channel: channel,
     meta: meta
   } do
-    {:ok, blob} = Blobs.put("readable")
+    {:ok, blob} = Blobs.put(project.id, "readable")
     conf = Application.get_env(:conveyor, Conveyor.Grpc)
     Application.put_env(:conveyor, Conveyor.Grpc, Keyword.put(conf, :cas_sink, false))
     on_exit(fn -> Application.put_env(:conveyor, Conveyor.Grpc, conf) end)

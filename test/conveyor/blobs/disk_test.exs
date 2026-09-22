@@ -17,6 +17,10 @@ defmodule Conveyor.Blobs.DiskTest do
     assert :ok = Disk.put(@digest, ["hello ", "world"], opts)
     assert Disk.exists?(@digest, opts)
     assert Disk.path(@digest, opts) == Path.join([opts[:dir], "ab", "ab", @digest])
+
+    assert Disk.path(@digest, Keyword.put(opts, :project_prefix, "mobile")) ==
+             Path.join([opts[:dir], "mobile", "ab", "ab", @digest])
+
     assert {:ok, stream} = Disk.stream(@digest, opts)
     assert IO.iodata_to_binary(Enum.to_list(stream)) == "hello world"
     assert [] = Path.wildcard(Path.join(opts[:dir], "**/*.tmp-*"))

@@ -19,7 +19,14 @@ defmodule Conveyor.Grpc.CasServer do
     ByteStreamServer.sink_enabled!()
     digest_function!(req.digest_function)
 
-    missing_hashes = req.blob_digests |> Enum.map(& &1.hash) |> Blobs.missing() |> MapSet.new()
+    project_id = ByteStreamServer.project_id(stream)
+
+    missing_hashes =
+      req.blob_digests
+      |> Enum.map(& &1.hash)
+      |> then(&Blobs.missing(project_id, &1))
+      |> MapSet.new()
+
     missing = Enum.filter(req.blob_digests, &(&1.hash in missing_hashes))
 
     reply(%RE.FindMissingBlobsResponse{missing_blob_digests: missing}, stream)
@@ -30,6 +37,7 @@ defmodule Conveyor.Grpc.CasServer do
     digest_function!(req.digest_function)
 
     total = Enum.reduce(req.requests, 0, &(byte_size(&1.data) + &2))
+    project_id = ByteStreamServer.project_id(stream)
 
     if total > @max_batch_bytes do
       raise GRPC.RPCError,
@@ -52,7 +60,7 @@ defmodule Conveyor.Grpc.CasServer do
               )
 
             true ->
-              case Blobs.put(data,
+              case Blobs.put(project_id, data,
                      digest: digest.hash,
                      source: "cas",
                      ttl_seconds: ByteStreamServer.cas_ttl_seconds()
@@ -80,6 +88,7 @@ defmodule Conveyor.Grpc.CasServer do
   def batch_read_blobs(%RE.BatchReadBlobsRequest{} = req, stream) do
     digest_function!(req.digest_function)
     total = Enum.reduce(req.digests, 0, &(&1.size_bytes + &2))
+    project_id = ByteStreamServer.project_id(stream)
 
     if total > @max_batch_bytes do
       raise GRPC.RPCError,
@@ -89,7 +98,7 @@ defmodule Conveyor.Grpc.CasServer do
 
     responses =
       Enum.map(req.digests, fn digest ->
-        case Blobs.read(digest.hash) do
+        case Blobs.read(project_id, digest.hash) do
           {:ok, data} ->
             %RE.BatchReadBlobsResponse.Response{
               digest: digest,

@@ -54,7 +54,12 @@ defmodule ConveyorWeb.UploadControllerTest do
              put_raw(conn, path, "x", [{"x-api-key", revoked_key}]) |> json_response(403)
   end
 
-  test "uploads artifacts and recognises profiles", %{conn: conn, id: id, upload_key: key} do
+  test "uploads artifacts and recognises profiles", %{
+    conn: conn,
+    id: id,
+    upload_key: key,
+    project: project
+  } do
     inv = Invocations.get!(id)
     assert inv.profile_status == "unavailable"
 
@@ -102,7 +107,7 @@ defmodule ConveyorWeb.UploadControllerTest do
       get(build_conn(), ~p"/invocation/#{Ecto.UUID.generate()}/artifact/x")
     end
 
-    :ok = Blobs.delete(Blobs.digest("v2"))
+    :ok = Blobs.delete(project.id, Blobs.digest("v2"))
 
     assert_raise ConveyorWeb.NotFoundError, fn ->
       get(build_conn(), ~p"/invocation/#{id}/artifact/command.profile.gz")
@@ -139,7 +144,7 @@ defmodule ConveyorWeb.UploadControllerTest do
     end
 
     Conveyor.Repo.update_all(Conveyor.Invocations.Invocation, set: [profile_status: "available"])
-    :ok = Blobs.delete(Blobs.digest("{}"))
+    :ok = Blobs.delete(project.id, Blobs.digest("{}"))
 
     assert_raise ConveyorWeb.NotFoundError, fn ->
       get(build_conn(), ~p"/invocation/#{id}/download/profile")

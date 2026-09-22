@@ -44,13 +44,13 @@ defmodule Conveyor.ArtifactsTest do
 
   test "stores inline contents", %{inv: inv} do
     assert {:ok, digest} = Artifacts.fetch(inv, %{"contents" => "inline"})
-    assert {:ok, "inline"} = Blobs.read(digest)
+    assert {:ok, "inline"} = Blobs.read(inv.project_id, digest)
     assert {:ok, digest2} = Artifacts.fetch(inv, %{"contents" => "AP8="})
-    assert {:ok, "AP8="} = Blobs.read(digest2)
+    assert {:ok, "AP8="} = Blobs.read(inv.project_id, digest2)
   end
 
   test "serves blobs already in the store without contacting anyone", %{inv: inv} do
-    {:ok, blob} = Blobs.put("already here")
+    {:ok, blob} = Blobs.put(inv.project_id, "already here")
     uri = "bytestream://nowhere.invalid/blobs/#{blob.digest}/12"
     assert {:ok, digest} = Artifacts.fetch(inv, %{"uri" => uri})
     assert digest == blob.digest
@@ -74,8 +74,8 @@ defmodule Conveyor.ArtifactsTest do
       })
 
     assert {:ok, digest} = Artifacts.fetch(inv, %{"uri" => uri, "name" => "command.profile.gz"})
-    assert {:ok, ^data} = Blobs.read(digest)
-    assert Blobs.get(digest).content_type == "application/gzip"
+    assert {:ok, ^data} = Blobs.read(inv.project_id, digest)
+    assert Blobs.get(inv.project_id, digest).content_type == "application/gzip"
     assert FakeCache.headers()["x-api-key"] == "secret"
 
     # Second fetch is served locally.
@@ -95,7 +95,7 @@ defmodule Conveyor.ArtifactsTest do
     assert {:error, :digest_mismatch} =
              Artifacts.fetch(inv, %{"uri" => "bytestream://#{authority}/#{wrong}"})
 
-    refute Blobs.exists?(Blobs.digest("right bytes"))
+    refute Blobs.exists?(inv.project_id, Blobs.digest("right bytes"))
 
     missing = "blobs/#{Blobs.digest("missing")}/7"
 
@@ -132,11 +132,11 @@ defmodule Conveyor.ArtifactsTest do
   end
 
   test "attaches named artifacts and replaces by name", %{inv: inv} do
-    {:ok, b1} = Blobs.put("v1", ttl_seconds: 10)
-    {:ok, b2} = Blobs.put("v2")
+    {:ok, b1} = Blobs.put(inv.project_id, "v1", ttl_seconds: 10)
+    {:ok, b2} = Blobs.put(inv.project_id, "v2")
     a1 = Artifacts.attach(inv, "notes.txt", b1, "upload")
     assert a1.digest == b1.digest
-    assert Blobs.get(b1.digest).expires_at == nil
+    assert Blobs.get(inv.project_id, b1.digest).expires_at == nil
     a2 = Artifacts.attach(inv.id, "notes.txt", b2, "upload")
     assert a2.digest == b2.digest
     assert [%{name: "notes.txt", digest: digest}] = Artifacts.list(inv)
@@ -160,14 +160,14 @@ defmodule Conveyor.ArtifactsTest do
     end
 
     test "profiles already in the store become available immediately", %{project: project} do
-      {:ok, blob} = Blobs.put("gzipped profile", source: "cas", ttl_seconds: 100)
+      {:ok, blob} = Blobs.put(project.id, "gzipped profile", source: "cas", ttl_seconds: 100)
       uri = "bytestream://anything/blobs/#{blob.digest}/#{blob.size}"
       inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
       Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
       :ok = Artifacts.on_finalized(inv.id)
       assert %{profile_status: "available", profile_blob: digest} = Repo.get!(Invocation, inv.id)
       assert digest == blob.digest
-      assert Blobs.get(digest).expires_at == nil
+      assert Blobs.get(project.id, digest).expires_at == nil
       assert [%{name: "command.profile.gz", source: "cas"}] = Artifacts.list(inv)
       assert_receive {:artifacts_changed, _}
       refute_enqueued(worker: FetchProfile)
@@ -193,7 +193,7 @@ defmodule Conveyor.ArtifactsTest do
 
       assert :ok = perform_job(FetchProfile, %{invocation_id: inv.id})
       assert %{profile_status: "available", profile_blob: digest} = Repo.get!(Invocation, inv.id)
-      assert {:ok, ^data} = Blobs.read(digest)
+      assert {:ok, ^data} = Blobs.read(project.id, digest)
       assert :ok = perform_job(FetchProfile, %{invocation_id: inv.id})
 
       # Missing on the cache: permanent. Unreachable cache: retried.
