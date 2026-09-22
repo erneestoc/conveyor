@@ -114,8 +114,9 @@ defmodule ConveyorWeb.DashboardLive do
 
   # Everything one column of the dashboard shows for one scope.
   defp load_scope(scope) do
+    scope = Conveyor.Metrics.Rollup.ensure!(scope)
     summary = Dashboard.summary(scope)
-    previous = Dashboard.summary(Scope.previous(scope))
+    previous = Dashboard.summary(Conveyor.Metrics.Rollup.ensure!(Scope.previous(scope)))
 
     %{
       summary: summary,

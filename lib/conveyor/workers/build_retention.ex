@@ -28,6 +28,7 @@ defmodule Conveyor.Workers.BuildRetention do
         cutoff = DateTime.add(now, -days, :day)
         deleted = delete_before(project, cutoff, 0)
         if deleted > 0, do: Invocations.rebuild_tag_keys!(project.id)
+        Conveyor.Metrics.Rollup.prune!(project.id, cutoff)
         {project.slug, %{deleted: deleted, cutoff: cutoff}}
       end
 

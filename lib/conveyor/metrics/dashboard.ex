@@ -8,7 +8,7 @@ defmodule Conveyor.Metrics.Dashboard do
 
   alias Conveyor.ExecLog.Spawn
   alias Conveyor.Invocations.{Invocation, Metrics, Target}
-  alias Conveyor.Metrics.Scope
+  alias Conveyor.Metrics.{Rollup, Scope}
   alias Conveyor.Repo
 
   @type summary :: %{
@@ -29,6 +29,32 @@ defmodule Conveyor.Metrics.Dashboard do
   @doc "Headline numbers for a scope."
   @spec summary(Scope.t()) :: summary()
   def summary(scope) do
+    if Rollup.applicable?(scope), do: rolled_summary(scope), else: exact_summary(scope)
+  end
+
+  # Stored hours plus exact edges (Conveyor.Metrics.Rollup): the same numbers, a few rows.
+  defp rolled_summary(scope) do
+    r = scope |> Rollup.rows() |> Rollup.combine()
+    verdicts = r.succeeded + r.failed
+
+    %{
+      builds: r.builds,
+      succeeded: r.succeeded,
+      failed: r.failed,
+      aborted: r.aborted,
+      running: r.running,
+      other: r.other,
+      success_rate: if(verdicts > 0, do: r.succeeded / verdicts, else: nil),
+      p50: Rollup.quantile(r, 0.5),
+      p90: Rollup.quantile(r, 0.9),
+      p99: Rollup.quantile(r, 0.99),
+      cache_hit_rate: rate(r.cache_hits, r.executed),
+      users: length(r.users)
+    }
+  end
+
+  @doc false
+  def exact_summary(scope) do
     counts =
       scope
       |> Scope.base()
@@ -103,6 +129,46 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   @spec series(Scope.t()) :: [map()]
   def series(scope) do
+    if Rollup.applicable?(scope), do: rolled_series(scope), else: exact_series(scope)
+  end
+
+  defp rolled_series(scope) do
+    bucket = Scope.bucket(scope)
+    by_bucket = scope |> Rollup.rows() |> Enum.group_by(&Rollup.bucket(&1, bucket))
+
+    for b <- buckets(scope.from, scope.to, bucket) do
+      case Map.get(by_bucket, b) do
+        nil ->
+          %{
+            bucket: b,
+            succeeded: 0,
+            failed: 0,
+            other: 0,
+            p50: nil,
+            p90: nil,
+            p99: nil,
+            cache_hit_rate: nil
+          }
+
+        rows ->
+          r = Rollup.combine(rows)
+
+          %{
+            bucket: b,
+            succeeded: r.succeeded,
+            failed: r.failed,
+            other: r.builds - r.succeeded - r.failed,
+            p50: Rollup.quantile(r, 0.5),
+            p90: Rollup.quantile(r, 0.9),
+            p99: Rollup.quantile(r, 0.99),
+            cache_hit_rate: rate(r.cache_hits_all, r.executed_all)
+          }
+      end
+    end
+  end
+
+  @doc false
+  def exact_series(scope) do
     bucket = Scope.bucket(scope)
 
     rows =
@@ -173,6 +239,21 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   @spec phases_over_time(Scope.t()) :: [map()]
   def phases_over_time(scope) do
+    if Rollup.applicable?(scope), do: rolled_phases(scope), else: exact_phases_over_time(scope)
+  end
+
+  defp rolled_phases(scope) do
+    bucket = Scope.bucket(scope)
+    by_bucket = scope |> Rollup.rows() |> Enum.group_by(&Rollup.bucket(&1, bucket))
+
+    for b <- buckets(scope.from, scope.to, bucket) do
+      phases = by_bucket |> Map.get(b, []) |> Rollup.combine() |> Map.fetch!(:phases)
+      Map.merge(%{bucket: b}, Map.new(phases, fn {name, ms} -> {name, round(ms)} end))
+    end
+  end
+
+  @doc false
+  def exact_phases_over_time(scope) do
     bucket = Scope.bucket(scope)
 
     rows =
@@ -366,6 +447,30 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   @spec queue_trend(Scope.t()) :: [%{bucket: DateTime.t(), queued: integer() | nil}]
   def queue_trend(scope) do
+    if Rollup.applicable?(scope), do: rolled_queue(scope), else: exact_queue_trend(scope)
+  end
+
+  defp rolled_queue(scope) do
+    bucket = Scope.bucket(scope)
+    by_bucket = scope |> Rollup.rows() |> Enum.group_by(&Rollup.bucket(&1, bucket))
+
+    for b <- buckets(scope.from, scope.to, bucket) do
+      queued =
+        case Map.get(by_bucket, b) do
+          nil ->
+            nil
+
+          rows ->
+            r = Rollup.combine(rows)
+            if r.profiled > 0, do: round((r.queued_ms || 0) / r.profiled)
+        end
+
+      %{bucket: b, queued: queued}
+    end
+  end
+
+  @doc false
+  def exact_queue_trend(scope) do
     bucket = Scope.bucket(scope)
 
     rows =
@@ -393,6 +498,33 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   @spec actions_by_mnemonic(Scope.t(), pos_integer()) :: [map()]
   def actions_by_mnemonic(scope, limit \\ 10) do
+    if Rollup.applicable?(scope),
+      do: rolled_mnemonics(scope, limit),
+      else: exact_actions_by_mnemonic(scope, limit)
+  end
+
+  defp rolled_mnemonics(scope, limit) do
+    r = scope |> Rollup.rows() |> Rollup.combine()
+
+    r.mnemonic_counts
+    |> Enum.map(fn {name, [created, executed]} ->
+      %{
+        mnemonic: name,
+        created: round(created),
+        executed: round(executed),
+        time_ms:
+          case Map.get(r.mnemonic_ms, name) do
+            nil -> nil
+            ms -> round(ms)
+          end
+      }
+    end)
+    |> Enum.sort_by(&{-&1.executed, &1.mnemonic})
+    |> Enum.take(limit)
+  end
+
+  @doc false
+  def exact_actions_by_mnemonic(scope, limit) do
     base =
       scope |> Scope.finished() |> join(:inner, [i], m in Metrics, on: m.invocation_id == i.id)
 

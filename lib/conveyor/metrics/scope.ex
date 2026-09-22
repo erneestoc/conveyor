@@ -18,7 +18,14 @@ defmodule Conveyor.Metrics.Scope do
           name: String.t() | nil
         }
 
-  defstruct project_id: nil, project_ids: :all, from: nil, to: nil, query: [], name: nil
+  defstruct project_id: nil,
+            project_ids: :all,
+            from: nil,
+            to: nil,
+            query: [],
+            name: nil,
+            # set by Conveyor.Metrics.Rollup.ensure!/1 once a page has verified the window
+            rolled: false
 
   @ranges %{"24h" => 24 * 3600, "7d" => 7 * 86_400, "30d" => 30 * 86_400, "90d" => 90 * 86_400}
 

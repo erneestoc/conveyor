@@ -43,9 +43,14 @@ config :conveyor, Oban,
      crontab: [
        {"0 * * * *", Conveyor.Workers.PartitionMaintenance},
        {"30 3 * * *", Conveyor.Workers.BlobMaintenance},
-       {"0 2 * * *", Conveyor.Workers.BuildRetention}
+       {"0 2 * * *", Conveyor.Workers.BuildRetention},
+       {"*/5 * * * *", Conveyor.Workers.Rollup},
+       {"20 1 * * *", Conveyor.Workers.Rollup, args: %{days: 90}}
      ]}
   ]
+
+# Dashboards read hourly rollups for scopes without a free-form query (PLAN §24 item 6)
+config :conveyor, Conveyor.Metrics.Rollup, enabled: true
 
 # BES gRPC listener (Bazel's --bes_backend target)
 config :conveyor, Conveyor.Grpc,

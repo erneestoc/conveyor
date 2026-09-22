@@ -18,7 +18,11 @@ defmodule ConveyorWeb.ProjectsLive do
 
     cards =
       for project <- projects do
-        summary = Dashboard.summary(Conveyor.Metrics.Scope.new("7d", project.id))
+        summary =
+          Dashboard.summary(
+            Conveyor.Metrics.Rollup.ensure!(Conveyor.Metrics.Scope.new("7d", project.id))
+          )
+
         [last | _] = Invocations.list(project_id: project.id, limit: 1) ++ [nil]
 
         %{

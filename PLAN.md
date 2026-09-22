@@ -771,8 +771,16 @@ Order: 0, 1, 2, 6, 3, 5, 4, 7 — the first three are Postgres, the visible limi
 - **2 narrow hot row — deferred with evidence:** the fenced update is ≈ 10 % of Postgres
   execution time and Postgres is not the bottleneck on native hardware; revisit only if a
   networked database shows it.
-- **6 rollups — not started.** Baseline on 100k invocations (Docker Postgres): 17 panels in
-  ≈ 2 s per dashboard load, `actions_by_mnemonic` 0.8–1.0 s, `phases_over_time` 0.3 s.
+- **6 rollups — done for the five heaviest panels.** `invocation_rollups` (one row per
+  project and hour: counts by status, cache/action sums, users, a t-digest of durations
+  (`Conveyor.Metrics.Digest`, exact for unit weights), per-phase and per-mnemonic sums),
+  `Conveyor.Metrics.Rollup` (`compute/3` shares the exact SQL, the job and the read path
+  reuse it), `Conveyor.Workers.Rollup` (every 5 min over the last two days, nightly over
+  90 days), reads heal missing or stale hours themselves and the LiveViews verify a window
+  once (`ensure!/1`); segments and free-form queries stay exact; `rollup_test.exs` asserts
+  rolled == exact for every scope shape on the golden data. 100k builds in range: 2.2 s →
+  0.5 s per dashboard load. Not rolled: target regressions, by user, slowest builds,
+  failing targets, heatmap, execution-log reports.
 - **7 connection budget — deferred:** Postgrex does not pipeline; pool per shard has no
   measured motivation while Postgres sits under 1 vCPU.
 

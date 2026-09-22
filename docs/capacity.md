@@ -77,6 +77,7 @@ Flat-out profile, 200 streams × 10,000 builds (438,750 events), medians of thre
 | 1 fewer statements | 17,719 | 3,135 | 19–27k | 865 | 120 / 425 | 115k (14.0 per flush, 1,547 xact/s) | −24 % round trips, −42 % transactions, −3.5 % WAL; Postgres CPU within run noise (0.66–0.9 vCPU), planning time was the first version's hidden cost (unnamed statements planned per call, 4.2 s of 26 s) |
 | 5 hibernate quiet workers | 17,670 | 3,190 | — | 866 | 107 / 400 | 115k | peak RSS 3.2 GB → 1.85 GB with 10,000 lingering workers; CPU unchanged |
 | 4a scrubber prefilter | 20,040 | 5,843 | 27,964 | 810 | 49 / 217 | 105k (14.2 per flush) | node 5.5 → 3.4 vCPU: `eprof` of the absorb path showed 70 % in five regex passes over every string; a byte search now skips strings no pattern can match (148 → 36 µs per event in isolation); throughput is now generator-bound |
+| 6 dashboards from rollups | — | — | — | — | — | — | read side, see the table below: 2.2 s → 0.5 s per dashboard load with 100k builds in range |
 | 3 BEP zstd dictionary | 19,726 | 5,806 | 23,589 | 731 | 47 / 213 | 107k | storage per build 33.1 → 29.7 KB (event segments 135 → 84 MB for the same 10k builds), WAL −10 %; CPU unchanged. Dictionary `priv/zstd/bep-1.dict` trained on the fixtures (`bench/train_dict.sh`); held out, a 15-event segment compresses 8.5× instead of 4.1×. Postgres exec time spreads 45–80k events per exec-second between runs depending on whether a checkpoint lands mid-run |
 
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
@@ -85,6 +86,14 @@ Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 |---|---|---|---|---|---|---|
 | 0 baseline | 990 | 69 / 284 | 141.6k (8.8 per flush) | 616 KB | 0.51 | 1,516 workers hold 378 MB of 472 MB process memory |
 | 1 fewer statements | 990 | 68 / 275 | 96.1k (6.2 per flush) | 610 KB | 0.50 | −32 % round trips; acks unchanged |
+
+Read side (item 6), dev database with 100k builds in range, Docker Postgres, one dashboard
+load = 17 panels:
+
+| Step | 7d | 30d | 90d | notes |
+|---|---|---|---|---|
+| exact panels | 1.90 s | 2.11 s | 2.20 s | `actions_by_mnemonic` 0.8–1.0 s, `phases_over_time` 0.3 s, `queue_trend` 0.15 s (jsonb aggregation over every build) |
+| 6 hourly rollups | 0.54 s | 0.53 s | 0.51 s | summary, series, phases, queue, mnemonics read `invocation_rollups` (674 project-hours, 704 kB; backfill 4.3 s); a window check of 65–80 ms per page load repairs stale or missing hours, edges are computed exactly; the rest is the still-exact panels (`target_regressions` 0.1 s, `by_user`, `slowest_builds`) |
 | 5 hibernate quiet workers | 990 | 68 / 255 | 96.1k | 443 KB | 0.50 | workers 179 MB (was 378); flat-out peak RSS 1.85 GB with 10,000 lingering workers (was 3.2 GB), CPU unchanged |
 
 ## Starting points
