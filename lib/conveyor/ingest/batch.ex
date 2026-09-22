@@ -214,7 +214,7 @@ defmodule Conveyor.Ingest.Batch do
       count: length(events),
       kinds: events |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
       byte_size: b.event_bytes,
-      payload: Invocations.compress(frames)
+      payload: Invocations.compress_bep(frames)
     }
   end
 

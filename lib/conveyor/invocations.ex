@@ -294,8 +294,44 @@ defmodule Conveyor.Invocations do
 
   @doc false
   def compress(iodata), do: iodata |> :zstd.compress() |> IO.iodata_to_binary()
+
+  # Raw BEP frames repeat the same field names and labels in every event; a dictionary
+  # trained on them (priv/zstd/bep-<id>.dict, bench/train_dict.sh) roughly doubles the
+  # ratio of a segment-sized frame (PLAN §24 item 3). The frame carries the dictionary id,
+  # so `decompress/1` picks the right one and frames written without any still decode.
+  @bep_dict_id 1
+
   @doc false
-  def decompress(binary), do: binary |> :zstd.decompress() |> IO.iodata_to_binary()
+  def compress_bep(iodata) do
+    iodata
+    |> :zstd.compress(%{dictionary: zstd_dict(:compress, @bep_dict_id)})
+    |> IO.iodata_to_binary()
+  end
+
+  @doc false
+  def decompress(binary) do
+    case :zstd.get_frame_header(binary) do
+      {:ok, %{dictID: 0}} -> :zstd.decompress(binary)
+      {:ok, %{dictID: id}} -> :zstd.decompress(binary, %{dictionary: zstd_dict(:decompress, id)})
+    end
+    |> IO.iodata_to_binary()
+  end
+
+  # Dictionaries are loaded once per node.
+  defp zstd_dict(mode, id) do
+    key = {__MODULE__, :zstd_dict, mode, id}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        bytes = File.read!(Path.join([:code.priv_dir(:conveyor), "zstd", "bep-#{id}.dict"]))
+        {:ok, dict} = :zstd.dict(mode, bytes)
+        :persistent_term.put(key, dict)
+        dict
+
+      dict ->
+        dict
+    end
+  end
 
   defp id(%Invocation{id: id}), do: id
   defp id(id) when is_binary(id), do: id

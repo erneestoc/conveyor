@@ -77,6 +77,7 @@ Flat-out profile, 200 streams × 10,000 builds (438,750 events), medians of thre
 | 1 fewer statements | 17,719 | 3,135 | 19–27k | 865 | 120 / 425 | 115k (14.0 per flush, 1,547 xact/s) | −24 % round trips, −42 % transactions, −3.5 % WAL; Postgres CPU within run noise (0.66–0.9 vCPU), planning time was the first version's hidden cost (unnamed statements planned per call, 4.2 s of 26 s) |
 | 5 hibernate quiet workers | 17,670 | 3,190 | — | 866 | 107 / 400 | 115k | peak RSS 3.2 GB → 1.85 GB with 10,000 lingering workers; CPU unchanged |
 | 4a scrubber prefilter | 20,040 | 5,843 | 27,964 | 810 | 49 / 217 | 105k (14.2 per flush) | node 5.5 → 3.4 vCPU: `eprof` of the absorb path showed 70 % in five regex passes over every string; a byte search now skips strings no pattern can match (148 → 36 µs per event in isolation); throughput is now generator-bound |
+| 3 BEP zstd dictionary | 19,726 | 5,806 | 23,589 | 731 | 47 / 213 | 107k | storage per build 33.1 → 29.7 KB (event segments 135 → 84 MB for the same 10k builds), WAL −10 %; CPU unchanged. Dictionary `priv/zstd/bep-1.dict` trained on the fixtures (`bench/train_dict.sh`); held out, a 15-event segment compresses 8.5× instead of 4.1×. Postgres exec time spreads 45–80k events per exec-second between runs depending on whether a checkpoint lands mid-run |
 
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 
