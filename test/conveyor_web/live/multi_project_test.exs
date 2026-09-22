@@ -25,7 +25,7 @@ defmodule ConveyorWeb.MultiProjectTest do
     assert has_element?(view, "#inv-#{ok_id}")
     refute has_element?(view, "#inv-#{failed_id}")
 
-    {:ok, view, _} = live(build_conn(), ~p"/")
+    {:ok, view, _} = live(build_conn(), ~p"/builds")
     assert has_element?(view, "#inv-#{ok_id}") and has_element?(view, "#inv-#{failed_id}")
 
     {:ok, _view, html} = live(build_conn(), ~p"/p/mobile/dashboard")

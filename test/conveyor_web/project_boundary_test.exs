@@ -104,7 +104,16 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
 
   # Routes without a project-bound parameter are out of scope (and listed so the test
   # documents its coverage); everything else must be walked.
-  @unbound ["/", "/dashboard", "/tests", "/settings", "/metrics", "/health/live", "/health/ready"]
+  @unbound [
+    "/",
+    "/builds",
+    "/dashboard",
+    "/tests",
+    "/settings",
+    "/metrics",
+    "/health/live",
+    "/health/ready"
+  ]
 
   test "every project-bound route is 404 across the boundary and 200 inside it", ctx do
     %{conn: conn, a: a, b: b, ids: ids, keys: keys} = ctx
@@ -162,7 +171,7 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     assert a.id in visible and b.id not in visible
 
     # The all-builds page shows only A's build and ignores B's live digests.
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
     assert has_element?(view, "#inv-#{ids["alpha"]}")
     refute has_element?(view, "#inv-#{ids["beta"]}")
     send(view.pid, {:invocation_updated, Invocations.get(ids["beta"]) |> Map.from_struct()})

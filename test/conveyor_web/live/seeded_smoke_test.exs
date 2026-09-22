@@ -15,7 +15,7 @@ defmodule ConveyorWeb.SeededSmokeTest do
       refute html =~ "query-error"
     end
 
-    {:ok, view, html} = live(build_conn(), ~p"/")
+    {:ok, view, html} = live(build_conn(), ~p"/builds")
     facet_ids = Regex.scan(~r/id="(facet-\d+)"/, html) |> Enum.map(&List.last/1) |> Enum.uniq()
     assert length(facet_ids) > 5
 

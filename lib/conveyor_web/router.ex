@@ -32,7 +32,8 @@ defmodule ConveyorWeb.Router do
     pipe_through :browser
 
     live_session :default, on_mount: [{ConveyorWeb.Auth, :default}] do
-      live "/", BuildsLive, :all
+      live "/", ProjectsLive, :index
+      live "/builds", BuildsLive, :all
       live "/dashboard", DashboardLive, :all
       live "/tests", TestsLive, :all
       live "/p/:slug", BuildsLive, :project

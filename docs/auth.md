@@ -24,7 +24,10 @@ application with the callback `https://conveyor.example.com/oidc/callback` and s
 | `ADMIN_EMAILS` | Comma-separated emails that get Settings access (no groups needed) |
 | `ALLOWED_EMAIL_DOMAINS` | Comma-separated domains allowed to sign in (empty = any account the provider returns) |
 
-Allowed groups per project are managed in Settings, and so are **admin groups**: members
+The root page lists the projects the viewer may see (with their last seven days and links
+to builds, dashboard, tests and, for their admins, settings); the cross-project builds list
+is at `/builds`. Allowed groups per project are managed in Settings, and so are **admin
+groups**: members
 administer that project at `/p/<slug>/settings` (API keys, retention and blob prefix,
 remote cache endpoints, dashboard segments, the project's audit trail) without seeing the
 global Settings page or other projects. Who may see or administer a project stays with the

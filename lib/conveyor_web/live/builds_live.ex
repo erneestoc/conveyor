@@ -228,7 +228,7 @@ defmodule ConveyorWeb.BuildsLive do
   end
 
   defp list_path(project, status, q) do
-    base = if project, do: ~p"/p/#{project.slug}", else: ~p"/"
+    base = if project, do: ~p"/p/#{project.slug}", else: ~p"/builds"
 
     params =
       []

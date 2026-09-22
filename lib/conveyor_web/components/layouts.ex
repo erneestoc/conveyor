@@ -60,8 +60,9 @@ defmodule ConveyorWeb.Layouts do
             <.nav_link
               navigate={builds_path(@project)}
               active={
-                String.starts_with?(@current_path, "/p/") or @current_path == "/" or
-                  String.starts_with?(@current_path, "/invocation/")
+                (String.starts_with?(@current_path, "/p/") and
+                   not String.ends_with?(@current_path, ["/dashboard", "/tests", "/settings"])) or
+                  @current_path == "/builds" or String.starts_with?(@current_path, "/invocation/")
               }
             >
               Builds
@@ -201,7 +202,7 @@ defmodule ConveyorWeb.Layouts do
     """
   end
 
-  defp builds_path(nil), do: ~p"/"
+  defp builds_path(nil), do: ~p"/builds"
   defp builds_path(project), do: ~p"/p/#{project.slug}"
 
   defp sub_path(nil, page), do: "/#{page}"

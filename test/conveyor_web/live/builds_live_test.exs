@@ -16,13 +16,13 @@ defmodule ConveyorWeb.BuildsLiveTest do
     ok_id: ok_id,
     failed_id: failed_id
   } do
-    {:ok, view, _html} = live(conn, ~p"/")
+    {:ok, view, _html} = live(conn, ~p"/builds")
     assert has_element?(view, "#inv-#{ok_id}")
     assert has_element?(view, "#inv-#{failed_id}")
     assert has_element?(view, "#inv-#{failed_id} [data-status=failed]")
 
     view |> element("#filter-failed") |> render_click()
-    assert_patch(view, ~p"/?status=failed")
+    assert_patch(view, ~p"/builds?status=failed")
     refute has_element?(view, "#inv-#{ok_id}")
     assert has_element?(view, "#inv-#{failed_id}")
 
@@ -50,7 +50,7 @@ defmodule ConveyorWeb.BuildsLiveTest do
   end
 
   test "inserts and updates rows from ingest digests", %{conn: conn, ctx: ctx, ok_id: ok_id} do
-    {:ok, view, _} = live(conn, ~p"/?status=running")
+    {:ok, view, _} = live(conn, ~p"/builds?status=running")
     refute has_element?(view, "#inv-#{ok_id}")
 
     new_id = Conveyor.Bep.Replay.uuid()
@@ -88,7 +88,7 @@ defmodule ConveyorWeb.BuildsLiveTest do
     refute has_element?(view, "[data-status=failed]")
 
     # Same row updated in place under the matching filter.
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
     Phoenix.PubSub.broadcast(Conveyor.PubSub, Ingest.all_topic(), {:invocation_updated, summary})
 
     Phoenix.PubSub.broadcast(
@@ -112,7 +112,7 @@ defmodule ConveyorWeb.BuildsLiveTest do
       })
     end
 
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
     assert has_element?(view, "#load-more")
     view |> element("#load-more") |> render_click()
     refute has_element?(view, "#load-more")
@@ -142,29 +142,29 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
     ok_id: ok_id,
     failed_id: failed_id
   } do
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
     assert has_element?(view, "#search-form")
     assert has_element?(view, "#facets")
 
     view |> form("#search-form", q: "command:test") |> render_submit()
-    assert_patch(view, ~p"/?q=command%3Atest")
+    assert_patch(view, ~p"/builds?q=command%3Atest")
     assert has_element?(view, "#inv-#{ok_id}")
     refute has_element?(view, "#inv-#{failed_id}")
 
     view |> form("#search-form", q: "command:") |> render_submit()
     assert has_element?(view, "#query-error")
 
-    {:ok, view, _} = live(conn, ~p"/?q=scenario%3Abuild_failure")
+    {:ok, view, _} = live(conn, ~p"/builds?q=scenario%3Abuild_failure")
     assert has_element?(view, "#inv-#{failed_id}")
     refute has_element?(view, "#inv-#{ok_id}")
 
     facet_id = "facet-#{:erlang.phash2({"scenario", "clean_build_and_test"})}"
     view |> element("##{facet_id}") |> render_click()
-    assert_patch(view, ~p"/?q=scenario%3Abuild_failure+scenario%3Aclean_build_and_test")
+    assert_patch(view, ~p"/builds?q=scenario%3Abuild_failure+scenario%3Aclean_build_and_test")
     refute has_element?(view, "#inv-#{ok_id}")
 
     view |> element("##{facet_id}") |> render_click()
-    assert_patch(view, ~p"/?q=scenario%3Abuild_failure")
+    assert_patch(view, ~p"/builds?q=scenario%3Abuild_failure")
 
     view |> element("#toggle-facets") |> render_click()
     refute has_element?(view, "#facets")
@@ -203,7 +203,7 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
     )
 
     Conveyor.Invocations.rebuild_tag_keys!(Conveyor.Projects.ensure_default_project!().id)
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
 
     # Empty values are never offered as facets (they would match nothing useful).
     refute has_element?(view, "#facet-#{:erlang.phash2({"empty", ""})}")
@@ -215,7 +215,7 @@ defmodule ConveyorWeb.BuildsLiveSearchTest do
       refute has_element?(view, "#query-error"), "#{key}=#{inspect(value)} raised a query error"
       assert has_element?(view, "#inv-#{ok_id}")
       view |> element("##{id}") |> render_click()
-      assert_patch(view, ~p"/")
+      assert_patch(view, ~p"/builds")
     end
   end
 end

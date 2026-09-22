@@ -97,7 +97,7 @@ defmodule ConveyorWeb.AuthControllerTest do
     assert redirected_to(conn) == "/p/default/dashboard"
     assert get_session(conn, :user_id)
 
-    {:ok, view, _} = live(conn, ~p"/")
+    {:ok, view, _} = live(conn, ~p"/builds")
     assert has_element?(view, "#nav-user", "dev@example.com")
     refute has_element?(view, "#nav-settings")
     assert {:error, {:redirect, %{to: "/"}}} = live(conn, ~p"/settings")
