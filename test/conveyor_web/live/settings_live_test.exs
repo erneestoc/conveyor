@@ -185,6 +185,21 @@ defmodule ConveyorWeb.SettingsLiveTest do
     assert [%{action: "project.storage"}] = Conveyor.Audit.recent(1)
   end
 
+  test "global admins set who administers a project", %{conn: conn, project: project} do
+    {:ok, view, _} = live(conn, ~p"/settings")
+
+    view
+    |> form("#admin-groups-form-#{project.id}", %{"groups" => "leads, ops"})
+    |> render_submit()
+
+    assert has_element?(view, "#flash-info", "Project admins updated")
+    assert Projects.admin_groups(Projects.get_project!(project.id)) == ["leads", "ops"]
+    {:ok, view, _} = live(conn, ~p"/p/#{project.slug}")
+    assert has_element?(view, "#main-nav a", "Project settings")
+    {:ok, view, _} = live(conn, ~p"/p/#{project.slug}/settings")
+    assert has_element?(view, "#project-settings-title", project.name)
+  end
+
   test "settings actions are audited", %{conn: conn, project: project} do
     {:ok, view, _} = live(conn, ~p"/settings")
     assert has_element?(view, "#audit-log", "Nothing yet")

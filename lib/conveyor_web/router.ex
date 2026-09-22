@@ -38,6 +38,7 @@ defmodule ConveyorWeb.Router do
       live "/p/:slug", BuildsLive, :project
       live "/p/:slug/dashboard", DashboardLive, :project
       live "/p/:slug/tests", TestsLive, :project
+      live "/p/:slug/settings", ProjectLive, :settings
       live "/invocation/:id", InvocationLive, :overview
       live "/invocation/:id/:tab", InvocationLive, :tab
     end

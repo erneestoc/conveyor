@@ -74,6 +74,11 @@ defmodule ConveyorWeb.Layouts do
               navigate={sub_path(@project, "tests")}
               active={String.ends_with?(@current_path, "/tests")}
             >Tests</.nav_link>
+            <.nav_link
+              :if={@project && project_admin?(@current_scope, @project)}
+              navigate={sub_path(@project, "settings")}
+              active={String.ends_with?(@current_path, "/settings")}
+            >Project settings</.nav_link>
           </nav>
 
           <div class="ml-auto flex items-center gap-3">
@@ -135,6 +140,11 @@ defmodule ConveyorWeb.Layouts do
 
   defp admin?(%{admin?: admin}), do: admin
   defp admin?(_), do: false
+
+  defp project_admin?(%Conveyor.Accounts.Scope{} = scope, project),
+    do: Conveyor.Accounts.Scope.can_admin_project?(scope, project)
+
+  defp project_admin?(_, _), do: false
 
   attr :navigate, :string, required: true
   attr :active, :boolean, default: false

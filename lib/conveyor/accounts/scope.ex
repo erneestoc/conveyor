@@ -49,13 +49,32 @@ defmodule Conveyor.Accounts.Scope do
   @spec can_view_project?(t(), map()) :: boolean()
   def can_view_project?(%__MODULE__{admin?: true}, _project), do: true
 
-  def can_view_project?(%__MODULE__{user: user}, %{settings: settings}) do
+  def can_view_project?(%__MODULE__{user: user} = scope, %{settings: settings} = project) do
     case Map.get(settings || %{}, "allowed_groups", []) do
-      [] -> true
-      groups when user != nil -> Enum.any?(groups, &(&1 in user.groups))
-      _ -> false
+      [] ->
+        true
+
+      groups when user != nil ->
+        Enum.any?(groups, &(&1 in user.groups)) or can_admin_project?(scope, project)
+
+      _ ->
+        false
     end
   end
+
+  @doc """
+  True when the scope may manage a project's keys, storage, cache endpoints and segments:
+  global admins, and signed-in users in one of the project's admin groups (set by a global
+  admin in Settings). Project admins cannot change who may see or manage the project.
+  """
+  @spec can_admin_project?(t(), map()) :: boolean()
+  def can_admin_project?(%__MODULE__{admin?: true}, _project), do: true
+
+  def can_admin_project?(%__MODULE__{user: %User{groups: groups}}, %{settings: settings}) do
+    Enum.any?(Map.get(settings || %{}, "admin_groups", []), &(&1 in groups))
+  end
+
+  def can_admin_project?(%__MODULE__{}, _project), do: false
 
   @doc "Filters projects down to those the scope may see."
   @spec visible_projects(t(), [map()]) :: [map()]

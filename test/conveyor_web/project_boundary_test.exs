@@ -36,6 +36,7 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
 
     {:ok, a} = Projects.create_project(%{slug: "alpha", name: "Alpha"})
     {:ok, a} = Projects.put_allowed_groups(a, ["team-a"])
+    {:ok, a} = Projects.put_admin_groups(a, ["team-a"])
     {:ok, b} = Projects.create_project(%{slug: "beta", name: "Beta"})
     {:ok, b} = Projects.put_allowed_groups(b, ["team-b"])
 

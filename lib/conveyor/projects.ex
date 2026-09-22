@@ -40,6 +40,17 @@ defmodule Conveyor.Projects do
   def allowed_groups(%Project{settings: settings}),
     do: Map.get(settings || %{}, "allowed_groups", [])
 
+  @doc "Identity-provider groups whose members administer the project (keys, storage, endpoints, segments)."
+  @spec put_admin_groups(Project.t(), [String.t()]) ::
+          {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
+  def put_admin_groups(%Project{} = project, groups) do
+    groups = groups |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == "")) |> Enum.uniq()
+    update_project(project, %{settings: Map.put(project.settings, "admin_groups", groups)})
+  end
+
+  @spec admin_groups(Project.t()) :: [String.t()]
+  def admin_groups(%Project{settings: settings}), do: Map.get(settings || %{}, "admin_groups", [])
+
   @spec get_project_by_slug(String.t()) :: Project.t() | nil
   def get_project_by_slug(slug), do: Repo.get_by(Project, slug: slug)
 
