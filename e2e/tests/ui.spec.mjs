@@ -4,7 +4,7 @@ import {test, expect} from "@playwright/test"
 // through the UI itself so ids never need to be known in advance.
 
 test("builds list: search, facets and live connection", async ({page}) => {
-  await page.goto("/")
+  await page.goto("/builds")
   await expect(page.locator("#search-form")).toBeVisible()
   await expect(page.locator("[data-phx-main].phx-connected")).toBeVisible({timeout: 15_000})
   const rows = page.locator("[id^=inv-]")
@@ -24,7 +24,7 @@ test("builds list: search, facets and live connection", async ({page}) => {
 
 test("timeline: profile renders with flame rows, breakdown and keyboard zoom", async ({page}) => {
   // Not every build has a profile; walk the newest CI builds until one does.
-  await page.goto("/?q=ci%3Atrue")
+  await page.goto("/builds?q=ci%3Atrue")
   const hrefs = await page.locator("[id^=inv-] a[href^='/invocation/']").evaluateAll(as => [...new Set(as.map(a => a.getAttribute("href")))])
   let href = null
   for (const h of hrefs.slice(0, 12)) {
@@ -53,11 +53,17 @@ test("timeline: profile renders with flame rows, breakdown and keyboard zoom", a
 })
 
 test("log viewer: lines render, filter works, follow toggles", async ({page}) => {
-  await page.goto("/")
-  const href = await page.locator("[id^=inv-] a[href^='/invocation/']").first().getAttribute("href")
-  await page.goto(`${href}/log`)
+  // Finished builds carry output; walk the newest ones until one renders lines.
+  await page.goto("/builds?q=status%3Asucceeded")
+  const hrefs = await page.locator("[id^=inv-] a[href^='/invocation/']").evaluateAll(as => [...new Set(as.map(a => a.getAttribute("href")))])
   const viewer = page.locator("#log-viewer")
-  await expect(viewer.locator("[data-log-status]")).toContainText("lines", {timeout: 20_000})
+  let found = false
+  for (const href of hrefs.slice(0, 8)) {
+    await page.goto(`${href}/log`)
+    await expect(viewer.locator("[data-log-status]")).toContainText("lines", {timeout: 20_000})
+    if (await viewer.locator("[data-line]").count() > 0) { found = true; break }
+  }
+  expect(found, "a seeded build with log lines").toBe(true)
   await expect(viewer.locator("[data-line]").first()).toBeVisible()
   await viewer.locator("[data-log-search]").fill("INFO")
   await expect(viewer.locator("[data-log-status]")).toContainText("match", {timeout: 5_000})
