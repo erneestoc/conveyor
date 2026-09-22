@@ -7,6 +7,12 @@ defmodule Conveyor.Workers.ParseExecLog do
 
   alias Conveyor.{Artifacts, Blobs, ExecLog, Invocations}
 
+  # Shorter than the Lifeline rescue window (15 min), so a parse that runs away fails with
+  # an error and a retry instead of being "rescued" while still executing (which runs it
+  # twice and burns its attempts: the trial's stalled jobs).
+  @impl Oban.Worker
+  def timeout(_job), do: :timer.minutes(10)
+
   @impl Oban.Worker
   def perform(%Oban.Job{args: %{"invocation_id" => id}}) do
     with %{} = inv <- Invocations.get(id) || {:cancel, :no_invocation},

@@ -93,6 +93,63 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     assert :ok = Verify.check(id, n)
   end
 
+  test "lifecycle notifications on another node touch the row and never start a worker",
+       %{ctx: ctx_a} do
+    start_supervised!(
+      {Ingest.Supervisor,
+       name: Conveyor.Ingest.SupervisorB,
+       registry: Conveyor.Ingest.RegistryB,
+       worker_supervisor: Conveyor.Ingest.WorkerSupervisorB}
+    )
+
+    ctx_b = %{
+      ctx_a
+      | registry: Conveyor.Ingest.RegistryB,
+        worker_supervisor: Conveyor.Ingest.WorkerSupervisorB
+    }
+
+    id = Replay.uuid()
+    events = Fixture.read!(fixture("clean_build_and_test"))
+    n = length(events)
+    push(ctx_a, id, events, 1..5)
+
+    # Bazel's lifecycle connection lands on node B: the row is touched, no worker starts
+    # there (a stray worker would only fence A's commits; the trial left builds
+    # `in_progress` that way).
+    started =
+      {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
+
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
+    assert Registry.lookup(Conveyor.Ingest.RegistryB, id) == []
+    assert %{last_event_seq: 5} = reload(id)
+
+    # A build that has not started streaming anywhere is visible at once, without a worker.
+    fresh = Replay.uuid()
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(fresh), 1, started))
+    assert Registry.lookup(Conveyor.Ingest.RegistryB, fresh) == []
+    assert %{status: "in_progress", last_event_seq: 0} = reload(fresh)
+
+    # The stream stays on A and finishes there.
+    push(ctx_a, id, events, 6..n)
+
+    marker =
+      {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+
+    assert :ok = Ingest.push_sync(ctx_a, Replay.ordered_event(stream_id(id), n + 1, marker))
+
+    # The finish notification reaches B, which has no worker: it is recorded directly.
+    finished =
+      {:invocation_attempt_finished,
+       %V1.BuildEvent.InvocationAttemptFinished{
+         invocation_status: %V1.BuildStatus{result: :COMMAND_SUCCEEDED}
+       }}
+
+    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 2, finished))
+    assert :ok = await_exit(Conveyor.Ingest.Registry, id)
+    assert %{status: "succeeded", stream_finished: true, lifecycle_finished: true} = reload(id)
+    assert :ok = Verify.check(id, n)
+  end
+
   test "a lifecycle finish handled by a stray worker on another node is recorded, not fenced",
        %{ctx: ctx_a} do
     start_supervised!(
@@ -113,14 +170,14 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     n = length(events)
     push(ctx_a, id, events, 1..5)
 
-    # Bazel's lifecycle connection lands on node B, which starts a worker of its own.
+    # Defence in depth: should a worker exist on B anyway (started explicitly here), the
+    # finish it fences must still be accepted, or Bazel aborts the whole upload.
+    assert {:ok, pid_b} = Ingest.worker(ctx_b, id, stream_id(id))
+
     started =
       {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
 
     assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
-    assert [{pid_b, _}] = Registry.lookup(Conveyor.Ingest.RegistryB, id)
-
-    # The stream stays on A and finishes there.
     push(ctx_a, id, events, 6..n)
 
     marker =
@@ -128,8 +185,6 @@ defmodule Conveyor.Ingest.TwoNodeTest do
 
     assert :ok = Ingest.push_sync(ctx_a, Replay.ordered_event(stream_id(id), n + 1, marker))
 
-    # The finish notification reaches B's stray worker, whose commit is fenced: it must
-    # still be accepted, or Bazel aborts the whole upload.
     finished =
       {:invocation_attempt_finished,
        %V1.BuildEvent.InvocationAttemptFinished{
@@ -162,10 +217,9 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     n = length(events)
     push(ctx_a, id, events, 1..5)
 
-    started =
-      {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
-
-    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
+    # A worker on B that loaded at seq 5 (the takeover defence; lifecycle events no longer
+    # start one).
+    assert {:ok, _pid_b} = Ingest.worker(ctx_b, id, stream_id(id))
     push(ctx_a, id, events, 6..n)
 
     # Bazel retries the stream after a hiccup and the balancer picks node B, whose worker
@@ -181,7 +235,7 @@ defmodule Conveyor.Ingest.TwoNodeTest do
     # A real gap is still rejected after the reload.
     other = Replay.uuid()
     push(ctx_a, other, events, 1..3)
-    assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(other), 1, started))
+    assert {:ok, _} = Ingest.worker(ctx_b, other, stream_id(other))
 
     assert {:error, :out_of_order} =
              Ingest.push_sync(

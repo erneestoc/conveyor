@@ -87,7 +87,15 @@ defmodule Conveyor.Ingest.Worker do
 
   # Insert first: a new build costs one statement; only a resumed or concurrently created
   # invocation (conflict) needs the read. Schema defaults match the column defaults.
-  defp load_or_create!(ctx, id, stream_id) do
+  @doc """
+  The invocation row for a stream, created on first sight. Used by the worker on load and
+  by `Conveyor.Ingest.lifecycle/2` for the attempt-started notification, which must never
+  start a worker (behind a balancer the notification and the stream land on different
+  nodes; a worker started here would only fence the real one).
+  """
+  @spec load_or_create!(Conveyor.Ingest.Context.t(), String.t(), V1.StreamId.t() | nil) ::
+          Invocation.t()
+  def load_or_create!(ctx, id, stream_id) do
     now = DateTime.utc_now()
 
     row =

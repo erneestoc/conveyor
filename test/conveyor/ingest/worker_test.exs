@@ -47,8 +47,12 @@ defmodule Conveyor.Ingest.WorkerTest do
                )
              )
 
+    # The notification creates the row (the build is visible at once) but starts no worker.
+    assert %{status: "in_progress", last_event_seq: 0} = reload(id)
+    assert Registry.lookup(Conveyor.Ingest.Registry, id) == []
+    push_all(ctx, id, Enum.take(events, 3))
     assert %{status: "in_progress", finalized: false} = Worker.summary(id)
-    push_all(ctx, id, events)
+    push_all(ctx, id, events, 4)
     finish(ctx, id, length(events) + 1)
 
     assert :ok =

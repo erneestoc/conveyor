@@ -80,7 +80,7 @@ defmodule Conveyor.Blobs do
         {adapter, aopts} = adapter(prefix)
         {hashed, counter} = hashing(content)
 
-        with :ok <- adapter.put(expected, hashed, aopts) do
+        with :ok <- counted(:put, adapter.put(expected, hashed, aopts)) do
           {actual, size} = Agent.get(counter, & &1)
           Agent.stop(counter)
 
@@ -118,15 +118,28 @@ defmodule Conveyor.Blobs do
   defp store(project_id, prefix, digest, chunks, size, opts) do
     {adapter, aopts} = adapter(prefix)
 
-    with :ok <- adapter.put(digest, chunks, aopts) do
+    with :ok <- counted(:put, adapter.put(digest, chunks, aopts)) do
       record(project_id, prefix, digest, size, adapter, opts)
     end
   end
 
-  # Adapter options for one project's prefix (nil = the pre-prefix flat layout).
+  # Adapter options for one project's prefix (nil = the pre-prefix flat layout). Every
+  # adapter failure is counted (`conveyor_blobs_errors_count`) so a bad bucket policy or a
+  # full disk is an alert.
   defp adapter(prefix) do
     {adapter, aopts} = adapter()
     {adapter, Keyword.put(aopts, :project_prefix, prefix)}
+  end
+
+  defp counted(op, result) do
+    case result do
+      {:error, reason} when reason != :not_found ->
+        :telemetry.execute([:conveyor, :blobs, :errors], %{count: 1}, %{op: op})
+        result
+
+      _ ->
+        result
+    end
   end
 
   defp hashing(enum) do
@@ -248,7 +261,7 @@ defmodule Conveyor.Blobs do
       blob ->
         {adapter, aopts} = adapter(blob.prefix)
 
-        case adapter.stream(digest, Keyword.merge(aopts, opts)) do
+        case counted(:stream, adapter.stream(digest, Keyword.merge(aopts, opts))) do
           {:ok, stream} ->
             touch(blob)
             {:ok, stream}
@@ -277,7 +290,7 @@ defmodule Conveyor.Blobs do
   defp delete_blob(%Blob{} = blob) do
     {adapter, aopts} = adapter(blob.prefix)
 
-    with :ok <- adapter.delete(blob.digest, aopts) do
+    with :ok <- counted(:delete, adapter.delete(blob.digest, aopts)) do
       Repo.delete_all(
         from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
       )

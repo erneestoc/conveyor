@@ -18,7 +18,26 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 | `conveyor_repo_query_queue_time` (histogram, ms) | p99 above 50 ms: pool too small or database saturated |
 | `conveyor_ingest_batch_committed_events` (counter) | rate drops to zero while streams are open |
 | `conveyor_ingest_streams_count`, `conveyor_ingest_workers_count` (gauges) | near `MAX_STREAMS_PER_KEY` times keys |
+| `conveyor_ingest_fenced_count` (counter) | any increase that repeats: two nodes wrote one invocation (balancer or lifecycle problem) |
+| `conveyor_oban_jobs_count{queue,state}`, `conveyor_oban_oldest_available_seconds{queue}` (gauges) | oldest waiting job older than 10 minutes: the queue is not draining |
+| `conveyor_blobs_errors_count{op}` (counter) | any increase: blob store credentials, bucket policy or disk |
 | `vm_memory_total`, `vm_system_counts_process_count` | memory growth without stream growth |
+
+Ready-made rules for these are in `deploy/prometheus/alerts.yml`.
+
+### Stuck jobs
+
+Execution-log parsing, profile fetches and maintenance run as Oban jobs (`oban_jobs`).
+A node that dies mid-job leaves it `executing`; the Lifeline plugin moves it back to
+`available` after 15 minutes (or discards it when its attempts are used up). Two rules
+learned on the AWS trial:
+
+- Rescue with Oban's API, never by editing rows: `Oban.retry_all_jobs(query)` or
+  `Oban.retry_job/1` raise `max_attempts` as needed. A row set to `available` by hand with
+  `attempt = max_attempts` is never fetched again, and looks exactly like a stalled queue.
+- Lifeline is naive: a job that legitimately runs longer than 15 minutes is "rescued" while
+  still running, runs twice and burns an attempt each time. Long jobs must finish or fail
+  inside their `timeout/1` (the parser's is 10 minutes).
 
 ## Logs
 

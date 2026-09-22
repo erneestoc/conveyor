@@ -155,6 +155,10 @@ defmodule Conveyor.Ingest.Writer do
     result
   rescue
     e in Fenced ->
+      :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{
+        invocation_id: batch.invocation_id
+      })
+
       {:error, {:fenced, e.expected}}
 
     e ->

@@ -65,6 +65,22 @@ defmodule ConveyorWeb.Telemetry do
         description: "Live ingest workers (invocations in flight)"
       ),
       last_value("conveyor.ingest.streams.count", description: "Open BES streams"),
+      counter("conveyor.ingest.fenced.count",
+        description: "Batch commits fenced by another node's write to the same invocation"
+      ),
+      counter("conveyor.blobs.errors.count",
+        tags: [:op],
+        description: "Blob store (disk or S3) failures by operation"
+      ),
+      last_value("conveyor.oban.jobs.count",
+        tags: [:queue, :state],
+        description: "Oban jobs per queue and state"
+      ),
+      last_value("conveyor.oban.oldest_available.seconds",
+        tags: [:queue],
+        description:
+          "Age of the oldest job waiting in the queue (a backlog that only grows means the queue is not being drained: alert above 600)"
+      ),
       distribution("conveyor.repo.query.total_time",
         unit: {:native, :millisecond},
         reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]],
@@ -117,6 +133,63 @@ defmodule ConveyorWeb.Telemetry do
   def measure_ingest do
     :telemetry.execute([:conveyor, :ingest, :workers], %{count: workers()}, %{})
     :telemetry.execute([:conveyor, :ingest, :streams], %{count: streams()}, %{})
+    measure_oban()
+  end
+
+  @oban_states ~w(available scheduled executing retryable)
+
+  # Job counts per queue and state plus the age of the oldest waiting job, so a queue that
+  # stops draining (the trial's stalled parse jobs) is an alert, not a discovery.
+  @doc false
+  def measure_oban do
+    import Ecto.Query
+
+    counts =
+      Conveyor.Repo.all(
+        from j in Oban.Job,
+          where: j.state in ^@oban_states,
+          group_by: [j.queue, j.state],
+          select: {j.queue, j.state, count(j.id)}
+      )
+      |> Map.new(fn {queue, state, n} -> {{queue, state}, n} end)
+
+    for queue <- queues(), state <- @oban_states do
+      :telemetry.execute(
+        [:conveyor, :oban, :jobs],
+        %{count: Map.get(counts, {queue, state}, 0)},
+        %{queue: queue, state: state}
+      )
+    end
+
+    oldest =
+      Conveyor.Repo.all(
+        from j in Oban.Job,
+          where: j.state == "available" and j.scheduled_at <= ^DateTime.utc_now(),
+          group_by: j.queue,
+          select: {j.queue, min(j.scheduled_at)}
+      )
+      |> Map.new()
+
+    for queue <- queues() do
+      age =
+        case Map.get(oldest, queue) do
+          nil -> 0
+          at -> max(DateTime.diff(DateTime.utc_now(), at, :second), 0)
+        end
+
+      :telemetry.execute([:conveyor, :oban, :oldest_available], %{seconds: age}, %{queue: queue})
+    end
+
+    :ok
+  rescue
+    # Before the repo is up, or without a database (release tasks).
+    _ -> :ok
+  end
+
+  defp queues do
+    Application.get_env(:conveyor, Oban, [])
+    |> Keyword.get(:queues, [])
+    |> Enum.map(fn {queue, _} -> Atom.to_string(queue) end)
   end
 
   # The poller can fire before the ingest supervision tree is up.

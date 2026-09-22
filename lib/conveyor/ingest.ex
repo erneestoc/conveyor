@@ -71,6 +71,12 @@ defmodule Conveyor.Ingest do
 
   @doc "Handles a lifecycle event (`PublishLifecycleEvent`)."
   @spec lifecycle(Context.t(), V1.OrderedBuildEvent.t()) :: :ok | {:error, term()}
+  # The attempt-started notification makes the build visible before its first event. It
+  # creates the row directly and never starts a worker: Bazel sends lifecycle events and
+  # the event stream on separate connections, so behind a balancer this node is often not
+  # the one that will own the stream, and a worker started here would only fence the real
+  # one (the trial left builds `in_progress` that way). A live worker is told, so a build
+  # whose stream already started here stays in one place.
   def lifecycle(
         %Context{} = ctx,
         %V1.OrderedBuildEvent{
@@ -79,14 +85,16 @@ defmodule Conveyor.Ingest do
         } = obe
       )
       when stream_id.invocation_id != "" do
-    with {:ok, pid} <- worker(ctx, stream_id.invocation_id, stream_id) do
-      try do
-        GenServer.call(pid, {:lifecycle, :invocation_attempt_started, obe}, :infinity)
-      catch
-        # A worker that died while loading (e.g. database unavailable) must surface as
-        # UNAVAILABLE so that Bazel retries, never as an internal error.
-        :exit, {reason, _} -> {:error, {:worker_down, reason}}
-      end
+    case Registry.lookup(ctx.registry, stream_id.invocation_id) do
+      [{pid, _}] ->
+        try do
+          GenServer.call(pid, {:lifecycle, :invocation_attempt_started, obe}, :infinity)
+        catch
+          :exit, _ -> touch_row(ctx, stream_id)
+        end
+
+      [] ->
+        touch_row(ctx, stream_id)
     end
   end
 
@@ -128,6 +136,14 @@ defmodule Conveyor.Ingest do
 
   # build_enqueued / build_finished carry only a build id; nothing to persist yet.
   def lifecycle(_ctx, _obe), do: :ok
+
+  # Database errors surface as UNAVAILABLE so that Bazel retries, never as an internal error.
+  defp touch_row(ctx, stream_id) do
+    Worker.load_or_create!(ctx, stream_id.invocation_id, stream_id)
+    :ok
+  rescue
+    e in [DBConnection.ConnectionError, Postgrex.Error] -> {:error, {:unavailable, e}}
+  end
 
   defp mark_lifecycle_finished(:invocation_attempt_finished, invocation_id) do
     import Ecto.Query, only: [from: 2]
