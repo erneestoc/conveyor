@@ -72,7 +72,12 @@ the size of the TOAST relation of `invocations` (`options` is the large column).
 ## Backups
 
 PostgreSQL is the only state that matters; blobs are derivable (Bazel can re-upload
-profiles) but cheap to keep. Standard base backups plus WAL archiving, or the managed
+profiles) but cheap to keep. Rehearsed on the AWS trial (2026-09-22): an RDS snapshot of
+the live `db.t3.micro` took about 3 minutes, restoring it into a new instance about 9,
+and `aws s3 sync` of the blob bucket (825 objects) 16 seconds; a Conveyor release pointed
+at the restored instance (`bin/conveyor eval` with `Ecto.Migrator.with_repo`) reported the
+same row counts (invocations, spawns, blobs, artifacts, projects, keys) and all 11
+migrations applied. A fresh `deploy/trial` stack takes `-var db_snapshot_identifier=…`. Standard base backups plus WAL archiving, or the managed
 service's snapshots, are enough; Conveyor holds no local state beyond the blob directory
 in disk mode.
 
