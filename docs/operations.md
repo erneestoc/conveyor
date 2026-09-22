@@ -39,6 +39,10 @@ learned on the AWS trial:
   still running, runs twice and burns an attempt each time. Long jobs must finish or fail
   inside their `timeout/1` (the parser's is 10 minutes).
 
+Execution-log parses run two at a time on the `parse` queue (`default` carries profile
+fetches and summaries, `maintenance` the nightly jobs); `conveyor_oban_jobs_count` and
+`conveyor_oban_oldest_available_seconds` carry a label per queue.
+
 ## Logs
 
 Structured, one line per event, with the invocation id on every ingest message. Ingest
