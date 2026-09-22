@@ -36,6 +36,7 @@ an API key in Settings, and point Bazel at `grpcs://bes.example.com:443`.
 | PodDisruptionBudget | at least two pods during node maintenance |
 | PersistentVolumeClaim (optional) | disk blob store for a single-replica install without S3 |
 | ServiceMonitor (optional) | Prometheus Operator scraping of `/metrics` |
+| PrometheusRule (optional) | the alert rules of `deploy/prometheus/alerts.yml` (`metrics.prometheusRule.enabled`) |
 
 ## Values you will set
 

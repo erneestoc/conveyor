@@ -97,6 +97,10 @@ metrics:
   serviceMonitor:
     enabled: false
     interval: 30s
+  # Alerting rules (deploy/prometheus/alerts.yml) as a PrometheusRule for the operator.
+  prometheusRule:
+    enabled: false
+    labels: {}
 
 terminationGracePeriodSeconds: 60
 podAnnotations: {}

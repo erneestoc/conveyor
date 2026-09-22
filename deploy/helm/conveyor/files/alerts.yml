@@ -1,0 +1,58 @@
+# Prometheus alerting rules for Conveyor (scrape /metrics; see docs/operations.md).
+# Load with `rule_files: [alerts.yml]` or as a PrometheusRule (the Helm chart renders one
+# when `prometheusRule.enabled` is set).
+groups:
+  - name: conveyor
+    rules:
+      - alert: ConveyorAckLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le) (rate(conveyor_ingest_ack_latency_us_bucket[5m]))) > 250000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "BES ack latency p99 above 250 ms"
+          description: "Bazel waits for acks at the end of every build; check writer flush time and PostgreSQL."
+
+      - alert: ConveyorWriterFlushSlow
+        expr: histogram_quantile(0.99, sum by (le) (rate(conveyor_ingest_writer_flush_duration_bucket[5m]))) > 500
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Group commit p99 above 500 ms"
+          description: "PostgreSQL is slow or contended (CPU, dead tuples on invocations, pool)."
+
+      - alert: ConveyorDbPoolQueueing
+        expr: histogram_quantile(0.99, sum by (le) (rate(conveyor_repo_query_queue_time_bucket[5m]))) > 50
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Waiting more than 50 ms for a database connection"
+          description: "Raise POOL_SIZE or PostgreSQL capacity."
+
+      - alert: ConveyorFencedCommits
+        expr: increase(conveyor_ingest_fenced_count[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Fenced batch commits"
+          description: "Two nodes wrote the same invocation; a stream was retried onto another node mid-build. Harmless once, a balancer or lifecycle problem when it repeats."
+
+      - alert: ConveyorJobBacklog
+        expr: conveyor_oban_oldest_available_seconds > 600
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Oban jobs waiting for more than 10 minutes in {{ $labels.queue }}"
+          description: "The queue is not draining: producers down, jobs with attempt = max_attempts (rescue with Oban.retry_all_jobs, never by editing state), or parses slower than the job timeout."
+
+      - alert: ConveyorBlobErrors
+        expr: increase(conveyor_blobs_errors_count[10m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Blob store errors"
+          description: "Reads or writes against the disk or S3 store failed; check credentials, bucket policy and disk space."
+
+      - alert: ConveyorNodeNotReady
+        expr: up == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "A Conveyor node stopped answering scrapes"
