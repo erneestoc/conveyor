@@ -666,3 +666,11 @@ must be genuinely separated. The execution order and pass criteria are in HANDOF
    previous-build confined to project and branch.
 
 Infrastructure rules for the staging stack are in AGENTS.md ("Infrastructure rules").
+
+Progress (2026-09-21/22): item 1 done (scoped reads, router-walking boundary test, blobs
+per project under a key prefix, per-project retention, orphan pruning); item 2 (a) and (c)
+done — the Oban "stall" was the execution-log parser's exponential list expansion on
+input-set DAGs meeting Oban Lifeline's naive rescue (details in docs/scale.md), fixed
+with map unions, a parse queue, timeouts and backlog metrics + alert rules; item 2 (b)
+run locally with node kills (zero fenced, zero errors), not yet behind the NLB; item 3's
+parser and alert-rule bullets landed with 2 (c). HANDOFF §7 has the per-item detail.

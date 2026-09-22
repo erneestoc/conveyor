@@ -205,8 +205,17 @@ defmodule Conveyor.Bep.Replay do
       |> then(&if(drop_after, do: Enum.take(&1, drop_after), else: &1))
 
     if drop_after do
-      Enum.each(to_send, fn {event, seq} -> send_one(conn, stream, seq, event) end)
-      GRPC.Stub.cancel(stream)
+      # The connection may die before the deliberate drop (the server was killed): the
+      # outcome is the same, a lost connection followed by a resend on a fresh one.
+      try do
+        Enum.each(to_send, fn {event, seq} -> send_one(conn, stream, seq, event) end)
+        GRPC.Stub.cancel(stream)
+      rescue
+        _ -> :ok
+      catch
+        :exit, _ -> :ok
+      end
+
       :ok
     else
       parent = self()
