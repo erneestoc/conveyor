@@ -74,10 +74,20 @@ defmodule Conveyor.ExecLog do
     _ -> {:error, :malformed}
   end
 
+  # The stored path list is capped: `inputs_digest` and `input_files` cover every input,
+  # so the verdict (same inputs or not) stays exact; only the per-path diff is bounded.
+  @max_stored_inputs 50_000
+
   defp spawn_row(s, table, memo) do
     {inputs, memo} = expand(s.input_set_id, table, memo)
     {tools, memo} = expand(s.tool_set_id, table, memo)
-    inputs = (inputs ++ tools) |> Enum.uniq_by(&elem(&1, 0)) |> Enum.sort()
+
+    inputs =
+      inputs
+      |> merge_inputs(tools)
+      |> Enum.map(fn {path, {digest, size}} -> {path, digest, size} end)
+      |> Enum.sort()
+
     outputs = Enum.map(s.outputs, &output(&1.type, table))
     m = s.metrics
 
@@ -109,15 +119,24 @@ defmodule Conveyor.ExecLog do
         "files" =>
           Enum.map(outputs, &%{"path" => &1.path, "digest" => &1.digest, "size" => &1.size})
       },
-      inputs_blob: inputs |> Enum.map_join("\n", fn {p, d, _} -> p <> "\t" <> d end) |> compress()
+      inputs_blob:
+        inputs
+        |> Enum.take(@max_stored_inputs)
+        |> Enum.map_join("\n", fn {p, d, _} -> p <> "\t" <> d end)
+        |> compress()
     }
 
     {row, memo}
   end
 
-  # Expands an interned entry into `{path, digest, size}` triples, memoized per set id so
-  # transitive sets shared by many spawns are walked once.
-  defp expand(0, _table, memo), do: {[], memo}
+  # Expands an interned entry into a map `path => {digest, size}`, memoized per id.
+  #
+  # Maps, not lists: input sets form a DAG in which the same file is reachable through many
+  # paths (a test's runfiles reach a library's headers through every dependent), and
+  # concatenating lists repeats every shared file once per path before `uniq` collapses
+  # them. On the AWS trial that turned a 429-spawn abseil log (48k unique inputs) into 26
+  # million list elements and minutes of parsing; a map union costs the smaller side.
+  defp expand(0, _table, memo), do: {%{}, memo}
 
   defp expand(id, table, memo) do
     case memo do
@@ -130,17 +149,19 @@ defmodule Conveyor.ExecLog do
     end
   end
 
-  defp expand_entry({:file, f}, _table, memo), do: {[file_triple(f)], memo}
+  defp expand_entry({:file, f}, _table, memo),
+    do: {%{f.path => {hash(f.digest), size(f.digest)}}, memo}
 
   defp expand_entry({:directory, %{path: path, files: []}}, _table, memo),
-    do: {[{path, "directory", 0}], memo}
+    do: {%{path => {"directory", 0}}, memo}
 
   defp expand_entry({:directory, %{path: path, files: files}}, _table, memo),
     do:
-      {Enum.map(files, fn f -> {path <> "/" <> f.path, hash(f.digest), size(f.digest)} end), memo}
+      {Map.new(files, fn f -> {path <> "/" <> f.path, {hash(f.digest), size(f.digest)}} end),
+       memo}
 
   defp expand_entry({:unresolved_symlink, s}, _table, memo),
-    do: {[{s.path, "symlink:" <> s.target_path, 0}], memo}
+    do: {%{s.path => {"symlink:" <> s.target_path, 0}}, memo}
 
   defp expand_entry({:input_set, set}, table, memo),
     do: expand_many(set.input_ids ++ set.transitive_set_ids, table, memo)
@@ -153,20 +174,27 @@ defmodule Conveyor.ExecLog do
 
     manifest =
       if t.repo_mapping_manifest && t.repo_mapping_manifest.digest,
-        do: [
-          {t.path <> "/_repo_mapping", hash(t.repo_mapping_manifest.digest),
-           size(t.repo_mapping_manifest.digest)}
-        ],
-        else: []
+        do: %{
+          (t.path <> "/_repo_mapping") =>
+            {hash(t.repo_mapping_manifest.digest), size(t.repo_mapping_manifest.digest)}
+        },
+        else: %{}
 
-    {items ++ manifest, memo}
+    {merge_inputs(items, manifest), memo}
   end
 
-  defp expand_entry(_other, _table, memo), do: {[], memo}
+  defp expand_entry(_other, _table, memo), do: {%{}, memo}
 
   defp expand_many(ids, table, memo) do
-    Enum.flat_map_reduce(ids, memo, fn id, memo -> expand(id, table, memo) end)
+    Enum.reduce(ids, {%{}, memo}, fn id, {acc, memo} ->
+      {items, memo} = expand(id, table, memo)
+      {merge_inputs(acc, items), memo}
+    end)
   end
+
+  # First occurrence wins, as the list version's uniq did.
+  defp merge_inputs(acc, items) when map_size(acc) == 0, do: items
+  defp merge_inputs(acc, items), do: Map.merge(items, acc)
 
   defp output({:output_id, id}, table) do
     case Map.get(table, id) do
@@ -199,7 +227,6 @@ defmodule Conveyor.ExecLog do
     end
   end
 
-  defp file_triple(f), do: {f.path, hash(f.digest), size(f.digest)}
   defp hash(nil), do: ""
   defp hash(%{hash: h}), do: h
   defp size(nil), do: 0

@@ -178,6 +178,64 @@ defmodule Conveyor.ExecLogTest do
     assert Repo.get!(Invocation, other.id).exec_log_status == "failed"
   end
 
+  test "input-set lattices expand in linear time" do
+    # A Fibonacci lattice: set n = {file n} ∪ set n-1 ∪ set n-2, so the number of paths to
+    # file 1 grows exponentially with depth while the unique inputs grow linearly. This is
+    # the shape of real logs (a test's runfiles reach a library's headers through every
+    # dependent); on the AWS trial the list-based expansion took minutes on a 429-spawn
+    # abseil log and never finished inside Oban's rescue window.
+    alias Tools.Protos.ExecLogEntry, as: Entry
+
+    depth = 80
+    digest = %Tools.Protos.Digest{hash: String.duplicate("a", 64), size_bytes: 1}
+
+    files =
+      for n <- 1..depth,
+          do: %Entry{id: n, type: {:file, %Entry.File{path: "src/f#{n}.h", digest: digest}}}
+
+    sets =
+      for n <- 1..depth do
+        transitive = Enum.filter([n - 1, n - 2], &(&1 >= 1)) |> Enum.map(&(depth + &1))
+
+        %Entry{
+          id: depth + n,
+          type: {:input_set, %Entry.InputSet{input_ids: [n], transitive_set_ids: transitive}}
+        }
+      end
+
+    spawns =
+      for n <- 1..depth do
+        %Entry{
+          id: 2 * depth + n,
+          type:
+            {:spawn,
+             %Entry.Spawn{
+               input_set_id: depth + n,
+               mnemonic: "CppCompile",
+               target_label: "//pkg:t#{n}",
+               outputs: []
+             }}
+        }
+      end
+
+    entries =
+      [%Entry{id: 0, type: {:invocation, %Entry.Invocation{id: "lattice"}}} | files] ++
+        sets ++ spawns
+
+    binary =
+      entries
+      |> Enum.map(&Entry.encode/1)
+      |> Enum.map(&[Conveyor.Bep.Fixture.encode_varint(byte_size(&1)), &1])
+      |> IO.iodata_to_binary()
+
+    {us, {:ok, %{spawns: rows}}} = :timer.tc(fn -> ExecLog.parse(binary) end)
+    assert div(us, 1000) < 2_000
+    assert Enum.map(rows, & &1.input_files) == Enum.to_list(1..depth)
+    last = List.last(rows)
+    inputs = last.inputs_blob |> :zstd.decompress() |> IO.iodata_to_binary() |> String.split("\n")
+    assert length(inputs) == depth and hd(inputs) == "src/f1.h\t" <> String.duplicate("a", 64)
+  end
+
   test "artifact names that look like execution logs" do
     assert ExecLog.name?("execution.log")
     assert ExecLog.name?("execution.log.zst")

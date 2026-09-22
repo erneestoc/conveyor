@@ -29,8 +29,9 @@ defmodule ConveyorWeb.MetricsControllerTest do
 
     body = conn |> get(~p"/metrics") |> response(200)
     assert body =~ "conveyor_ingest_ack_count"
-    assert body =~ "conveyor_ingest_fenced_count 1"
-    assert body =~ ~s(conveyor_blobs_errors_count{op="put"} 1)
+    # Counters accumulate over the whole test run: at least the events above.
+    assert counter(body, "conveyor_ingest_fenced_count") >= 1
+    assert counter(body, ~s(conveyor_blobs_errors_count{op="put"})) >= 1
     assert body =~ ~s(conveyor_oban_jobs_count{queue="default",state="available"} 1)
     assert body =~ ~s(conveyor_oban_jobs_count{queue="maintenance",state="executing"} 0)
 
@@ -59,5 +60,10 @@ defmodule ConveyorWeb.MetricsControllerTest do
            |> put_req_header("authorization", "Bearer nope")
            |> get(~p"/metrics")
            |> response(401)
+  end
+
+  defp counter(body, series) do
+    [value] = Regex.run(~r/^#{Regex.escape(series)} (\d+)/m, body, capture: :all_but_first)
+    String.to_integer(value)
   end
 end

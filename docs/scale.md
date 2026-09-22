@@ -107,6 +107,17 @@ Bugs found by the trial and fixed in the same day (each with a test):
   when a sequence ahead of its own arrives.
 - **Execution-log parse jobs orphaned by an instance refresh** stayed `executing`; Oban's
   Lifeline plugin now rescues them.
+- **24 parse jobs that never finished** (root-caused 2026-09-21). The parser expanded
+  input sets into lists and concatenated them: input sets form a DAG in which a test's
+  runfiles reach a library's headers through every dependent, so shared files were
+  repeated once per path (a 429-spawn abseil log with 48k unique inputs walked 26 million
+  list elements). On the node that took minutes, longer than Lifeline's 15-minute rescue
+  window, so each job was "rescued" while still running, ran twice, and burned an attempt
+  per rescue; a hand-made `UPDATE … SET state = 'available'` then left them with
+  `attempt = max_attempts`, which Oban never fetches. Fixes: the expansion is a map union
+  memoized per set (the same log parses in 51 ms), parse jobs have a 10-minute timeout,
+  `/metrics` exports `conveyor_oban_oldest_available_seconds` with an alert rule, and
+  docs/operations.md says to rescue with `Oban.retry_all_jobs`, never by editing rows.
 
 Known limits recorded for later: NativeLink's Rust remote execution failed with "Invalid
 cross-device link" when rustc renames its archive across the worker's mount namespace
