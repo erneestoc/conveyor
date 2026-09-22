@@ -4,7 +4,9 @@
     "lib/conveyor_proto/",
     "test/support/",
     "lib/conveyor/release.ex",
-    "lib/conveyor_web/telemetry.ex"
+    "lib/conveyor_web/telemetry.ex",
+    "lib/mix/tasks/conveyor.bench.ex",
+    "lib/mix/tasks/conveyor.loadgen.ex"
   ],
   "coverage_options": {
     "treat_no_relevant_lines_as_covered": true,
