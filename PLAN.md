@@ -678,3 +678,70 @@ RDS bundle, Caddy single-node edge in deploy/trial, snapshot restore variable, r
 backup/restore, alert rules + Helm PrometheusRule; found: NLB cross-zone balancing must
 be on); item 4 done (project settings page, per-project admin groups, shared authorized
 handlers). HANDOFF §7 has the per-item detail and the trial's final shape.
+
+## 24. Speed and capacity plan (proposed 2026-09-22): more builds per vCPU, same behaviour
+
+Starting point (measured, PLAN §21 and docs/capacity.md): one node ingests 13–15k
+events/s against a 2-vCPU Postgres that is the ceiling; Postgres spends ≈ 1 vCPU per
+10k events/s, dominated by the per-batch fenced `UPDATE invocations` (one per batch per
+flush, HOT but wide row) and the segment inserts; nodes spend ≈ 0.9 MB per open stream;
+storage is ≈ 27 KB per small build of which 16 KB is raw events; every dashboard load
+runs ~15 aggregate queries over the window. Nothing below changes what a client or a
+viewer observes: acks stay the durability boundary, fencing stays per batch, pages show
+the same numbers.
+
+**0. Harness first (one week).** Reference hardware (one `c7g.xlarge` node, one
+`db.m6g.large`), a fixed corpus (the fixtures plus the trial's real grpc/protobuf
+logs), `mix conveyor.loadgen --verify`, and four numbers tracked per change: events/s
+per app vCPU, events/s per Postgres vCPU, WAL bytes per event, RSS per stream. Each item
+below must move one of them; the oracle stays green; results go to docs/capacity.md.
+
+**1. Fewer statements per flush (Postgres, expected 2–3×).** Today a flush issues one
+statement per table per column set plus one fenced update per batch (≈ 12 statements).
+Batch the fenced updates of batches sharing a dirty-column set into one
+`UPDATE … FROM unnest($1::uuid[], $2::int[], …)` (the §21 leftover), coalesce batches of
+the same invocation inside a flush into one update, and let the flush size grow under
+load (flush by bytes and rows, time as the floor) so more batches share the fixed costs.
+
+**2. A narrow hot row (Postgres, expected 1.5–2×).** Split `invocations` into the row
+the per-batch update touches (`last_event_seq`, `last_event_at`, `log_bytes`, `log_lines`,
+counters, status) and the wide, rarely written columns (`options`, `workspace_status`,
+`configurations`, tags). The hot update then rewrites a few hundred bytes instead of a
+multi-KB row, HOT stays HOT at high fill factors, and TOAST is never touched during
+ingest. The read side joins once; `Invocation` stays one schema through a view or an
+embedded association.
+
+**3. Cheaper raw storage (Postgres and disk, expected 2–3× less WAL and storage).** One
+segment per flush per invocation instead of one per batch, a zstd dictionary trained on
+BEP (the same field names in every event; 2–3× better than plain zstd at this size), and
+raw segments older than a few days moved to the blob store as one object per invocation
+with the same read path (`raw_frames/1` streams from either), so `RETENTION_RAW_DAYS`
+stops being a Postgres size lever. Sync commit stays on; nothing is acked before WAL.
+
+**4. Ingest CPU on the node (expected 1.5×).** Decode each event once (scrub decides
+from the decoded struct; re-encode only when it changed, as now, but never decode
+twice for kind and payload), compress with a reused zstd context per writer shard,
+build batch rows with iodata instead of binaries, and coalesce ack responses per flush
+into fewer HTTP/2 frames (Bazel accepts acks in order; the per-event response objects
+are unchanged).
+
+**5. Streams per node (expected 3× on memory).** Hibernate idle workers, keep the
+normalizer's target and test maps in ETS owned by the worker instead of the heap that
+every GC copies, cap the in-flight batch list, and measure the HTTP/2 connection's share
+(Cowboy stream processes and window sizes). Target: 0.3 MB per stream, 10k streams on a
+4 GB node.
+
+**6. Dashboards from rollups (expected 10× on read cost).** An hourly per-project rollup
+(counts by status, duration digests for p50/p90/p99 with a t-digest, cache hits,
+actions, users) maintained by a job that only touches the last two hours, so the
+projects root, the dashboard and the tests page read a few small rows; exact queries
+remain for segments with a free-form query and for the golden test, which asserts the
+rollup and the exact path agree.
+
+**7. Connection budget.** Pipelined Postgrex statements inside the flush (one round trip
+for the table inserts), pool per writer shard rather than a shared pool, and
+`max_connections` sized from shards not nodes.
+
+Expected together: 3–5× more builds per Postgres vCPU (1, 2, 7), 2–3× less storage and
+WAL (3), 3× more open streams per node (5), UI cost independent of build volume (6).
+Order: 0, 1, 2, 6, 3, 5, 4, 7 — the first three are Postgres, the visible limit today.
