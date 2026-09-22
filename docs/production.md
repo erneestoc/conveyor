@@ -18,6 +18,10 @@ on your own hardware before committing to a size (`mix conveyor.loadgen --help`)
   for the UI and `reverse_proxy h2c://127.0.0.1:1986` on `:1985` for gRPC, with Conveyor
   on `GRPC_PORT=1986`); Caddy obtains the certificate from Let's Encrypt and serves h2 to
   Bazel. `deploy/trial` does exactly this in its staging shape (`edge = "caddy"`).
+- **Auto Scaling / orchestrators**: base instance replacement on the node itself
+  (EC2 status, liveness), not on `/health/ready`: readiness depends on the database, and a
+  slow database would otherwise replace healthy nodes and make things worse (seen on the
+  trial when a burstable RDS ran out of CPU credits).
 - **Network Load Balancer**: turn cross-zone load balancing on (it is off by default) or
   keep a node in every zone the balancer has an address in; otherwise connections that
   land in an empty zone are accepted and hang until Bazel's deadline (found on the trial).

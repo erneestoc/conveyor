@@ -293,13 +293,16 @@ resource "aws_launch_template" "conveyor" {
 }
 
 resource "aws_autoscaling_group" "conveyor" {
-  name                      = "${var.name}-conveyor"
-  desired_capacity          = var.conveyor_count
-  min_size                  = 0
-  max_size                  = 6
-  vpc_zone_identifier       = local.subnets
-  target_group_arns         = var.edge == "nlb" ? [aws_lb_target_group.web[0].arn, aws_lb_target_group.grpc[0].arn] : []
-  health_check_type         = var.edge == "nlb" ? "ELB" : "EC2"
+  name                = "${var.name}-conveyor"
+  desired_capacity    = var.conveyor_count
+  min_size            = 0
+  max_size            = 6
+  vpc_zone_identifier = local.subnets
+  target_group_arns   = var.edge == "nlb" ? [aws_lb_target_group.web[0].arn, aws_lb_target_group.grpc[0].arn] : []
+  # EC2 health only: the balancer's readiness check depends on the database, and a slow
+  # database made the group replace healthy nodes during the soak. Docker's restart
+  # policy brings a crashed container back; routing is the balancer's decision.
+  health_check_type         = "EC2"
   health_check_grace_period = 300
   launch_template {
     id      = aws_launch_template.conveyor.id
