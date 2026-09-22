@@ -12,7 +12,9 @@ This starts PostgreSQL and Conveyor (built from the checkout; use the published 
 [http://localhost:4000](http://localhost:4000) and sign in with the `ADMIN_TOKEN` from
 `docker-compose.yml`; change it and `SECRET_KEY_BASE` before exposing the service.
 
-In **Settings**, create a project and an API key. Keys are shown once.
+In **Settings**, create a project and an API key. Keys are shown once. The root page
+lists your projects; each has its builds, dashboard, tests and, for its admins, a
+settings page (`/p/<slug>/settings`); `/builds` lists builds across projects.
 
 ## Point Bazel at it
 

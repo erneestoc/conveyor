@@ -119,6 +119,17 @@ Bugs found by the trial and fixed in the same day (each with a test):
   `/metrics` exports `conveyor_oban_oldest_available_seconds` with an alert rule, and
   docs/operations.md says to rescue with `Oban.retry_all_jobs`, never by editing rows.
 
+Two-node soak behind the balancer (2026-09-22): 20 paced streams over TLS with drops and
+retries, the Conveyor container killed on alternating nodes every 10 minutes; the
+container was back within seconds every time and the balancer kept routing. The run was
+cut short by the trial's `db.t3.micro`, which ran out of CPU credits after 40 minutes at
+50–60 % CPU and was throttled to a tenth of a core; from there the database, not
+Conveyor, set the pace. Lessons kept: cross-zone balancing on, instance health from EC2
+rather than readiness, and no burstable database under sustained ingest (a `db.t4g.large`
+class is the starting point in the [capacity page](capacity.md)). The cluster logic itself
+is proven by the local two-node soak: 48,039 builds, 11 `kill -9`s, 2,364 builds retried
+onto the surviving node, 0 missing acks, oracle 48,039/48,039, zero fenced commits.
+
 Known limits recorded for later: NativeLink's Rust remote execution failed with "Invalid
 cross-device link" when rustc renames its archive across the worker's mount namespace
 (cache mode works); the execution-log parser takes about 6 s for a 2 MB protobuf log on a

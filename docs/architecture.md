@@ -53,6 +53,8 @@ Browser ──HTTPS / WebSocket──▶ node C ─────┘         S3 (p
 | `event_segments` | the raw BEP stream, zstd-compressed batches, partitioned by day |
 | `log_segments` | the build log text, zstd-compressed batches with byte and line offsets, partitioned by day |
 | `tag_keys` | tag facet counts per project, maintained by a per-node counter, rebuilt after deletes |
+| `spawns` | one row per spawn of an uploaded execution log: target, mnemonic, cache status, timings, input and output digests, the sorted input list as one compressed blob |
+| `blobs` | metadata per `(project_id, digest)`: size, type, origin, expiry, the key prefix the bytes live under |
 | `projects`, `api_keys`, `users`, `audit_log`, `blobs`, `artifacts` | control plane |
 
 Raw segments live in daily partitions so retention is a `DROP TABLE`, not a delete. Build
@@ -74,15 +76,27 @@ lines are ever rendered ([details](scale.md#log-viewer)).
 BEP references files by `bytestream://` URI on the remote cache. Conveyor fetches the
 profile and test outputs from the cache endpoint configured per project (with the cache's
 own TLS and auth) or receives them directly through its built-in CAS sink, a minimal
-ByteStream/CAS server that accepts uploads for referenced digests only. Blobs go to disk
-or S3; a daily job prunes uploads no build pins.
+ByteStream/CAS server that accepts uploads for referenced digests only. Blobs belong to a
+project: they are keyed by `(project_id, digest)` and stored under the project's key prefix
+(`<prefix>/<digest>` in S3, `<prefix>/aa/bb/<digest>` on disk; the slug unless changed in
+Settings), so one project's data is one prefix that can be listed, lifecycle-ruled or
+removed on its own, and projects never share blobs. A nightly job prunes cache uploads no
+build pinned within their TTL and blobs whose builds retention has since deleted.
+
+An uploaded execution log is parsed into `spawns`; input sets form a DAG in which the
+same file is reachable through many paths, so the expansion unions maps memoized per set
+rather than concatenating lists (the list version took minutes on real logs). The Actions
+tab diffs each spawn's inputs against the previous build of the same project and branch.
 
 ## Auth
 
 Bazel authenticates with per-project API keys (`conveyor_<id>_<secret>`, SHA-256 stored,
 cached per node with cluster-wide invalidation). People sign in through OpenID Connect or,
-in open mode, read freely and use an admin token for Settings. Every admin action is in
-the audit log. See [Security model](security.md).
+in open mode, read freely and use an admin token for Settings. A project's allowed groups
+decide who sees it and its admin groups who administers it at `/p/<slug>/settings`; global
+admins do everything. Every read takes the viewer's project set as a SQL restriction, so
+the project is a hard boundary rather than a filter in the page. Every admin action is in
+the audit log. See [Roles and boundary](roles.md) and [Security model](security.md).
 
 ## Clustering
 

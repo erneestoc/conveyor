@@ -17,6 +17,8 @@ rate, failures and flaky tests per team, branch or CI segment.
 Status: **0.1.0**, verified end to end with Bazel 7, 8 and 9. Documentation:
 **https://erneestoc.github.io/conveyor/** (source in `docs/`).
 
+![Conveyor projects](docs/assets/projects.png)
+
 ![Conveyor builds list](docs/assets/builds.png)
 
 ## Quick start
@@ -52,6 +54,11 @@ the full client recipe (upload modes, remote cache, profiles) and
 - [deploy/aws-asg](deploy/aws-asg): Terraform for an EC2 auto-scaling group.
 - [deploy/grafana/conveyor.json](deploy/grafana/conveyor.json): dashboard for the
   Prometheus metrics served at `/metrics`.
+- [docs/install.md](docs/install.md): one box with Compose, EC2 with Caddy or a balancer,
+  Kubernetes with Helm, each ending with a working Bazel command.
+- [docs/capacity.md](docs/capacity.md): measured throughput and sizing starting points.
+- [docs/roles.md](docs/roles.md): viewer, project admin, global admin, API key scopes and
+  the project boundary.
 - [docs/auth.md](docs/auth.md): OpenID Connect and admin access.
   [docs/security.md](docs/security.md): threat model. [docs/cache-endpoints.md](docs/cache-endpoints.md):
   fetching profiles and test logs from your remote cache.

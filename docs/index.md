@@ -6,7 +6,7 @@
 targets, tests, cache statistics and metrics, filterable by any tag you attach with
 `--build_metadata`.
 
-![Builds list](assets/builds.png)
+![Projects](assets/projects.png)
 
 ## What you get
 

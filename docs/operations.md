@@ -69,6 +69,45 @@ readable; new writes go under the prefix.
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).
 
+## Runbooks
+
+Each alert in `deploy/prometheus/alerts.yml` maps to one of these.
+
+**Ack latency high** (`ConveyorAckLatencyHigh`). Bazel waits for acks at the end of every
+build, so this is what engineers feel. Check `conveyor_ingest_writer_flush_duration`
+first: slow flushes mean PostgreSQL (CPU, IOPS, credits on burstable instances, dead
+tuples on `invocations`); fast flushes with high ack latency mean the nodes are saturated
+(`vm_total_run_queue_lengths_total`, add nodes). Never raise `POOL_SIZE` past what
+`max_connections` allows for all nodes.
+
+**Fenced commits** (`ConveyorFencedCommits`). Two nodes wrote the same invocation. A
+handful after a client reconnected through a balancer is normal: the resend lands on
+another node, which resumes from the row, and the first node's late batch is fenced. A
+steady rate without client drops means a balancer sends one build's connections to
+several nodes, or lifecycle events reach a node that starts work it does not own; check
+the balancer's stickiness and the version of Conveyor (lifecycle events must never start a
+worker).
+
+**Job backlog** (`ConveyorJobBacklog`). `conveyor_oban_jobs_count{state="available"}`
+grows and the oldest waiting job ages: no node is fetching (all nodes down or the queue
+paused), jobs with `attempt = max_attempts` left in `available` by a manual edit (rescue
+with `Oban.retry_all_jobs`), or parses slower than their timeout. See "Stuck jobs" above.
+
+**Blob store errors** (`ConveyorBlobErrors`). Reads or writes failed against disk or S3:
+credentials expired, bucket policy changed, disk full. Profiles and test outputs of new
+builds show as unavailable until fixed; nothing about the build itself is lost.
+
+**Node not draining / not ready**. `/health/ready` stays 503 after a deploy: the database
+is unreachable (connection string, TLS bundle, security group) or migrations failed at
+boot (`docker logs` / pod logs show "Could not create schema migrations table" when the
+database itself is the problem). A node that never finishes draining holds open streams
+longer than `SHUTDOWN_DRAIN_SECONDS`; the balancer's deregistration delay must exceed it.
+
+**Database full or slow**. Retention is the lever: lower `RETENTION_RAW_DAYS` first (raw
+events and logs are the bulk), then `RETENTION_DAYS` per project in Settings; run
+`VACUUM` on `invocations` if dead tuples exceed a few percent. Growth per build is about
+27 KB compressed for small builds and scales with targets, actions and log size.
+
 ## Backups
 
 PostgreSQL is the only state that matters; blobs are derivable (Bazel can re-upload

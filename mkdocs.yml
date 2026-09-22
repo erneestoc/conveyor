@@ -37,6 +37,7 @@ nav:
   - Home: index.md
   - Getting started:
       - Quick start: quickstart.md
+      - Install: install.md
       - Configure Bazel: bazel.md
       - Conveyor in CI: ci.md
   - Concepts:
@@ -45,9 +46,11 @@ nav:
       - Scale and measurements: scale.md
   - Deploy:
       - Production guide: production.md
+      - Capacity: capacity.md
       - Kubernetes and Helm: kubernetes.md
       - Configuration reference: configuration.md
       - Sign-in and access: auth.md
+      - Roles and boundary: roles.md
       - Security model: security.md
       - Cache endpoints: cache-endpoints.md
       - Operations: operations.md

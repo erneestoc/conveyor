@@ -20,7 +20,8 @@ It is kept current with the code; every control named here has a test.
 |---|---|---|
 | gRPC `:1985` (BES, ByteStream, CAS) | Bazel clients on CI and laptops | API keys (`BES_INGEST_AUTH=api_key`), scopes (`ingest` for BES; `ingest` or `upload` for the CAS sink), per-key limits, secret scrubbing |
 | HTTP `/api/v1` | Scripts (`tools/bes-upload-profile`), CI | API keys with the `upload` scope, size limits, project ownership checks, audit log |
-| HTTP UI | Engineers | `AUTH_MODE=oidc` (OIDC + PKCE + state + nonce, RS256 ID tokens), roles, per-project groups; or `AUTH_MODE=open` with `ADMIN_TOKEN` gating Settings |
+| HTTP UI | Engineers | `AUTH_MODE=oidc` (OIDC + PKCE + state + nonce, RS256 ID tokens), roles, per-project allowed and admin groups; or `AUTH_MODE=open` with `ADMIN_TOKEN` gating Settings |
+| Any read | Everyone | The viewer's project set is a SQL restriction on every query (see below) |
 | Outbound to remote caches | Operator-configured caches | Only hosts listed as a project's cache endpoints are ever dialled (SSRF allow-list); TLS with the system trust store |
 | PostgreSQL, blob store | Operator infrastructure | Out of scope: protect with network policy, disk encryption, IAM for S3 |
 
@@ -56,6 +57,21 @@ The URI is a locator only: where to connect (endpoint override), TLS policy (sys
 roots, custom CA, mTLS from mounted secret files) and request authentication (headers,
 bearer token) come exclusively from the project's configuration (`docs/cache-endpoints.md`).
 Blobs already present locally are served without any network access.
+
+### The project boundary
+
+Visibility is not a filter applied in the page. `Conveyor.Accounts.Scope.project_ids/1`
+(all projects for global admins, otherwise the projects the viewer may see) is passed into
+every read: the builds list and its facets, invocation lookups (and with them the build
+pages, downloads and artifacts), dashboards and test health, and execution-log
+comparisons, which stay inside the project and branch. Uploads with an API key treat an
+invocation of another project as not found, never as a conflict. `/metrics` without
+`METRICS_TOKEN` needs an admin session. Project admins (admin groups) manage keys,
+storage, cache endpoints and segments of their project; every mutation authorizes against
+the project taken from the record, so a hidden form field pointing at another project is
+a 404. `test/conveyor_web/project_boundary_test.exs` walks every route with a
+project-bound parameter as a user of project A and asserts 404 on project B's ids and
+slugs; a new route without an entry fails the test.
 
 ### Path traversal and content confusion in the blob store
 Blob keys are validated SHA-256 hex digests before any path or object key is built;

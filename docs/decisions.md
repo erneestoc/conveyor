@@ -79,6 +79,32 @@ Conveyor was written from the Bazel protocol definitions and documentation. No c
 other Build Event Service implementations was read or reused; the vendored `.proto`
 files carry their Apache-2.0 notices.
 
+## Blobs are not shared across projects
+
+A content-addressed store could keep one copy of identical content for every project.
+Conveyor keys blobs by `(project_id, digest)` and stores them under a per-project prefix
+instead. Separation wins over deduplication: one project's data is one prefix that an
+operator can list, expire, move or delete without touching another, `FindMissingBlobs`
+answers per project, and a project's retention frees its own bytes. Identical profiles and
+test outputs across projects are rare; the cost is a few duplicate objects.
+
+## Input sets expand as map unions
+
+Execution logs intern files and input sets, and sets reference other sets: a DAG in
+which a test's runfiles reach a library's headers through every dependent. Expanding by
+concatenating lists repeats every shared file once per path, exponentially in depth; on
+the AWS trial a 429-spawn log walked 26 million list elements and never finished inside
+the job's rescue window. The expansion is a map keyed by path, memoized per set, and a
+union costs the smaller side. A lattice test keeps it linear.
+
+## Instance replacement follows the node, not readiness
+
+`/health/ready` says "this node can serve": it checks the database and turns 503 while
+draining. That is what a balancer needs, and the wrong signal for replacing instances: a
+slow database made an auto-scaling group replace healthy nodes and make things worse. The
+group uses EC2 health; a crashed container is Docker's restart policy's job; routing stays
+the balancer's decision.
+
 ## Still open
 
 - Reference hardware for the published performance envelope.
