@@ -272,7 +272,9 @@ resource "aws_launch_template" "conveyor" {
   }
   tag_specifications {
     resource_type = "instance"
-    tags          = { Name = "${var.name}-conveyor", conveyor-cluster = var.name }
+    # `project` is what the IAM condition for AssociateAddress checks; provider default
+    # tags do not reach instances the group launches.
+    tags          = { Name = "${var.name}-conveyor", conveyor-cluster = var.name, project = "conveyor-trial" }
   }
   user_data = base64encode(templatefile("${path.module}/templates/conveyor.sh.tftpl", {
     ecr             = local.ecr
