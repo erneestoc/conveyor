@@ -4,7 +4,8 @@ output "admin_token" {
   value     = random_password.admin_token.result
   sensitive = true
 }
-output "nlb_dns" { value = aws_lb.nlb.dns_name }
+output "nlb_dns" { value = var.edge == "nlb" ? aws_lb.nlb[0].dns_name : null }
+output "conveyor_ip" { value = var.edge == "caddy" ? aws_eip.conveyor[0].public_ip : null }
 output "ecr_conveyor" { value = aws_ecr_repository.conveyor.repository_url }
 output "ecr_builder" { value = aws_ecr_repository.builder.repository_url }
 output "ecr_nl_worker" { value = aws_ecr_repository.nl_worker.repository_url }

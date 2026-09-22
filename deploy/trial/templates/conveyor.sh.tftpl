@@ -6,13 +6,43 @@ cat > /etc/conveyor/rbe-ca.crt <<'CA'
 ${rbe_ca}
 CA
 chmod 644 /etc/conveyor/rbe-ca.crt
+# The database is verified against the AWS RDS global bundle (rds.force_ssl stays on).
+curl -fsSL https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem -o /etc/conveyor/rds-ca.pem
+chmod 644 /etc/conveyor/rds-ca.pem
 aws ecr get-login-password --region '${region}' | docker login --username AWS --password-stdin '${ecr}'
+
+%{ if edge == "caddy" ~}
+# Caddy edge: claim the stack's Elastic IP, then terminate TLS here (Let's Encrypt) for
+# the UI on 443 and gRPC (h2) on 1985; Conveyor itself listens on 4000 and 1986.
+TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+INSTANCE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+aws ec2 associate-address --region '${region}' --allocation-id '${eip_allocation}' --instance-id "$INSTANCE" --allow-reassociation
+GRPC_PORT=1986
+FORCE_SSL=true
+mkdir -p /etc/caddy
+cat > /etc/caddy/Caddyfile <<'CADDY'
+${phx_host} {
+  reverse_proxy 127.0.0.1:4000
+}
+${phx_host}:1985 {
+  reverse_proxy h2c://127.0.0.1:1986
+}
+CADDY
+docker run -d --name caddy --restart unless-stopped --network host \
+  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config \
+  caddy:2
+%{ else ~}
+GRPC_PORT=1985
+FORCE_SSL=false
+%{ endif ~}
+
 docker run -d --name conveyor --restart unless-stopped --network host \
   -v /etc/conveyor:/etc/conveyor:ro \
   -e DATABASE_URL='${database_url}' \
+  -e DATABASE_SSL=true -e DATABASE_SSL_CA=/etc/conveyor/rds-ca.pem \
   -e SECRET_KEY_BASE='${secret_key_base}' \
   -e RELEASE_COOKIE='${release_cookie}' \
-  -e PHX_HOST='${phx_host}' -e PORT=4000 -e GRPC_PORT=1985 \
+  -e PHX_HOST='${phx_host}' -e PORT=4000 -e GRPC_PORT=$GRPC_PORT -e FORCE_SSL=$FORCE_SSL \
   -e AUTH_MODE=open -e ADMIN_TOKEN='${admin_token}' -e BES_INGEST_AUTH=api_key \
   -e BLOB_STORE=s3 -e S3_BUCKET='${bucket}' -e AWS_REGION='${region}' \
   -e CAS_SINK_ENABLED=true -e POOL_SIZE=40 \

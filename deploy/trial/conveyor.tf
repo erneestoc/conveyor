@@ -17,7 +17,10 @@ resource "aws_iam_role_policy" "conveyor" {
     Version = "2012-10-17"
     Statement = [
       { Effect = "Allow", Action = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"], Resource = [aws_s3_bucket.blobs.arn, "${aws_s3_bucket.blobs.arn}/*"] },
-      { Effect = "Allow", Action = ["ec2:DescribeInstances"], Resource = "*" },
+      { Effect = "Allow", Action = ["ec2:DescribeInstances", "ec2:DescribeAddresses"], Resource = "*" },
+      # The Caddy edge: the node attaches the stack's Elastic IP to itself at boot.
+      { Effect = "Allow", Action = ["ec2:AssociateAddress"], Resource = "*",
+      Condition = { StringEquals = { "aws:ResourceTag/project" = "conveyor-trial" } } },
       { Effect = "Allow", Action = ["ecr:GetAuthorizationToken", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], Resource = "*" },
       { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "*" }
     ]
@@ -65,6 +68,16 @@ resource "aws_security_group" "conveyor" {
     to_port         = 1985
     protocol        = "tcp"
     security_groups = [aws_security_group.lb.id]
+  }
+  # Caddy edge: the node itself terminates TLS (80 for the ACME challenge, 443, 1985).
+  dynamic "ingress" {
+    for_each = var.edge == "caddy" ? [80, 443, 1985] : []
+    content {
+      from_port   = ingress.value
+      to_port     = ingress.value
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
   }
   ingress {
     description = "Erlang distribution between nodes"
@@ -115,6 +128,7 @@ resource "aws_db_instance" "db" {
   backup_retention_period      = 1
   performance_insights_enabled = false
   parameter_group_name         = aws_db_parameter_group.db.name
+  snapshot_identifier          = var.db_snapshot_identifier
 }
 
 resource "aws_db_parameter_group" "db" {
@@ -125,10 +139,10 @@ resource "aws_db_parameter_group" "db" {
     value        = "400"
     apply_method = "pending-reboot"
   }
-  # The release connects without TLS inside the VPC; RDS forces TLS by default since PG 15.
+  # The release verifies the RDS certificate (DATABASE_SSL=true with the global bundle).
   parameter {
     name  = "rds.force_ssl"
-    value = "0"
+    value = "1"
   }
 }
 
@@ -152,12 +166,14 @@ resource "aws_acm_certificate_validation" "conveyor" {
 }
 
 resource "aws_lb" "nlb" {
+  count              = var.edge == "nlb" ? 1 : 0
   name               = substr("${var.name}-nlb", 0, 32)
   load_balancer_type = "network"
   subnets            = local.subnets
   security_groups    = [aws_security_group.lb.id]
 }
 resource "aws_lb_target_group" "web" {
+  count                = var.edge == "nlb" ? 1 : 0
   name                 = substr("${var.name}-web", 0, 32)
   port                 = 4000
   protocol             = "TCP"
@@ -170,6 +186,7 @@ resource "aws_lb_target_group" "web" {
   }
 }
 resource "aws_lb_target_group" "grpc" {
+  count                = var.edge == "nlb" ? 1 : 0
   name                 = substr("${var.name}-grpc", 0, 32)
   port                 = 1985
   protocol             = "TCP"
@@ -183,18 +200,20 @@ resource "aws_lb_target_group" "grpc" {
   }
 }
 resource "aws_lb_listener" "web" {
-  load_balancer_arn = aws_lb.nlb.arn
+  count             = var.edge == "nlb" ? 1 : 0
+  load_balancer_arn = aws_lb.nlb[0].arn
   port              = 443
   protocol          = "TLS"
   certificate_arn   = aws_acm_certificate_validation.conveyor.certificate_arn
   ssl_policy        = "ELBSecurityPolicy-TLS13-1-2-2021-06"
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.web.arn
+    target_group_arn = aws_lb_target_group.web[0].arn
   }
 }
 resource "aws_lb_listener" "grpc" {
-  load_balancer_arn = aws_lb.nlb.arn
+  count             = var.edge == "nlb" ? 1 : 0
+  load_balancer_arn = aws_lb.nlb[0].arn
   port              = 1985
   protocol          = "TLS"
   certificate_arn   = aws_acm_certificate_validation.conveyor.certificate_arn
@@ -202,18 +221,34 @@ resource "aws_lb_listener" "grpc" {
   alpn_policy       = "HTTP2Preferred"
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.grpc.arn
+    target_group_arn = aws_lb_target_group.grpc[0].arn
   }
 }
 resource "aws_route53_record" "conveyor" {
+  count   = var.edge == "nlb" ? 1 : 0
   zone_id = var.zone_id
   name    = var.conveyor_host
   type    = "A"
   alias {
-    name                   = aws_lb.nlb.dns_name
-    zone_id                = aws_lb.nlb.zone_id
+    name                   = aws_lb.nlb[0].dns_name
+    zone_id                = aws_lb.nlb[0].zone_id
     evaluate_target_health = false
   }
+}
+
+# Caddy edge: a stable address the single node claims at boot; DNS points at it.
+resource "aws_eip" "conveyor" {
+  count  = var.edge == "caddy" ? 1 : 0
+  domain = "vpc"
+  tags   = { Name = "${var.name}-conveyor" }
+}
+resource "aws_route53_record" "conveyor_eip" {
+  count   = var.edge == "caddy" ? 1 : 0
+  zone_id = var.zone_id
+  name    = var.conveyor_host
+  type    = "A"
+  ttl     = 60
+  records = [aws_eip.conveyor[0].public_ip]
 }
 
 resource "aws_launch_template" "conveyor" {
@@ -250,6 +285,8 @@ resource "aws_launch_template" "conveyor" {
     name            = var.name
     drain_seconds   = var.drain_seconds
     rbe_ca          = tls_self_signed_cert.ca.cert_pem
+    edge            = var.edge
+    eip_allocation  = var.edge == "caddy" ? aws_eip.conveyor[0].id : ""
   }))
 }
 
@@ -259,8 +296,8 @@ resource "aws_autoscaling_group" "conveyor" {
   min_size                  = 0
   max_size                  = 6
   vpc_zone_identifier       = local.subnets
-  target_group_arns         = [aws_lb_target_group.web.arn, aws_lb_target_group.grpc.arn]
-  health_check_type         = "ELB"
+  target_group_arns         = var.edge == "nlb" ? [aws_lb_target_group.web[0].arn, aws_lb_target_group.grpc[0].arn] : []
+  health_check_type         = var.edge == "nlb" ? "ELB" : "EC2"
   health_check_grace_period = 300
   launch_template {
     id      = aws_launch_template.conveyor.id
@@ -268,11 +305,17 @@ resource "aws_autoscaling_group" "conveyor" {
   }
   instance_refresh {
     strategy = "Rolling"
-    preferences { min_healthy_percentage = 50 }
+    preferences { min_healthy_percentage = var.edge == "nlb" ? 50 : 0 }
   }
   tag {
     key                 = "conveyor-cluster"
     value               = var.name
     propagate_at_launch = true
+  }
+  lifecycle {
+    precondition {
+      condition     = var.edge == "nlb" || var.conveyor_count <= 1
+      error_message = "the caddy edge serves one node; use edge = nlb for more"
+    }
   }
 }

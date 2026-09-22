@@ -14,6 +14,10 @@ on your own hardware before committing to a size (`mix conveyor.loadgen --help`)
 - **Postgres** is the durability boundary: an event is acknowledged only after its batch
   commits. Never run with `synchronous_commit = off` (measured to change nothing anyway).
 - **Blob store** must be S3 (or compatible) with more than one node (`BLOB_STORE=s3`).
+- **Single node without a balancer**: put Caddy in front (`reverse_proxy 127.0.0.1:4000`
+  for the UI and `reverse_proxy h2c://127.0.0.1:1986` on `:1985` for gRPC, with Conveyor
+  on `GRPC_PORT=1986`); Caddy obtains the certificate from Let's Encrypt and serves h2 to
+  Bazel. `deploy/trial` does exactly this in its staging shape (`edge = "caddy"`).
 - **Load balancer**: gRPC (HTTP/2) on `GRPC_PORT` (1985) and HTTP on `PORT`. Bazel opens
   one HTTP/2 connection per build. Deregistration delay must exceed
   `SHUTDOWN_DRAIN_SECONDS` so a draining node receives no new streams.

@@ -12,6 +12,22 @@ rbe.algobien.com                             └── worker ASG (amd64, same t
 ECS Fargate "builder" tasks ── bazel --bes_backend=grpcs://conveyor… --remote_cache/--remote_executor=grpcs://…rbe…
 ```
 
+## Shapes
+
+- **Staging (default):** `edge = "caddy"`, one `t4g.medium` node with a Caddy sidecar that
+  terminates TLS itself (Let's Encrypt for the UI on 443 and gRPC/h2 on 1985), an Elastic
+  IP the node claims at boot and DNS pointing at it; no balancer. About $2.30/day with the
+  `db.t3.micro`. Caddy keeps its certificate in a Docker volume on the instance, so an
+  instance refresh re-issues it (Let's Encrypt allows five per week for the same name).
+- **Soak / multi-node:** `-var edge=nlb -var conveyor_count=2` puts the nodes behind the
+  Network Load Balancer with the ACM certificate. Switching shapes changes DNS and rolls
+  the nodes (a few minutes of unavailability).
+- **Restore from a backup:** `-var db_snapshot_identifier=<snapshot>` builds the database
+  from an RDS snapshot (a fresh stack) — on an existing stack it *replaces* the database.
+
+The nodes connect to RDS with `DATABASE_SSL=true` and the AWS global bundle downloaded at
+boot; `rds.force_ssl` is on.
+
 ## Bring-up
 
 ```sh

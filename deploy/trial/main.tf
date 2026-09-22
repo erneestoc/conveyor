@@ -36,6 +36,18 @@ variable "cache_host" { default = "cache.rbe.algobien.com" }
 variable "conveyor_image_tag" { default = "trial" }
 variable "conveyor_instance_type" { default = "t4g.medium" }
 variable "conveyor_count" { default = 1 }
+variable "edge" {
+  description = "How clients reach Conveyor: \"nlb\" (TLS at a Network Load Balancer with an ACM certificate, any node count) or \"caddy\" (one node with a Caddy sidecar: Let's Encrypt on 443 and h2 on 1985, an Elastic IP, no balancer)."
+  default     = "nlb"
+  validation {
+    condition     = contains(["nlb", "caddy"], var.edge)
+    error_message = "edge must be nlb or caddy"
+  }
+}
+variable "db_snapshot_identifier" {
+  description = "Build the database from this RDS snapshot instead of empty (a fresh stack restored from a backup). Changing it on an existing stack replaces the database."
+  default     = null
+}
 variable "db_instance_class" { default = "db.t3.micro" }
 variable "rbe_enabled" { default = false }
 variable "nl_control_type" { default = "c6i.xlarge" }
