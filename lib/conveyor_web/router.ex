@@ -50,9 +50,19 @@ defmodule ConveyorWeb.Router do
     get "/invocation/:id/artifact/:name", DownloadController, :artifact
   end
 
+  # The scrape endpoint reads the session (admin check when no METRICS_TOKEN is set).
+  pipeline :metrics do
+    plug :fetch_session
+    plug :protect_from_forgery
+  end
+
+  scope "/", ConveyorWeb do
+    pipe_through [:api, :metrics]
+    get "/metrics", MetricsController, :index
+  end
+
   scope "/", ConveyorWeb do
     pipe_through :api
-    get "/metrics", MetricsController, :index
     get "/health/live", HealthController, :live
     get "/health/ready", HealthController, :ready
   end

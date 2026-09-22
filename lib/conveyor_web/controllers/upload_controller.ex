@@ -54,7 +54,7 @@ defmodule ConveyorWeb.UploadController do
     key = conn.assigns.api_key
 
     with {:ok, uuid} <- cast_uuid(id),
-         :ok <- not_already_finished(uuid),
+         :ok <- not_already_finished(uuid, key),
          {:ok, body} <- read_all(conn),
          {:ok, events} <- decode_events(body),
          :ok <- ids_match(uuid, events),
@@ -147,8 +147,13 @@ defmodule ConveyorWeb.UploadController do
     end
   end
 
-  defp not_already_finished(uuid) do
+  # An id that belongs to another project is "not found" for this key: it is neither
+  # reported as finished nor appended to.
+  defp not_already_finished(uuid, key) do
     case Invocations.get(uuid) do
+      %{project_id: pid} when pid != key.project_id ->
+        {:error, 404, "no invocation #{uuid} in project #{key.project.slug}"}
+
       %{stream_finished: true} ->
         {:error, 409, "invocation #{uuid} already has a complete event stream"}
 

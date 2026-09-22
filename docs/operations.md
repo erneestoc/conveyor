@@ -8,7 +8,7 @@
 
 ## Metrics
 
-`GET /metrics` serves Prometheus text (protect it with `METRICS_TOKEN`). A Grafana
+`GET /metrics` serves Prometheus text (set `METRICS_TOKEN` for the scraper; without it only an admin session may read it). A Grafana
 dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 
 | Series | Alert when |

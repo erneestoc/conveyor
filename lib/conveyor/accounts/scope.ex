@@ -60,4 +60,18 @@ defmodule Conveyor.Accounts.Scope do
   @doc "Filters projects down to those the scope may see."
   @spec visible_projects(t(), [map()]) :: [map()]
   def visible_projects(scope, projects), do: Enum.filter(projects, &can_view_project?(scope, &1))
+
+  @doc """
+  The projects a read may touch: `:all` for admins, otherwise the ids of every project
+  (archived ones included, so their builds stay reachable) the scope may see. Every read
+  path takes this as its `project_ids` restriction so cross-project rows never leave SQL.
+  """
+  @spec project_ids(t()) :: :all | [integer()]
+  def project_ids(%__MODULE__{admin?: true}), do: :all
+
+  def project_ids(%__MODULE__{} = scope) do
+    scope
+    |> visible_projects(Conveyor.Projects.list_projects(include_archived: true))
+    |> Enum.map(& &1.id)
+  end
 end

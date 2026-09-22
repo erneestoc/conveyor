@@ -24,7 +24,11 @@ application with the callback `https://conveyor.example.com/oidc/callback` and s
 | `ADMIN_EMAILS` | Comma-separated emails that get Settings access (no groups needed) |
 | `ALLOWED_EMAIL_DOMAINS` | Comma-separated domains allowed to sign in (empty = any account the provider returns) |
 
-Allowed groups per project are managed in Settings. Sessions are cookie-based and expire
+Allowed groups per project are managed in Settings. The project is the hard boundary:
+every read (builds list and facets, invocation pages, downloads and artifacts, dashboards
+and test health, execution-log comparisons, API uploads) is restricted in the query itself
+to the projects the viewer may see, so another project's ids and slugs are simply not found
+(`test/conveyor_web/project_boundary_test.exs` walks every route to prove it). Sessions are cookie-based and expire
 with the browser session; every admin action is written to the audit log (Settings →
 Audit).
 

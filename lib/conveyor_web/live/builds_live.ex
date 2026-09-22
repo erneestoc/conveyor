@@ -37,11 +37,16 @@ defmodule ConveyorWeb.BuildsLive do
       Phoenix.PubSub.subscribe(Conveyor.PubSub, topic)
     end
 
+    # Every read below is restricted to the projects this viewer may see; the all-builds
+    # page is "all the builds of the viewer's projects".
+    visible = ConveyorWeb.Auth.project_ids(socket)
+
     {:ok,
      socket
      |> assign(
        projects: projects,
        project: project,
+       visible: visible,
        page_title: if(project, do: "#{project.name} builds", else: "Builds")
      )
      |> assign(status_filter: "all", known: MapSet.new(), has_more: false, cursor: nil, count: 0)
@@ -49,9 +54,9 @@ defmodule ConveyorWeb.BuildsLive do
        q: "",
        query: [],
        query_error: nil,
-       facets: Invocations.facets(project && project.id),
+       facets: Invocations.facets(project && project.id, project_ids: visible),
        show_facets: true,
-       suggestions: suggestions(project)
+       suggestions: suggestions(project, visible)
      )
      |> stream_configure(:invocations, dom_id: &"inv-#{&1.id}")
      |> stream(:invocations, [])}
@@ -69,7 +74,7 @@ defmodule ConveyorWeb.BuildsLive do
       end
 
     socket = assign(socket, q: q, query: query, query_error: error)
-    rows = load(socket.assigns.project, filter, query, nil)
+    rows = load(socket, filter, query, nil)
 
     {:noreply,
      socket
@@ -86,12 +91,7 @@ defmodule ConveyorWeb.BuildsLive do
   @impl true
   def handle_event("load_more", _params, socket) do
     rows =
-      load(
-        socket.assigns.project,
-        socket.assigns.status_filter,
-        socket.assigns.query,
-        socket.assigns.cursor
-      )
+      load(socket, socket.assigns.status_filter, socket.assigns.query, socket.assigns.cursor)
 
     {:noreply,
      socket
@@ -147,7 +147,8 @@ defmodule ConveyorWeb.BuildsLive do
     inv = to_invocation(summary)
 
     matches? =
-      matches_filter?(inv, socket.assigns.status_filter) and
+      visible?(inv, socket.assigns.visible) and
+        matches_filter?(inv, socket.assigns.status_filter) and
         Query.matches?(socket.assigns.query, inv)
 
     known? = MapSet.member?(socket.assigns.known, inv.id)
@@ -179,9 +180,12 @@ defmodule ConveyorWeb.BuildsLive do
     end
   end
 
-  defp load(project, filter, query, cursor) do
+  defp load(socket, filter, query, cursor) do
+    project = socket.assigns.project
+
     Invocations.list(
       project_id: project && project.id,
+      project_ids: socket.assigns.visible,
       statuses: @status_filters[filter],
       query: query,
       limit: @page_size,
@@ -189,11 +193,15 @@ defmodule ConveyorWeb.BuildsLive do
     )
   end
 
+  # The all-builds topic carries every project's digests; drop the ones outside the viewer's.
+  defp visible?(_inv, :all), do: true
+  defp visible?(%Invocation{project_id: id}, ids), do: id in ids
+
   # Datalist entries for the search box: built-in keys plus observed tag key:value pairs.
-  defp suggestions(project) do
+  defp suggestions(project, visible) do
     tags =
       (project && project.id)
-      |> Invocations.facets(values: 10, keys: 40)
+      |> Invocations.facets(values: 10, keys: 40, project_ids: visible)
       |> Enum.flat_map(fn f ->
         ["#{f.key}:" | Enum.map(f.values, fn {v, _} -> "#{f.key}:#{v}" end)]
       end)

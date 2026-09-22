@@ -83,7 +83,12 @@ defmodule ConveyorWeb.DashboardLive do
 
   defp load(socket) do
     project = socket.assigns.project
-    base = Scope.new(socket.assigns.range, project && project.id, socket.assigns.query)
+
+    base =
+      socket.assigns.range
+      |> Scope.new(project && project.id, socket.assigns.query)
+      |> Scope.restrict(ConveyorWeb.Auth.project_ids(socket))
+
     segments = socket.assigns.segments
     scope = if s = socket.assigns.segment, do: segment_scope(base, segments, s), else: base
 

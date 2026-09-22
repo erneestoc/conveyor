@@ -18,11 +18,22 @@ defmodule Conveyor.Invocations do
 
   alias Conveyor.Repo
 
-  @spec get(String.t()) :: Invocation.t() | nil
-  def get(id) do
+  @doc """
+  An invocation by id, or nil. `project_ids: [ids]` (from `Conveyor.Accounts.Scope.project_ids/1`)
+  restricts the lookup to those projects, so a foreign id reads as not found; `:all` (the
+  default) is for trusted callers such as workers.
+  """
+  @spec get(String.t(), keyword()) :: Invocation.t() | nil
+  def get(id, opts \\ []) do
     case Ecto.UUID.cast(id) do
-      {:ok, uuid} -> Repo.get(Invocation, uuid)
-      :error -> nil
+      {:ok, uuid} ->
+        Invocation
+        |> where([i], i.id == ^uuid)
+        |> maybe_projects(Keyword.get(opts, :project_ids, :all))
+        |> Repo.one()
+
+      :error ->
+        nil
     end
   end
 
@@ -30,9 +41,10 @@ defmodule Conveyor.Invocations do
   def get!(id), do: Repo.get!(Invocation, id)
 
   @doc """
-  Newest-first page of invocations. Options: `:project_id`, `:status`, `:statuses` (list),
-  `:limit` (default 50), `:before` (`{started_at, id}` cursor), `:query` (a parsed
-  `Conveyor.Query` AST) with `:now` as the reference time for relative dates.
+  Newest-first page of invocations. Options: `:project_id`, `:project_ids` (`:all` or the
+  list a scope may read), `:status`, `:statuses` (list), `:limit` (default 50), `:before`
+  (`{started_at, id}` cursor), `:query` (a parsed `Conveyor.Query` AST) with `:now` as the
+  reference time for relative dates.
   """
   @spec list(keyword()) :: [Invocation.t()]
   def list(opts \\ []) do
@@ -40,6 +52,7 @@ defmodule Conveyor.Invocations do
 
     Invocation
     |> maybe_where(:project_id, opts[:project_id])
+    |> maybe_projects(Keyword.get(opts, :project_ids, :all))
     |> maybe_where(:status, opts[:status])
     |> maybe_statuses(opts[:statuses])
     |> maybe_query(opts[:query], opts[:now] || DateTime.utc_now())
@@ -51,6 +64,11 @@ defmodule Conveyor.Invocations do
 
   defp maybe_where(query, _field, nil), do: query
   defp maybe_where(query, field, value), do: where(query, [i], field(i, ^field) == ^value)
+
+  @doc "Restricts a query on a table with `project_id` to `:all` or a list of project ids."
+  @spec maybe_projects(Ecto.Query.t(), :all | [integer()]) :: Ecto.Query.t()
+  def maybe_projects(query, :all), do: query
+  def maybe_projects(query, ids) when is_list(ids), do: where(query, [i], i.project_id in ^ids)
 
   defp maybe_query(query, nil, _now), do: query
   defp maybe_query(query, [], _now), do: query
@@ -235,7 +253,7 @@ defmodule Conveyor.Invocations do
 
   @doc """
   Tag facets: every key with its most common values and counts, most used keys first.
-  `project_id` nil aggregates across projects.
+  `project_id` nil aggregates across the projects in `:project_ids` (default `:all`).
   """
   @spec facets(integer() | nil, keyword()) :: [
           %{key: String.t(), total: integer(), values: [{String.t(), integer()}]}
@@ -246,6 +264,7 @@ defmodule Conveyor.Invocations do
 
     TagKey
     |> maybe_where(:project_id, project_id)
+    |> maybe_projects(Keyword.get(opts, :project_ids, :all))
     |> where([t], t.value != "")
     |> group_by([t], [t.key, t.value])
     |> select([t], {t.key, t.value, type(sum(t.count), :integer)})

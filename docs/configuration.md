@@ -17,7 +17,7 @@ shown.
 | `POOL_SIZE` | `40` | PostgreSQL connections per node |
 | `ECTO_IPV6` | `false` | connect to PostgreSQL over IPv6 |
 | `SHUTDOWN_DRAIN_SECONDS` | `30` | how long SIGTERM waits for open streams |
-| `METRICS_TOKEN` | unset | when set, `/metrics` requires `Authorization: Bearer <token>` |
+| `METRICS_TOKEN` | unset | when set, `/metrics` requires `Authorization: Bearer <token>`; when unset, an admin session (open mode without `ADMIN_TOKEN`: everyone) |
 
 ## Ingest
 

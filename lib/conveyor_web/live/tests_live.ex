@@ -29,7 +29,12 @@ defmodule ConveyorWeb.TestsLive do
     q = String.trim(params["q"] || "")
     query = Query.parse!(q)
     project = socket.assigns.project
-    scope = Scope.new(range, project && project.id, query)
+
+    scope =
+      range
+      |> Scope.new(project && project.id, query)
+      |> Scope.restrict(ConveyorWeb.Auth.project_ids(socket))
+
     rows = Tests.overview(scope)
 
     {:noreply,

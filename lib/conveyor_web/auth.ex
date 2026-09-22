@@ -41,26 +41,20 @@ defmodule ConveyorWeb.Auth do
     end
   end
 
-  @doc "True when the scope may see the invocation's project."
-  @spec can_view_invocation?(Scope.t(), Invocations.Invocation.t()) :: boolean()
-  def can_view_invocation?(%Scope{admin?: true}, _inv), do: true
+  @doc "The project ids a scope may read (`Conveyor.Accounts.Scope.project_ids/1`), for read paths."
+  @spec project_ids(Scope.t() | Plug.Conn.t() | Phoenix.LiveView.Socket.t()) :: :all | [integer()]
+  def project_ids(%Scope{} = scope), do: Scope.project_ids(scope)
+  def project_ids(%{assigns: %{current_scope: scope}}), do: Scope.project_ids(scope)
 
-  def can_view_invocation?(%Scope{} = scope, %{project_id: project_id}) do
-    case Projects.get_project(project_id) do
-      nil -> false
-      project -> Scope.can_view_project?(scope, project)
-    end
-  end
-
-  @doc "Loads an invocation the scope may see, raising `ConveyorWeb.NotFoundError` otherwise."
+  @doc """
+  Loads an invocation the scope may see, raising `ConveyorWeb.NotFoundError` otherwise.
+  The project restriction is part of the lookup: an id in another project is not found.
+  """
   @spec invocation!(Scope.t() | Plug.Conn.t(), String.t()) :: Invocations.Invocation.t()
   def invocation!(%Plug.Conn{assigns: %{current_scope: scope}}, id), do: invocation!(scope, id)
 
   def invocation!(%Scope{} = scope, id) do
-    inv = Invocations.get(id) || raise ConveyorWeb.NotFoundError, "no invocation #{id}"
-
-    if can_view_invocation?(scope, inv),
-      do: inv,
-      else: raise(ConveyorWeb.NotFoundError, "no invocation #{id}")
+    Invocations.get(id, project_ids: Scope.project_ids(scope)) ||
+      raise ConveyorWeb.NotFoundError, "no invocation #{id}"
   end
 end

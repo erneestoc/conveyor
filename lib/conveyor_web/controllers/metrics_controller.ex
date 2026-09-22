@@ -1,6 +1,13 @@
 defmodule ConveyorWeb.MetricsController do
-  @moduledoc "Prometheus scrape endpoint; protected by `METRICS_TOKEN` when one is configured."
+  @moduledoc """
+  Prometheus scrape endpoint. With `METRICS_TOKEN` set, the token (bearer or `?token=`) is
+  the only credential; without one, the caller needs an admin session (in open mode
+  without `ADMIN_TOKEN` that is everyone, as before). The metrics carry no per-project
+  labels, so there is no per-project view: it is admin-only.
+  """
   use ConveyorWeb, :controller
+
+  alias Conveyor.Accounts.Scope
 
   def index(conn, params) do
     expected = Application.get_env(:conveyor, :metrics_token)
@@ -16,7 +23,9 @@ defmodule ConveyorWeb.MetricsController do
     end
   end
 
-  defp authorized?(_conn, _params, expected) when expected in [nil, ""], do: true
+  defp authorized?(conn, _params, expected) when expected in [nil, ""] do
+    conn |> get_session() |> Scope.from_session() |> Map.fetch!(:admin?)
+  end
 
   defp authorized?(conn, params, expected) do
     presented =

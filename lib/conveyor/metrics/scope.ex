@@ -11,13 +11,14 @@ defmodule Conveyor.Metrics.Scope do
 
   @type t :: %__MODULE__{
           project_id: integer() | nil,
+          project_ids: :all | [integer()],
           from: DateTime.t(),
           to: DateTime.t(),
           query: Query.ast(),
           name: String.t() | nil
         }
 
-  defstruct project_id: nil, from: nil, to: nil, query: [], name: nil
+  defstruct project_id: nil, project_ids: :all, from: nil, to: nil, query: [], name: nil
 
   @ranges %{"24h" => 24 * 3600, "7d" => 7 * 86_400, "30d" => 30 * 86_400, "90d" => 90 * 86_400}
 
@@ -35,6 +36,13 @@ defmodule Conveyor.Metrics.Scope do
       query: query
     }
   end
+
+  @doc """
+  Restricts the scope to the projects a viewer may read (`Conveyor.Accounts.Scope.project_ids/1`).
+  An all-projects dashboard is only ever "all the projects this viewer may see".
+  """
+  @spec restrict(t(), :all | [integer()]) :: t()
+  def restrict(%__MODULE__{} = scope, project_ids), do: %{scope | project_ids: project_ids}
 
   @doc "The window of the same length immediately before this one (for period-over-period deltas)."
   @spec previous(t()) :: t()
@@ -63,6 +71,7 @@ defmodule Conveyor.Metrics.Scope do
     Invocation
     |> where([i], i.started_at >= ^scope.from and i.started_at < ^scope.to)
     |> maybe_project(scope.project_id)
+    |> Conveyor.Invocations.maybe_projects(scope.project_ids)
     |> maybe_query(scope.query)
   end
 

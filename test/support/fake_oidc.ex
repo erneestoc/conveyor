@@ -15,8 +15,15 @@ defmodule Conveyor.FakeOidc do
   def client_id, do: @client_id
   def client_secret, do: @client_secret
 
-  @doc "Starts the provider; returns its issuer URL."
+  @doc "Starts the provider (once per VM; later calls reuse it); returns its issuer URL."
   def start do
+    case Process.whereis(__MODULE__) do
+      nil -> start_new()
+      _pid -> state(:issuer)
+    end
+  end
+
+  defp start_new do
     key = :public_key.generate_key({:rsa, 2048, 65537})
     {:RSAPrivateKey, _, n, e, _, _, _, _, _, _, _} = key
     pem = :public_key.pem_encode([:public_key.pem_entry_encode(:RSAPrivateKey, key)])
@@ -33,12 +40,15 @@ defmodule Conveyor.FakeOidc do
     }
 
     {:ok, _} =
-      Agent.start_link(
+      Agent.start(
         fn -> %{pem: pem, jwk: jwk, issuer: issuer, codes: %{}, claims: default_claims()} end,
         name: __MODULE__
       )
 
-    {:ok, _} = Bandit.start_link(plug: __MODULE__, port: port, ip: {127, 0, 0, 1})
+    # Unlinked: the provider outlives the setup_all process that started it, so every
+    # OIDC test module in the run shares one instance.
+    {:ok, server} = Bandit.start_link(plug: __MODULE__, port: port, ip: {127, 0, 0, 1})
+    Process.unlink(server)
     issuer
   end
 
