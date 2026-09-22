@@ -211,21 +211,30 @@ defmodule Conveyor.Bep.Replay do
     else
       parent = self()
 
+      # A connection that dies mid-stream (the server was killed) makes the adapter raise
+      # inside the sender; the receiver below reports the error and the caller retries on
+      # another host, so the sender must end quietly rather than take the caller down.
       sender =
         spawn_link(fn ->
-          Enum.each(to_send, fn {event, seq} ->
-            if conn.delay > 0, do: Process.sleep(conn.delay)
-            send(parent, {:sent, seq, System.monotonic_time(:microsecond)})
-            send_one(conn, stream, seq, event)
-          end)
+          try do
+            Enum.each(to_send, fn {event, seq} ->
+              if conn.delay > 0, do: Process.sleep(conn.delay)
+              send(parent, {:sent, seq, System.monotonic_time(:microsecond)})
+              send_one(conn, stream, seq, event)
+            end)
 
-          finished =
-            {:component_stream_finished,
-             %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
+            finished =
+              {:component_stream_finished,
+               %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
 
-          final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
-          send(parent, {:sent, total + 1, System.monotonic_time(:microsecond)})
-          GRPC.Stub.send_request(stream, final, end_stream: true)
+            final = request(conn.project_id, ordered_event(conn.stream_id, total + 1, finished))
+            send(parent, {:sent, total + 1, System.monotonic_time(:microsecond)})
+            GRPC.Stub.send_request(stream, final, end_stream: true)
+          rescue
+            _ -> :ok
+          catch
+            :exit, _ -> :ok
+          end
         end)
 
       result =

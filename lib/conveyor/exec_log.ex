@@ -18,7 +18,12 @@ defmodule Conveyor.ExecLog do
   alias Tools.Protos.ExecLogEntry, as: Entry
 
   @name_re ~r/exec(ution)?[._-]?log/i
-  @chunk 500
+  # Rows carry a compressed input list each (kilobytes to a megabyte for a test's
+  # runfiles): small chunks and generous timeouts keep a modest database (the trial's
+  # db.t3.micro) inside the statement timeout; transient connection errors are retried
+  # rather than charged to the job's attempts.
+  @chunk 100
+  @db_timeout :timer.minutes(5)
 
   @typedoc "A parsed spawn, ready to be stored."
   @type spawn :: map()
@@ -279,18 +284,34 @@ defmodule Conveyor.ExecLog do
     now = DateTime.utc_now()
     rows = Enum.map(spawns, &(Map.put(&1, :invocation_id, id) |> Map.put(:inserted_at, now)))
 
-    Repo.transaction(fn ->
-      Repo.delete_all(from s in Spawn, where: s.invocation_id == ^id)
-      Enum.each(Enum.chunk_every(rows, @chunk), &Repo.insert_all(Spawn, &1))
-      set_status(inv, "parsed")
-    end)
+    Conveyor.Ingest.Retry.with_backoff(
+      fn ->
+        Repo.transaction(
+          fn ->
+            Repo.delete_all(from(s in Spawn, where: s.invocation_id == ^id), timeout: @db_timeout)
+
+            Enum.each(
+              Enum.chunk_every(rows, @chunk),
+              &Repo.insert_all(Spawn, &1, timeout: @db_timeout)
+            )
+
+            set_status(inv, "parsed")
+          end,
+          timeout: @db_timeout
+        )
+      end,
+      label: "store spawns #{id}"
+    )
 
     length(rows)
   end
 
   @spec set_status(Invocation.t(), String.t()) :: :ok
   def set_status(%Invocation{id: id}, status) do
-    Repo.update_all(from(i in Invocation, where: i.id == ^id), set: [exec_log_status: status])
+    Repo.update_all(from(i in Invocation, where: i.id == ^id), [set: [exec_log_status: status]],
+      timeout: @db_timeout
+    )
+
     :ok
   end
 

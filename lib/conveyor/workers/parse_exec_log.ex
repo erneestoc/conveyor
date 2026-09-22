@@ -1,8 +1,8 @@
 defmodule Conveyor.Workers.ParseExecLog do
   @moduledoc "Parses an uploaded execution log into spawns and notifies the invocation page."
   use Oban.Worker,
-    queue: :default,
-    max_attempts: 3,
+    queue: :parse,
+    max_attempts: 5,
     unique: [period: 60, keys: [:invocation_id]]
 
   alias Conveyor.{Artifacts, Blobs, ExecLog, Invocations}

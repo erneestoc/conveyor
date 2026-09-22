@@ -30,7 +30,8 @@ config :conveyor, Conveyor.Ingest,
 
 config :conveyor, Oban,
   repo: Conveyor.Repo,
-  queues: [default: 10, maintenance: 2],
+  # Execution-log parses are CPU- and database-heavy: two at a time, on their own queue.
+  queues: [default: 10, maintenance: 2, parse: 2],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
     # Jobs left "executing" by a node that died or a producer that restarted go back to
