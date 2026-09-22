@@ -75,4 +75,20 @@ defmodule Conveyor.Blobs.S3ContractTest do
     assert url =~ digest
     if opts[:endpoint], do: assert(String.starts_with?(url, opts[:endpoint]))
   end
+
+  test "a project prefix is one more path segment under the bucket prefix", %{opts: opts} do
+    content = "per-project #{System.unique_integer()}"
+    digest = Blobs.digest(content)
+    scoped = Keyword.put(opts, :project_prefix, "contract-project")
+    assert S3.url(digest, scoped) =~ "/contract-test/contract-project/#{digest}"
+
+    assert :ok = S3.put(digest, [content], scoped)
+    assert S3.exists?(digest, scoped)
+    # The same digest without the project prefix is a different object.
+    refute S3.exists?(digest, opts)
+    assert {:ok, stream} = S3.stream(digest, scoped)
+    assert stream |> Enum.to_list() |> IO.iodata_to_binary() == content
+    assert :ok = S3.delete(digest, scoped)
+    refute S3.exists?(digest, scoped)
+  end
 end
