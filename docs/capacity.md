@@ -82,6 +82,7 @@ Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 |---|---|---|---|---|---|---|
 | 0 baseline | 990 | 69 / 284 | 141.6k (8.8 per flush) | 616 KB | 0.51 | 1,516 workers hold 378 MB of 472 MB process memory |
 | 1 fewer statements | 990 | 68 / 275 | 96.1k (6.2 per flush) | 610 KB | 0.50 | −32 % round trips; acks unchanged |
+| 5 hibernate quiet workers | 990 | 68 / 255 | 96.1k | 443 KB | 0.50 | workers 179 MB (was 378); flat-out peak RSS 1.85 GB with 10,000 lingering workers (was 3.2 GB), CPU unchanged |
 
 ## Starting points
 

@@ -133,8 +133,11 @@ defmodule Conveyor.Ingest.PropertyTest do
             list_of(
               list_of(
                 {integer(1..3), member_of(["a", "b"]), string(:alphanumeric, max_length: 4),
-                 map_of(member_of(["//x", "//y"]), member_of(["configured", "success"]),
-                   max_length: 2
+                 map(
+                   list_of({member_of(["//x", "//y"]), member_of(["configured", "success"])},
+                     max_length: 2
+                   ),
+                   &Map.new/1
                  )},
                 min_length: 1,
                 max_length: 4

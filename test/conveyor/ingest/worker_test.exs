@@ -21,6 +21,13 @@ defmodule Conveyor.Ingest.WorkerTest do
     end)
   end
 
+  # Tests run with no linger; this one needs the worker to stay for a moment.
+  defp with_linger(ms) do
+    env = Application.get_env(:conveyor, Conveyor.Ingest)
+    Application.put_env(:conveyor, Conveyor.Ingest, Keyword.put(env, :linger_ms, ms))
+    on_exit(fn -> Application.put_env(:conveyor, Conveyor.Ingest, env) end)
+  end
+
   defp finish(ctx, id, seq) do
     marker =
       {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
@@ -30,6 +37,7 @@ defmodule Conveyor.Ingest.WorkerTest do
 
   @tag :capture_log
   test "persists a full build, finalizes and exits after lingering", %{ctx: ctx} do
+    with_linger(2_000)
     id = Replay.uuid()
     events = events("clean_build_and_test")
     Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.project_topic(ctx.project_id))
@@ -54,6 +62,15 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert %{status: "in_progress", finalized: false} = Worker.summary(id)
     push_all(ctx, id, events, 4)
     finish(ctx, id, length(events) + 1)
+
+    # A finished worker hibernates on its next quiet tick and drops the wide columns it
+    # will never read again (PLAN §24 item 5); it still answers.
+    [{pid, _}] = Registry.lookup(Conveyor.Ingest.Registry, id)
+    Process.sleep(400)
+    {:current_function, {mod, fun, _}} = Process.info(pid, :current_function)
+    assert {mod, fun} in [{:erlang, :hibernate}, {:gen_server, :loop_hibernate}]
+    summary = Worker.summary(id)
+    assert summary.finalized and not Map.has_key?(summary, :options)
 
     assert :ok =
              Ingest.lifecycle(

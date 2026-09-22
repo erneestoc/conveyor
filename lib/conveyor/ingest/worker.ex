@@ -427,8 +427,17 @@ defmodule Conveyor.Ingest.Worker do
 
   def handle_info(:linger_expired, state), do: {:stop, :normal, state}
 
-  def handle_info(:broadcast, state),
-    do: {:noreply, state |> Map.put(:broadcast_timer, nil) |> broadcast()}
+  # A broadcast tick with nothing in flight is the quiet moment of a stream: between paced
+  # events, and for the whole linger of a finished build. Hibernating there compacts the
+  # heap and releases the event binaries the batches referenced (PLAN §24 item 5); a
+  # finished worker also drops the wide columns it will never read again.
+  def handle_info(:broadcast, state) do
+    state = state |> Map.put(:broadcast_timer, nil) |> broadcast()
+
+    if state.inflight == %{} and Batch.empty?(state.batch),
+      do: {:noreply, slim(state), :hibernate},
+      else: {:noreply, state}
+  end
 
   # Waiters are stored newest-first; acks must go out in ascending sequence order.
   defp notify_waiters(%Batch{waiters: waiters}, reply) do
@@ -560,6 +569,13 @@ defmodule Conveyor.Ingest.Worker do
 
     %{state | dirty: fresh_dirty()}
   end
+
+  @wide_columns [:options, :workspace_status, :configurations]
+
+  defp slim(%{finalized: true} = state),
+    do: update_in(state.norm.inv, &Map.drop(&1, @wide_columns))
+
+  defp slim(state), do: state
 
   defp summary(norm, state) do
     norm.inv
