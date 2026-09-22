@@ -8,7 +8,9 @@ shown.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `DATABASE_URL` | required | `ecto://user:pass@host/db`; add `?ssl=true` for managed databases |
+| `DATABASE_URL` | required | `ecto://user:pass@host/db` |
+| `DATABASE_SSL` | `false` | `true` connects with TLS and verifies the server certificate (name = the host in `DATABASE_URL`) |
+| `DATABASE_SSL_CA` | unset | PEM bundle to verify against; unset = the OS trust store. For AWS RDS download the [global bundle](https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem) into the image or a mounted volume and keep `rds.force_ssl` on |
 | `SECRET_KEY_BASE` | required | 64+ random bytes (`mix phx.gen.secret`); signs cookies and sessions |
 | `PHX_HOST` | `example.com` | public hostname of the UI, used in links Bazel prints |
 | `PORT` | `4000` | HTTP listener |

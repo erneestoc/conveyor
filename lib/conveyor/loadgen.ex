@@ -50,7 +50,7 @@ defmodule Conveyor.Loadgen do
           if jitter > 0, do: Process.sleep(:rand.uniform(jitter))
 
           replay_opts =
-            Keyword.take(opts, [:api_key, :delay_ms, :drop_after, :duplicate_every]) ++
+            Keyword.take(opts, [:api_key, :delay_ms, :drop_after, :duplicate_every, :tls]) ++
               [invocation_id: Replay.uuid(), build_id: Replay.uuid()]
 
           result = run_with_retries(events_by_file[file], replay_opts, hosts, i, retries)

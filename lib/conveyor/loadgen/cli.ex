@@ -5,7 +5,9 @@ defmodule Conveyor.Loadgen.CLI do
       bes_loadgen --hosts localhost:1985,localhost:1986 --api-key KEY \\
         --fixtures 'test/fixtures/bep/*.bep' --streams 200 --builds 2000 \\
         [--duration-s 300] [--delay-ms 0] [--jitter-ms 100] [--drop-after 20] \\
-        [--duplicate-every 10] [--retries 3] [--report out.json] [--verify]
+        [--duplicate-every 10] [--retries 3] [--report out.json] [--verify] [--tls]
+
+  `--tls` dials `grpcs://` with the system CA store (a TLS balancer or Caddy in front).
 
   Exit status is non-zero when any build failed or any ack went missing.
   """
@@ -24,6 +26,7 @@ defmodule Conveyor.Loadgen.CLI do
     retries: :integer,
     report: :string,
     verify: :boolean,
+    tls: :boolean,
     help: :boolean
   ]
 

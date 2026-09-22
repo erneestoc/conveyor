@@ -104,6 +104,7 @@ carry the invocation id on every ingest error.
 - [ ] `BLOB_STORE=s3`, bucket lifecycle rule matching `RETENTION_DAYS`.
 - [ ] `SECRET_KEY_BASE`, `ADMIN_TOKEN` or OIDC configured; `BES_INGEST_AUTH=api_key`.
 - [ ] TLS at the balancer for both ports; Bazel uses `grpcs://`.
+- [ ] `DATABASE_SSL=true` with `DATABASE_SSL_CA` pointing at the provider's bundle (RDS: keep `rds.force_ssl=1`).
 - [ ] `max_connections` sized to nodes × `POOL_SIZE`.
 - [ ] Balancer deregistration delay > `SHUTDOWN_DRAIN_SECONDS`.
 - [ ] Dashboards on the metrics above; a synthetic build every few minutes.

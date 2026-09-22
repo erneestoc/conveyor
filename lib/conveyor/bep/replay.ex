@@ -31,6 +31,7 @@ defmodule Conveyor.Bep.Replay do
     * `:delay_ms` — pause between events (default 0)
     * `:lifecycle` — send lifecycle events (default true)
     * `:project_id` — value of `--bes_instance_name` (default "")
+    * `:tls` — connect with TLS, verifying the server against the system CA store
     * `:drop_after` — simulate a connection loss: cancel the stream after this many events
       have been sent, then reconnect and resume from the last acknowledged sequence number,
       exactly like Bazel's retry (the last acked event may be re-sent as a duplicate)
@@ -55,7 +56,9 @@ defmodule Conveyor.Bep.Replay do
     events = rewrite_invocation_id(events, invocation_id)
     started_at = System.monotonic_time(:millisecond)
 
-    connect = fn -> GRPC.Stub.connect("#{host}:#{port}", adapter: GRPC.Client.Adapters.Mint) end
+    connect = fn ->
+      GRPC.Stub.connect("#{host}:#{port}", connect_opts(host, Keyword.get(opts, :tls, false)))
+    end
 
     with {:ok, channel} <- connect.() do
       try do
@@ -255,6 +258,24 @@ defmodule Conveyor.Bep.Replay do
       Process.exit(sender, :kill)
       result
     end
+  end
+
+  @doc false
+  def connect_opts(_host, false), do: [adapter: GRPC.Client.Adapters.Mint]
+
+  def connect_opts(host, true) do
+    [
+      adapter: GRPC.Client.Adapters.Mint,
+      cred:
+        GRPC.Credential.new(
+          ssl: [
+            verify: :verify_peer,
+            cacerts: :public_key.cacerts_get(),
+            server_name_indication: String.to_charlist(host),
+            depth: 3
+          ]
+        )
+    ]
   end
 
   defp send_one(conn, stream, seq, event) do

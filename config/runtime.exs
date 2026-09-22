@@ -50,9 +50,11 @@ if config_env() == :prod do
 
   maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
+  # DATABASE_SSL=true verifies the server against DATABASE_SSL_CA (a PEM bundle, e.g. the
+  # AWS RDS global bundle) or, without one, the OS trust store. See docs/configuration.md.
   config :conveyor, Conveyor.Repo,
-    # ssl: true,
     url: database_url,
+    ssl: Conveyor.Release.database_ssl(System.get_env()),
     pool_size: String.to_integer(System.get_env("POOL_SIZE") || "40"),
     queue_target: 1_000,
     queue_interval: 10_000,
