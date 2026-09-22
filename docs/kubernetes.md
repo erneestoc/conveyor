@@ -74,3 +74,24 @@ during the rollout.
 `docker-compose.yml` at the repository root runs one node with PostgreSQL and the disk
 blob store, for trials and small teams. The published image is
 `ghcr.io/erneestoc/conveyor:<version>` (multi-arch, non-root); it runs migrations on boot.
+
+## Publishing the chart
+
+Version tags (`v*`) run `.github/workflows/release.yml`, which builds the multi-arch image
+to `ghcr.io/erneestoc/conveyor`, packages the chart with the tag as chart and app version
+and pushes it to `oci://ghcr.io/erneestoc/charts/conveyor`, then pushes the Artifact Hub
+repository metadata (`deploy/helm/artifacthub-repo.yml`) next to it with `oras`. Once,
+after the first release:
+
+1. Make the `charts/conveyor` and `conveyor` packages public in the GitHub package
+   settings (GHCR packages start private).
+2. On [artifacthub.io](https://artifacthub.io), Control panel → Add repository → kind
+   *Helm charts*, URL `oci://ghcr.io/erneestoc/charts/conveyor`. Artifact Hub indexes
+   OCI charts by tag; the chart's `annotations` (license, links, changes) render on its
+   page.
+3. Copy the repository ID Artifact Hub shows into `artifacthub-repo.yml` to claim the
+   verified-publisher badge; the next release pushes it.
+
+The chart's README (`deploy/helm/conveyor/README.md`) documents every value, OIDC, S3
+credentials, database TLS and upgrades.
+

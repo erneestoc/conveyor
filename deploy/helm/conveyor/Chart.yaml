@@ -1,9 +1,32 @@
 apiVersion: v2
 name: conveyor
-description: Self-hosted Bazel Build Event Service server with a real-time UI
+description: Self-hosted Bazel Build Event Service server with a real-time UI, dashboards and execution-log insights
 type: application
-version: 0.1.0
+version: 0.2.0
 appVersion: "0.1.0"
-home: https://github.com/erneestoc/conveyor
+kubeVersion: ">=1.25.0"
+home: https://erneestoc.github.io/conveyor/
 sources: [https://github.com/erneestoc/conveyor]
-keywords: [bazel, build-event-service, bes, observability]
+keywords: [bazel, build-event-service, bes, build, ci, observability, remote-cache]
+maintainers:
+  - name: Ernesto Cambuston
+    url: https://github.com/erneestoc
+annotations:
+  artifacthub.io/license: MIT
+  artifacthub.io/category: integration-delivery
+  artifacthub.io/operator: "false"
+  artifacthub.io/prerelease: "false"
+  artifacthub.io/links: |
+    - name: Documentation
+      url: https://erneestoc.github.io/conveyor/
+    - name: Install guide
+      url: https://erneestoc.github.io/conveyor/install/
+    - name: Source
+      url: https://github.com/erneestoc/conveyor
+  artifacthub.io/changes: |
+    - kind: added
+      description: ServiceAccount with annotations (IRSA), extraVolumes and extraVolumeMounts (database CA bundle)
+    - kind: added
+      description: Optional PrometheusRule with the alert rules
+    - kind: changed
+      description: Chart README documents every value, OIDC, S3 credentials, database TLS and upgrades

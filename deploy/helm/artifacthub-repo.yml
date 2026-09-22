@@ -1,0 +1,8 @@
+# Artifact Hub repository metadata for oci://ghcr.io/erneestoc/charts/conveyor.
+# Pushed by .github/workflows/release.yml with oras; the repositoryID comes from the
+# repository's page on artifacthub.io once it is added there (Control panel → Add
+# repository → Helm charts, URL oci://ghcr.io/erneestoc/charts/conveyor).
+repositoryID: ""
+owners:
+  - name: Ernesto Cambuston
+    email: e.cambuston@gmail.com

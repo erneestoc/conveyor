@@ -109,3 +109,11 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 extraEnv: []
+# Extra volumes and mounts, e.g. a ConfigMap with the RDS CA bundle for DATABASE_SSL_CA.
+extraVolumes: []
+extraVolumeMounts: []
+serviceAccount:
+  create: true
+  name: ""
+  # e.g. eks.amazonaws.com/role-arn for IRSA access to the S3 bucket (no AWS keys needed)
+  annotations: {}
