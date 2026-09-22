@@ -26,6 +26,7 @@ defmodule Conveyor.Bench do
   alias Conveyor.Repo
 
   @flush_event [:conveyor, :ingest, :writer, :flush]
+  @group_failed_event [:conveyor, :ingest, :writer, :group_failed]
   @fenced_event [:conveyor, :ingest, :fenced]
   @sample_ms 1_000
 
@@ -54,8 +55,11 @@ defmodule Conveyor.Bench do
     ensure_pg_stat_statements!()
     :ok = wait_for_settle(div(Keyword.get(opts, :settle_timeout_ms, 30_000), 500))
 
+    # The flag belongs to the process that sets it and is cleared when that process exits,
+    # so the long-lived runner owns it, not the sampler.
+    :erlang.system_flag(:scheduler_wall_time, true)
     telemetry = start_telemetry()
-    sampler = start_sampler(opts[:pg_container])
+    sampler = start_sampler(opts[:pg_container], Keyword.get(opts, :sample_ms, @sample_ms))
     before = snapshot(opts[:pg_container])
     started = System.monotonic_time(:millisecond)
 
@@ -198,40 +202,48 @@ defmodule Conveyor.Bench do
 
   # --- sampling --------------------------------------------------------------------------
 
-  defp start_sampler(pg_container) do
+  defp start_sampler(pg_container, sample_ms) do
     parent = self()
+    postmaster = if pg_container == nil and pg_native?(), do: postmaster_pid()
 
-    pid =
-      spawn_link(fn ->
-        sample_loop(parent, pg_container, %{
-          rss: [],
-          beam_total: [],
-          pg_cpu_pct: [],
-          streams: [],
-          workers: [],
-          cpu: cpu_sample()
-        })
-      end)
-
-    pid
+    spawn_link(fn ->
+      sample_loop(parent, pg_container, sample_ms, %{
+        rss: [],
+        beam_total: [],
+        pg_cpu_pct: [],
+        streams: [],
+        workers: [],
+        postmaster: postmaster,
+        # pid => {first seen cpu seconds, last seen}; Postgres forks and reaps workers
+        # (autovacuum, parallel query) during a run, so every process is tracked from the
+        # moment it is seen.
+        pg_procs: pg_process_times(postmaster, %{}),
+        reductions: reductions_by_kind(),
+        # process memory by kind at the sample with the most memory in use
+        memory_peak: {0, []},
+        cpu: cpu_sample()
+      })
+    end)
   end
 
-  defp sample_loop(parent, pg_container, acc) do
+  defp sample_loop(parent, pg_container, sample_ms, acc) do
     receive do
       {:stop, ref} ->
         send(parent, {ref, acc})
     after
-      @sample_ms ->
+      sample_ms ->
         acc = %{
           acc
           | rss: [os_rss() | acc.rss],
             beam_total: [:erlang.memory(:total) | acc.beam_total],
             pg_cpu_pct: [docker_cpu_pct(pg_container) | acc.pg_cpu_pct],
             streams: [open_streams() | acc.streams],
-            workers: [live_streams() | acc.workers]
+            workers: [live_streams() | acc.workers],
+            pg_procs: pg_process_times(acc.postmaster, acc.pg_procs),
+            memory_peak: memory_peak(acc.memory_peak)
         }
 
-        sample_loop(parent, pg_container, acc)
+        sample_loop(parent, pg_container, sample_ms, acc)
     end
   end
 
@@ -240,7 +252,11 @@ defmodule Conveyor.Bench do
     send(pid, {:stop, ref})
 
     receive do
-      {^ref, acc} -> Map.put(acc, :cpu_end, cpu_sample())
+      {^ref, acc} ->
+        acc
+        |> Map.put(:cpu_end, cpu_sample())
+        |> Map.put(:reductions_end, reductions_by_kind())
+        |> Map.update!(:pg_procs, &pg_process_times(acc.postmaster, &1))
     after
       5_000 ->
         %{
@@ -249,33 +265,167 @@ defmodule Conveyor.Bench do
           pg_cpu_pct: [],
           streams: [],
           workers: [],
+          pg_procs: %{},
+          reductions: %{},
+          reductions_end: %{},
+          memory_peak: {0, []},
           cpu: nil,
           cpu_end: nil
         }
     end
   end
 
-  # Scheduler utilization and emulator CPU time (`+sbwt none` keeps both honest).
+  # Process memory by kind, kept for the sample where processes hold the most in total.
+  defp memory_peak({best, _} = current) do
+    total = :erlang.memory(:processes_used)
+
+    if total > best do
+      by_kind =
+        Process.list()
+        |> Enum.reduce(%{}, fn pid, acc ->
+          case Process.info(pid, [:memory, :registered_name, :dictionary, :initial_call]) do
+            nil -> acc
+            info -> Map.update(acc, process_kind(info), info[:memory], &(&1 + info[:memory]))
+          end
+        end)
+        |> Enum.sort_by(fn {_, n} -> -n end)
+        |> Enum.take(12)
+        |> Enum.map(fn {kind, n} -> %{kind: kind, bytes: n} end)
+
+      {total, by_kind}
+    else
+      current
+    end
+  end
+
+  # Reductions per kind of process (the registered name, `$initial_call` or initial call):
+  # the BEAM's own unit of work, to see where the node's CPU goes. Processes that exit
+  # between the samples are not counted; finished workers linger long enough to be seen.
+  @doc false
+  def reductions_by_kind do
+    Process.list()
+    |> Enum.reduce(%{}, fn pid, acc ->
+      case Process.info(pid, [:reductions, :registered_name, :dictionary, :initial_call]) do
+        nil -> acc
+        info -> Map.update(acc, process_kind(info), info[:reductions], &(&1 + info[:reductions]))
+      end
+    end)
+  end
+
+  defp process_kind(info) do
+    case {info[:registered_name], info[:dictionary][:"$initial_call"], info[:initial_call]} do
+      {name, _, _} when is_atom(name) and name != nil -> inspect(name)
+      {_, {m, f, a}, _} -> Exception.format_mfa(m, f, a)
+      {_, _, {m, f, a}} -> Exception.format_mfa(m, f, a)
+      _ -> "unknown"
+    end
+  end
+
+  defp reductions_delta(%{reductions: r0, reductions_end: r1}) do
+    r1
+    |> Enum.map(fn {kind, n} -> {kind, n - Map.get(r0, kind, 0)} end)
+    |> Enum.filter(fn {_, n} -> n > 0 end)
+    |> Enum.sort_by(fn {_, n} -> -n end)
+    |> Enum.take(15)
+    |> Enum.map(fn {kind, n} -> %{kind: kind, reductions: n} end)
+  end
+
+  defp reductions_delta(_), do: []
+
+  # --- Postgres process CPU (native cluster) -----------------------------------------------
+
+  defp postmaster_pid do
+    %{rows: [[dir]]} = Repo.query!("SHOW data_directory")
+
+    case File.read(Path.join(dir, "postmaster.pid")) do
+      {:ok, content} -> content |> String.split("\n") |> hd() |> String.trim()
+      _ -> nil
+    end
+  end
+
+  # `ps` for the postmaster and its children; each pid keeps {first, last} CPU seconds.
+  @doc false
+  def pg_process_times(nil, acc), do: acc
+
+  def pg_process_times(postmaster, acc) do
+    case System.cmd("ps", ["-axo", "pid=,ppid=,time="]) do
+      {out, 0} ->
+        out
+        |> String.split("\n", trim: true)
+        |> Enum.reduce(acc, fn line, acc ->
+          case String.split(line) do
+            [pid, ppid, time] when pid == postmaster or ppid == postmaster ->
+              secs = parse_cpu_time(time)
+              Map.update(acc, pid, {secs, secs}, fn {first, _} -> {first, secs} end)
+
+            _ ->
+              acc
+          end
+        end)
+
+      _ ->
+        acc
+    end
+  rescue
+    _ -> acc
+  end
+
+  # CPU seconds per backend type; pids gone by the end of the run (autovacuum workers,
+  # parallel workers) are grouped as "exited".
+  defp pg_cpu_by_backend(procs) when map_size(procs) == 0, do: %{}
+
+  defp pg_cpu_by_backend(procs) do
+    %{rows: rows} =
+      Repo.query!("SELECT pid::text, backend_type FROM pg_stat_activity WHERE pid IS NOT NULL")
+
+    types = Map.new(rows, fn [pid, type] -> {pid, type} end)
+
+    procs
+    |> Enum.reduce(%{}, fn {pid, {first, last}}, acc ->
+      Map.update(acc, Map.get(types, pid, "exited"), last - first, &(&1 + (last - first)))
+    end)
+    |> Map.new(fn {k, v} -> {k, Float.round(v, 2)} end)
+  end
+
+  defp pg_cpu_from_procs(procs) when map_size(procs) == 0, do: nil
+
+  defp pg_cpu_from_procs(procs) do
+    procs
+    |> Enum.map(fn {_pid, {first, last}} -> last - first end)
+    |> Enum.sum()
+    |> Float.round(2)
+  end
+
+  # Scheduler utilization and emulator CPU time (`+sbwt none` keeps both honest). The
+  # wall-time counters are read raw: busy schedulers = Σ active / Σ total over the normal
+  # and dirty-CPU schedulers, which cannot go negative when the flag is toggled elsewhere.
   defp cpu_sample do
     {runtime_ms, _} = :erlang.statistics(:runtime)
     {wall_ms, _} = :erlang.statistics(:wall_clock)
-    %{runtime_ms: runtime_ms, wall_ms: wall_ms, sched: :scheduler.sample_all()}
+    %{runtime_ms: runtime_ms, wall_ms: wall_ms, sched: scheduler_counters()}
+  end
+
+  defp scheduler_counters do
+    normal = System.schedulers_online()
+    dirty_cpu = :erlang.system_info(:dirty_cpu_schedulers_online)
+
+    :erlang.statistics(:scheduler_wall_time_all)
+    |> Enum.filter(fn {id, _active, _total} -> id <= normal + dirty_cpu end)
+    |> Enum.map(fn {id, active, total} -> {id, {active, total}} end)
+    |> Map.new()
   end
 
   defp app_cpu(%{cpu: nil}), do: %{}
 
   defp app_cpu(%{cpu: s0, cpu_end: s1}) do
     wall_s = max(s1.wall_ms - s0.wall_ms, 1) / 1000
-    util = :scheduler.utilization(s0.sched, s1.sched)
 
     busy =
-      util
-      |> Enum.filter(fn
-        {:normal, _, _, _} -> true
-        {:cpu, _, _, _} -> true
-        _ -> false
+      s1.sched
+      |> Enum.map(fn {id, {active1, total1}} ->
+        {active0, total0} = Map.get(s0.sched, id, {0, 0})
+        if total1 > total0, do: (active1 - active0) / (total1 - total0), else: 0.0
       end)
-      |> Enum.map(fn {_, _, f, _} -> f end)
       |> Enum.sum()
 
     %{
@@ -312,7 +462,7 @@ defmodule Conveyor.Bench do
 
   # --- Postgres snapshots ------------------------------------------------------------------
 
-  defp snapshot(pg_container) do
+  defp snapshot(_pg_container) do
     %{
       wal: one_row("SELECT wal_records, wal_fpi, wal_bytes::bigint FROM pg_stat_wal"),
       db:
@@ -327,7 +477,7 @@ defmodule Conveyor.Bench do
         FROM pg_stat_user_tables WHERE relname = 'invocations'
         """),
       tables: table_sizes(),
-      pg_cpu_s: if(pg_container == nil and pg_native?(), do: pg_cpu_seconds()),
+      tuples: table_tuples(),
       statements: if(pg_stat_statements?(), do: statements(), else: [])
     }
   end
@@ -356,16 +506,21 @@ defmodule Conveyor.Bench do
     Map.new(rows, fn [name, size] -> {name, size} end)
   end
 
-  # CPU time of every Postgres process the server knows about (backends and background
-  # workers), through `ps`. Works when Postgres runs on this host; the pool keeps its
-  # backends for the whole run, so the delta between snapshots is the run's CPU.
-  defp pg_cpu_seconds do
+  # Inserted/updated/live tuples per table: inserts of rolled-back transactions still count
+  # in n_tup_ins, so a gap between inserted and live rows exposes redone work.
+  defp table_tuples do
     %{rows: rows} =
       Repo.query!(
-        "SELECT pid FROM pg_stat_activity WHERE pid IS NOT NULL AND pid <> pg_backend_pid()"
+        """
+        SELECT relname, n_tup_ins, n_tup_upd, n_tup_hot_upd, n_tup_del, n_live_tup, n_dead_tup
+        FROM pg_stat_user_tables WHERE relname = ANY($1)
+        """,
+        [@tables]
       )
 
-    rows |> Enum.map(fn [pid] -> to_string(pid) end) |> cpu_seconds_of()
+    Map.new(rows, fn [name | counts] ->
+      {name, Enum.zip(~w(ins upd hot_upd del live dead)a, counts) |> Map.new()}
+    end)
   end
 
   @doc false
@@ -419,7 +574,7 @@ defmodule Conveyor.Bench do
     %{rows: rows} =
       Repo.query!("""
       SELECT calls, total_exec_time, rows, shared_blks_dirtied, wal_bytes::bigint, toplevel,
-             left(query, 160)
+             left(query, 160), total_plan_time
       FROM pg_stat_statements
       WHERE dbid = (SELECT oid FROM pg_database WHERE datname = current_database())
       ORDER BY total_exec_time DESC
@@ -430,8 +585,17 @@ defmodule Conveyor.Bench do
 
   @doc false
   def statement_rows(rows) do
-    Enum.map(rows, fn [calls, time, nrows, dirtied, wal, top, q] ->
-      %{calls: calls, ms: time, rows: nrows, dirtied: dirtied, wal: wal, toplevel: top, query: q}
+    Enum.map(rows, fn [calls, time, nrows, dirtied, wal, top, q | rest] ->
+      %{
+        calls: calls,
+        ms: time,
+        plan_ms: List.first(rest) || 0.0,
+        rows: nrows,
+        dirtied: dirtied,
+        wal: wal,
+        toplevel: top,
+        query: q
+      }
     end)
   end
 
@@ -443,13 +607,16 @@ defmodule Conveyor.Bench do
 
     :telemetry.attach_many(
       id,
-      [@flush_event, @fenced_event],
+      [@flush_event, @fenced_event, @group_failed_event],
       fn
         @flush_event, %{duration: d, batches: b, events: e}, _meta, table ->
           :ets.insert(table, {:flush, System.convert_time_unit(d, :native, :microsecond), b, e})
 
         @fenced_event, _m, _meta, table ->
           :ets.insert(table, {:fenced, 1})
+
+        @group_failed_event, _m, %{reason: reason}, table ->
+          :ets.insert(table, {:group_failed, String.slice(reason, 0, 200)})
       end,
       table
     )
@@ -461,6 +628,7 @@ defmodule Conveyor.Bench do
     :telemetry.detach(id)
     flushes = :ets.match_object(table, {:flush, :_, :_, :_})
     fenced = length(:ets.match_object(table, {:fenced, :_}))
+    group_failures = :ets.match_object(table, {:group_failed, :_}) |> Enum.map(&elem(&1, 1))
     :ets.delete(table)
 
     durations = flushes |> Enum.map(&elem(&1, 1)) |> Enum.sort()
@@ -473,7 +641,9 @@ defmodule Conveyor.Bench do
       batches_per_flush: ratio(Enum.sum(Enum.map(flushes, &elem(&1, 2))), n),
       events_per_flush: ratio(Enum.sum(Enum.map(flushes, &elem(&1, 3))), n),
       duration_ms: durations |> Enum.map(&(&1 / 1000)) |> percentiles(),
-      fenced: fenced
+      fenced: fenced,
+      group_failures: length(group_failures),
+      group_failure_reasons: group_failures |> Enum.frequencies() |> Enum.take(5)
     }
   end
 
@@ -536,11 +706,11 @@ defmodule Conveyor.Bench do
     cpu = app_cpu(samples)
 
     pg_cpu_s =
-      case {b.pg_cpu_s, a.pg_cpu_s, samples.pg_cpu_pct} do
-        {x, y, _} when is_number(x) and is_number(y) ->
-          Float.round(y - x, 2)
+      case {pg_cpu_from_procs(samples[:pg_procs] || %{}), samples.pg_cpu_pct} do
+        {secs, _} when is_number(secs) ->
+          secs
 
-        {_, _, pcts} when pcts != [] ->
+        {_, pcts} when pcts != [] ->
           pcts
           |> Enum.reject(&is_nil/1)
           |> mean()
@@ -553,6 +723,7 @@ defmodule Conveyor.Bench do
       end
 
     pg_exec_s = (sum_field(a.statements, :ms) - sum_field(b.statements, :ms)) / 1000
+    pg_plan_s = (sum_field(a.statements, :plan_ms) - sum_field(b.statements, :plan_ms)) / 1000
     wal_bytes = a.wal["wal_bytes"] - b.wal["wal_bytes"]
     xacts = a.db["xact_commit"] - b.db["xact_commit"]
     upd = a.invocations["n_tup_upd"] - b.invocations["n_tup_upd"]
@@ -604,11 +775,16 @@ defmodule Conveyor.Bench do
           rss_peak: peak_rss,
           beam_peak: Enum.max(samples.beam_total, fn -> 0 end),
           peak_streams: peak_streams,
-          peak_workers: peak_workers
+          peak_workers: peak_workers,
+          reductions_by_kind: reductions_delta(samples),
+          processes_peak_bytes: samples[:memory_peak] |> elem(0),
+          memory_by_kind: samples[:memory_peak] |> elem(1)
         }),
       postgres: %{
         cpu_s: pg_cpu_s,
         exec_s: Float.round(pg_exec_s, 2),
+        plan_s: Float.round(pg_plan_s, 2),
+        cpu_by_backend: pg_cpu_by_backend(samples[:pg_procs] || %{}),
         vcpu: if(pg_cpu_s, do: Float.round(pg_cpu_s / wall_s, 2)),
         xacts: xacts,
         xacts_per_s: Float.round(xacts / wall_s, 1),
@@ -623,11 +799,20 @@ defmodule Conveyor.Bench do
         invocations_upd: upd,
         invocations_hot_pct: if(upd > 0, do: Float.round(hot * 100 / upd, 1)),
         size_delta: a.db["size"] - b.db["size"],
+        rollbacks: a.db["xact_rollback"] - b.db["xact_rollback"],
         tables: Map.new(a.tables, fn {t, s} -> {t, s - (b.tables[t] || 0)} end),
+        tuples:
+          Map.new(a.tuples, fn {t, counts} ->
+            {t, Map.new(counts, fn {k, v} -> {k, v - get_in(b.tuples, [t, k])} end)}
+          end),
         top_statements:
           a.statements
           |> Enum.take(12)
-          |> Enum.map(&Map.update!(&1, :ms, fn ms -> Float.round(ms, 1) end))
+          |> Enum.map(fn st ->
+            st
+            |> Map.update!(:ms, &Float.round(&1, 1))
+            |> Map.update!(:plan_ms, &Float.round(&1, 1))
+          end)
       },
       writer: flushes,
       verify: verify,
@@ -732,6 +917,12 @@ defmodule Conveyor.Bench do
       (r.loadgen["builds_failed"] || 0) == 0
   end
 
+  defp tuple_summary(tuples) do
+    tuples
+    |> Enum.sort()
+    |> Enum.map_join(", ", fn {t, c} -> "#{t} #{c.ins} ins/#{c.live} live" end)
+  end
+
   @doc "One-screen summary of a report."
   def format(r) do
     h = r.headline
@@ -742,15 +933,18 @@ defmodule Conveyor.Bench do
     """
     #{r.label} (#{r.git}) #{r.settings.streams} streams, #{r.loadgen["builds_ok"]}/#{r.loadgen["builds_total"]} builds, #{r.loadgen["events"]} events in #{r.app[:wall_s]} s
       events/s            #{h.events_per_s}
-      per app vCPU        #{h.events_per_s_per_app_vcpu}   (app #{r.app[:runtime_vcpu]} vCPU by runtime, #{r.app[:scheduler_vcpu]} by schedulers)
-      per Postgres vCPU   #{h.events_per_s_per_pg_vcpu}   (pg #{p.vcpu} vCPU; #{h.events_per_pg_exec_s} per exec-second)
+      per app vCPU        #{h.events_per_s_per_app_vcpu}   (app #{r.app[:runtime_vcpu]} vCPU by OS time; #{r.app[:scheduler_vcpu]} schedulers active, wall-clock, inflates under core contention)
+      per Postgres vCPU   #{h.events_per_s_per_pg_vcpu}   (pg #{p.vcpu} vCPU: #{inspect(p.cpu_by_backend)}; exec #{p.exec_s} s, plan #{p.plan_s} s)
       WAL bytes/event     #{h.wal_bytes_per_event}   (#{p.wal_bytes} bytes, #{p.wal_fpi} full-page images)
       RSS/stream          #{h.rss_bytes_per_stream}   (peak #{r.app[:rss_peak]} over #{r.app[:peak_streams]} streams, #{r.app[:peak_workers]} workers)
       storage/build       #{h.storage_bytes_per_build}
       ack ms              p50 #{h.ack_p50_ms}  p99 #{h.ack_p99_ms}
       postgres            #{p.xacts_per_s} xact/s, #{p.round_trips} round trips (#{p.round_trips_per_flush}/flush, #{p.round_trips_per_xact}/xact) + #{p.nested_statements} nested, HOT #{p.invocations_hot_pct} %
-      writer              #{w.count} flushes, #{w.batches_per_flush} batches/flush, #{w.events_per_flush} events/flush, flush ms p50 #{w.duration_ms.p50} p99 #{w.duration_ms.p99}, fenced #{w.fenced}
+      writer              #{w.count} flushes, #{w.batches_per_flush} batches/flush, #{w.events_per_flush} events/flush, flush ms p50 #{w.duration_ms.p50} p99 #{w.duration_ms.p99}, fenced #{w.fenced}, group failures #{w.group_failures}, rollbacks #{p.rollbacks}
+      tuples              #{tuple_summary(p.tuples)}
       verify              #{v[:checked]} checked, #{v[:failed]} failed, #{v[:in_progress_left]} left in_progress, missing acks #{r.loadgen["missing_acks"]}
+      reductions          #{r.app[:reductions_by_kind] |> Enum.take(6) |> Enum.map_join(", ", &"#{&1.kind} #{div(&1.reductions, 1_000_000)}M")}
+      memory              #{r.app[:memory_by_kind] |> Enum.take(6) |> Enum.map_join(", ", &"#{&1.kind} #{div(&1.bytes, 1_000_000)} MB")} (processes #{div(r.app[:processes_peak_bytes] || 0, 1_000_000)} MB)
       report              #{r[:path]}
     """
   end

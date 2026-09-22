@@ -24,6 +24,8 @@ config :conveyor, Conveyor.Ingest,
   batch_flush_ms: 50,
   writer_shards: System.schedulers_online(),
   writer_flush_ms: 20,
+  # a shard flushes early once this many batches wait; otherwise after writer_flush_ms
+  writer_max_pending: 256,
   # tag_keys counts are coalesced per node and written once per interval
   tag_flush_ms: 1000,
   broadcast_interval_ms: 250

@@ -41,6 +41,7 @@ defmodule Conveyor.BenchTest do
         results_dir: dir,
         settle_ms: 200,
         settle_timeout_ms: 0,
+        sample_ms: 20,
         notes: "unit test"
       )
 
@@ -51,6 +52,8 @@ defmodule Conveyor.BenchTest do
     assert report.headline.wal_bytes_per_event >= 0
     assert report.postgres.xacts >= 0
     assert report.writer.count > 0 and report.writer.fenced == 0
+    assert report.app.rss_peak > 0 and is_list(report.app.memory_by_kind)
+    assert report.app.reductions_by_kind != []
     assert report.verify.checked == 3 and report.verify.failed == 0
     assert File.exists?(report[:path])
     assert Jason.decode!(File.read!(report[:path]))["notes"] == "unit test"
@@ -98,6 +101,12 @@ defmodule Conveyor.BenchTest do
     assert Bench.correct?(a) and not Bench.correct?(b)
 
     assert Bench.cpu_seconds_of([System.pid()]) >= 0
+    # This VM as the "postmaster": itself and its port programs are its process tree.
+    procs = Bench.pg_process_times(System.pid(), %{})
+    assert {first, last} = procs[System.pid()]
+    assert first == last and first >= 0
+    assert Bench.pg_process_times(nil, %{}) == %{}
+    assert Bench.pg_process_times("not-a-pid", %{"x" => {1.0, 2.0}}) == %{"x" => {1.0, 2.0}}
     assert Bench.cpu_seconds_of(["999999999"]) == nil
     assert Bench.docker_cpu_pct(nil) == nil
     assert Bench.docker_cpu_pct("conveyor-bench-no-such-container") == nil

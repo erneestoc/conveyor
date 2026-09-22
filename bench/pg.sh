@@ -45,6 +45,7 @@ random_page_cost = 1.1
 shared_preload_libraries = 'pg_stat_statements'
 pg_stat_statements.max = 5000
 pg_stat_statements.track = all
+pg_stat_statements.track_planning = on
 track_io_timing = on
 track_wal_io_timing = on
 log_min_messages = warning

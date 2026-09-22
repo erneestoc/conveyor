@@ -31,6 +31,58 @@ the order of a few thousand events per second, not tens of thousands.
   1 KB); real builds scale with targets, actions and log size. Raw segments are dropped
   after `RETENTION_RAW_DAYS`, everything else after `RETENTION_DAYS` (per project).
 
+## Benchmark harness
+
+`bench/run.sh` is the fixed measurement behind the speed and capacity plan (PLAN §24). It
+hosts a production build of the server in one VM, drives `mix conveyor.loadgen` as a child
+process against it, and samples both sides for the whole run:
+
+| Number | How it is measured |
+|---|---|
+| events/s per app vCPU | events over the emulator's CPU time (`+sbwt none`, so busy-wait is off) and over the schedulers' own utilization |
+| events/s per Postgres vCPU | events over the CPU time of every Postgres process (`ps`, native cluster from `bench/pg.sh`); `pg_stat_statements` execution time is recorded as the hardware-neutral twin |
+| WAL bytes per event | `pg_stat_wal` delta over events |
+| RSS per open stream | peak RSS during the run over the concurrent BES streams (paced profile) |
+
+Also recorded per run: client-observed ack p50/p99, storage bytes per build and per table,
+HOT ratio on `invocations`, round trips per flush (top-level statements) and nested
+statements (foreign-key checks), the top statements by total time, rollbacks and redone
+group commits, and the oracle over every generated invocation. Reports are JSON under
+`bench/results/`; `--repeat 3` prints medians (run-to-run noise on a laptop is about
+±10 %).
+
+```sh
+bench/pg.sh start                                 # native PostgreSQL 17 on 127.0.0.1:5441
+bench/run.sh --label baseline --repeat 3          # 200 streams × 10k builds, flat out
+bench/run.sh --label baseline --profile paced     # 1,000 streams paced like real builds
+```
+
+Every change in the plan is measured against the previous step with the same harness
+before it is kept (ledger below). Two findings from the first runs reorder the plan:
+native Postgres spends about 0.7 vCPU at 17.5k events/s (the earlier "1 vCPU per 10k
+events/s" was Docker Desktop's VM), so on this hardware the node's own CPU (5.6 vCPU, 96 %
+of it in the ingest workers) and its memory (10,000 finished workers lingering for 30 s
+held 1.7 GB, 3.2 GB RSS at peak) are the ceilings, not the database; the Postgres items
+(1, 2, 7) are worth their round trips and WAL on a networked database but do not move
+throughput here.
+
+## Speed plan ledger (PLAN §24)
+
+Flat-out profile, 200 streams × 10,000 builds (438,750 events), medians of three runs,
+16-core laptop, native PostgreSQL 17 on the same machine:
+
+| Step | events/s | per app vCPU | per Postgres vCPU | WAL B/event | ack p50 / p99 ms | round trips | notes |
+|---|---|---|---|---|---|---|---|
+| 0 baseline (`8130675`) | 17,537 | 3,089 | 25,916 | 895 | 97 / 371 | 151k (18.5 per flush, 2,673 xact/s) | Postgres 0.67 vCPU, HOT 51 %, 35.6 KB/build |
+| 1 fewer statements | 17,719 | 3,135 | 19–27k | 865 | 120 / 425 | 115k (14.0 per flush, 1,547 xact/s) | −24 % round trips, −42 % transactions, −3.5 % WAL; Postgres CPU within run noise (0.66–0.9 vCPU), planning time was the first version's hidden cost (unnamed statements planned per call, 4.2 s of 26 s) |
+
+Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
+
+| Step | events/s | ack p50 / p99 ms | round trips | RSS per stream | app vCPU | notes |
+|---|---|---|---|---|---|---|
+| 0 baseline | 990 | 69 / 284 | 141.6k (8.8 per flush) | 616 KB | 0.51 | 1,516 workers hold 378 MB of 472 MB process memory |
+| 1 fewer statements | 990 | 68 / 275 | 96.1k (6.2 per flush) | 610 KB | 0.50 | −32 % round trips; acks unchanged |
+
 ## Starting points
 
 | Concurrent builds | Nodes | PostgreSQL | Notes |

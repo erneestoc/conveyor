@@ -119,13 +119,34 @@ defmodule Conveyor.Ingest.Worker do
       |> Map.from_struct()
       |> Map.take(Invocation.__schema__(:fields))
 
-    case Repo.insert_all(Invocation, [row],
-           on_conflict: :nothing,
-           conflict_target: :id,
-           returning: true
-         ) do
-      {1, [%Invocation{} = inv]} -> inv
-      {0, _} -> Repo.get!(Invocation, id)
+    fields = Invocation.__schema__(:fields)
+    cols = Enum.map_join(fields, ", ", &~s("#{&1}"))
+    placeholders = Enum.map_join(1..length(fields), ", ", &"$#{&1}")
+
+    params =
+      Enum.map(fields, fn f ->
+        {:ok, v} =
+          Ecto.Type.adapter_dump(Ecto.Adapters.Postgres, Invocation.__schema__(:type, f), row[f])
+
+        v
+      end)
+
+    # One round trip whether the row is new or (the usual case, the lifecycle event came
+    # first) already there. A conflict with a row committed after this statement's snapshot
+    # was taken returns nothing; the read below covers that race.
+    sql = """
+    WITH ins AS (
+      INSERT INTO "invocations" (#{cols}) VALUES (#{placeholders})
+      ON CONFLICT ("id") DO NOTHING RETURNING #{cols}
+    )
+    SELECT #{cols} FROM ins
+    UNION ALL
+    SELECT #{cols} FROM "invocations" WHERE "id" = $1 AND NOT EXISTS (SELECT 1 FROM ins)
+    """
+
+    case Repo.query!(sql, params, cache_statement: "conveyor_load_or_create_invocation") do
+      %{rows: [values]} -> Repo.load(Invocation, {fields, values})
+      %{rows: []} -> Repo.get!(Invocation, id)
     end
   end
 
@@ -296,7 +317,7 @@ defmodule Conveyor.Ingest.Worker do
   # Finalization happens in the batch that carries the end-of-stream marker, so the final
   # status and the last ack become durable together.
   defp prepare(%{stream_finished: true, finalized: false} = state) do
-    norm = Normalizer.finalize(state.norm)
+    norm = state.norm |> Normalizer.finalize() |> settle_profile(state.invocation_id)
     {changes, norm} = Normalizer.take_dirty(norm)
 
     batch =
@@ -312,6 +333,23 @@ defmodule Conveyor.Ingest.Worker do
     {changes, norm} = Normalizer.take_dirty(state.norm)
     {norm, Batch.set_invocation(state.batch, changes)}
   end
+
+  # A profile Bazel wrote to a local file (the default without a remote cache) can never be
+  # fetched: record that in the final batch instead of a read and an update per build
+  # after the commit. Fetchable references are handled after the commit (see below).
+  defp settle_profile(%{inv: %{profile_status: "referenced", profile_uri: uri}} = norm, id)
+       when is_binary(uri) do
+    case Conveyor.Artifacts.Resource.parse_uri(uri) do
+      {:ok, _} ->
+        norm
+
+      {:error, reason} ->
+        Logger.info("invocation #{id}: profile unavailable: #{inspect(reason)}")
+        Normalizer.set(norm, %{profile_status: "unavailable"})
+    end
+  end
+
+  defp settle_profile(norm, _id), do: norm
 
   @impl true
   def handle_info(:flush, state), do: {:noreply, flush(%{state | flush_timer: nil})}
@@ -332,9 +370,10 @@ defmodule Conveyor.Ingest.Worker do
 
     state =
       if batch.finalize do
-        # Only a build that referenced a profile on a remote cache has work to schedule.
+        # Only a build that referenced a profile on a remote cache has work to schedule; the
+        # worker's own view of the row saves the read.
         if state.norm.inv[:profile_status] == "referenced",
-          do: Conveyor.Artifacts.on_finalized(state.invocation_id)
+          do: Conveyor.Artifacts.on_finalized(struct(Invocation, state.norm.inv))
 
         %{state | finalized: true} |> mark_dirty(:summary) |> start_linger()
       else

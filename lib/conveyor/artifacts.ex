@@ -143,9 +143,12 @@ defmodule Conveyor.Artifacts do
   referenced a profile on a remote cache, or marks it available if the blob is already
   here (built-in CAS sink).
   """
-  @spec on_finalized(String.t()) :: :ok
-  def on_finalized(invocation_id) do
-    case Repo.get(Invocation, invocation_id) do
+  @spec on_finalized(String.t() | Invocation.t()) :: :ok
+  def on_finalized(invocation_id) when is_binary(invocation_id),
+    do: on_finalized(Repo.get(Invocation, invocation_id))
+
+  def on_finalized(invocation) do
+    case invocation do
       %Invocation{profile_status: "referenced", profile_uri: uri} = inv when is_binary(uri) ->
         case Resource.parse_uri(uri) do
           {:ok, %Resource{hash: hash}} ->

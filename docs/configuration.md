@@ -33,6 +33,7 @@ shown.
 | `INGEST_BATCH_FLUSH_MS` | `50` | batch age before commit |
 | `INGEST_WRITER_SHARDS` | schedulers | parallel group-commit writers |
 | `INGEST_WRITER_FLUSH_MS` | `20` | group commit interval |
+| `INGEST_WRITER_MAX_PENDING` | `256` | batches a writer shard commits early instead of waiting for the interval |
 | `INGEST_TAG_FLUSH_MS` | `1000` | tag facet count write interval |
 | `INGEST_MAX_UNACKED_EVENTS` | see config | backpressure threshold per stream |
 | `INGEST_IDLE_TIMEOUT_MS` | `600000` | a silent stream is marked disconnected after this |

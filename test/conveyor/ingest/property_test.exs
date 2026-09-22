@@ -7,7 +7,9 @@ defmodule Conveyor.Ingest.PropertyTest do
   use ExUnitProperties
 
   alias BuildEventStream, as: BES
+  alias Conveyor.Bep.Fixture
   alias Conveyor.Ingest.{Batch, Normalizer, Writer}
+  alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
 
   @id "22222222-2222-4222-8222-222222222222"
@@ -121,6 +123,113 @@ defmodule Conveyor.Ingest.PropertyTest do
 
       assert rows |> Enum.map(&{&1.invocation_id, &1.label, &1.aspect}) |> Enum.uniq() |> length() ==
                length(rows)
+    end
+  end
+
+  # Contiguous batches of a few invocations, interleaved at random.
+  defp interleaved_batches do
+    gen all(
+          per_invocation <-
+            list_of(
+              list_of(
+                {integer(1..3), member_of(["a", "b"]), string(:alphanumeric, max_length: 4),
+                 map_of(member_of(["//x", "//y"]), member_of(["configured", "success"]),
+                   max_length: 2
+                 )},
+                min_length: 1,
+                max_length: 4
+              ),
+              min_length: 1,
+              max_length: 3
+            ),
+          seed <- integer()
+        ) do
+      per_invocation
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {specs, i} ->
+        id = "0000000#{i}-0000-4000-8000-000000000000"
+
+        specs
+        |> Enum.reduce({[], 1, 0, 0}, fn {n, kind, log, targets}, {acc, seq, bytes, lines} ->
+          batch = Batch.new(id, 1, ~D[2026-09-18], seq, bytes, lines)
+
+          batch =
+            Enum.reduce(seq..(seq + n - 1), batch, fn s, b ->
+              Batch.add_event(b, s, kind, "e#{s}")
+            end)
+
+          batch = Batch.add_log(batch, seq, log)
+
+          batch =
+            Enum.reduce(targets, batch, fn {label, status}, b ->
+              Batch.upsert_target(b, {label, ""}, %{label: label, aspect: "", status: status})
+            end)
+
+          {[batch | acc], seq + n, bytes + batch.log_bytes, lines + batch.log_lines}
+        end)
+        |> elem(0)
+        |> Enum.reverse()
+      end)
+      |> shuffle_stable(seed)
+    end
+  end
+
+  # Random interleaving that keeps each invocation's own order.
+  defp shuffle_stable(batches, seed) do
+    batches
+    |> Enum.with_index()
+    |> Enum.sort_by(fn {b, i} -> {:erlang.phash2({seed, b.invocation_id, div(i, 2)}), i} end)
+    |> Enum.map(&elem(&1, 0))
+    |> Enum.group_by(& &1.invocation_id)
+    |> Map.values()
+    |> Enum.sort_by(&:erlang.phash2({seed, hd(&1).invocation_id}))
+    |> Enum.reduce([], fn group, acc -> acc ++ group end)
+  end
+
+  property "coalescing batches changes the rows written, never the content" do
+    check all(batches <- interleaved_batches()) do
+      units = Batch.coalesce(batches)
+      plain = Writer.plan(batches)
+      merged = Writer.plan(units)
+
+      # Every event once, contiguous per invocation, in the same order.
+      frames = fn rows ->
+        rows
+        |> Enum.group_by(& &1.invocation_id)
+        |> Map.new(fn {id, rs} ->
+          {id,
+           rs
+           |> Enum.sort_by(& &1.first_seq)
+           |> Enum.flat_map(&(&1.payload |> Invocations.decompress() |> Fixture.frames()))}
+        end)
+      end
+
+      assert frames.(merged.event_rows) == frames.(plain.event_rows)
+
+      assert Enum.sum(Enum.map(merged.event_rows, & &1.count)) ==
+               Enum.sum(Enum.map(plain.event_rows, & &1.count))
+
+      # The log text and its offsets chain identically.
+      logs = fn rows ->
+        rows
+        |> Enum.group_by(& &1.invocation_id)
+        |> Map.new(fn {id, rs} ->
+          rs = Enum.sort_by(rs, & &1.byte_offset)
+
+          {id,
+           {hd(rs).byte_offset, Enum.map_join(rs, &Invocations.decompress(&1.data)),
+            Enum.sum(Enum.map(rs, & &1.line_count))}}
+        end)
+      end
+
+      assert logs.(merged.log_rows) == logs.(plain.log_rows)
+
+      sort = &Enum.sort_by(&1, fn r -> {r.invocation_id, r.label} end)
+      assert sort.(merged.targets) == sort.(plain.targets)
+      assert length(units) <= length(batches)
+
+      assert Enum.map(units, & &1.invocation_id) |> Enum.uniq() |> length() ==
+               Enum.map(batches, & &1.invocation_id) |> Enum.uniq() |> length()
     end
   end
 end

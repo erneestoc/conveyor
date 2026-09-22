@@ -80,6 +80,8 @@ defmodule Conveyor.Ingest.WorkerTest do
     inv = reload(id)
     assert inv.status == "succeeded" and inv.stream_finished and inv.lifecycle_finished
     assert inv.last_event_seq == length(events) + 1 and inv.event_count == length(events)
+    # The fixture's profile is a local file: settled in the final batch, no fetch job.
+    assert inv.profile_status == "unavailable" and inv.profile_uri =~ "file://"
     assert :ok = Ingest.Verify.check(id, length(events))
     assert length(Invocations.events(inv)) == length(events)
     assert Invocations.log(inv) =~ "Build completed successfully"

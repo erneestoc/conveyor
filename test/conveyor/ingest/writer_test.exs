@@ -201,4 +201,94 @@ defmodule Conveyor.Ingest.WriterTest do
     assert %Writer.Fenced{} = e = %Writer.Fenced{invocation_id: "i", expected: 3}
     assert Exception.message(e) =~ "fenced"
   end
+
+  @tag :capture_log
+  test "fenced updates of many invocations share one statement and a fenced one fails alone",
+       %{project: project} do
+    ids = for _ <- 1..5, do: Conveyor.Bep.Replay.uuid()
+
+    for id <- ids,
+        do:
+          Repo.insert!(%Invocation{
+            id: id,
+            project_id: project.id,
+            started_at: DateTime.utc_now()
+          })
+
+    finished = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    # The same dirty columns on every batch: one UPDATE … FROM unnest for all of them, with
+    # every column type the schema has (text, bigint, boolean, jsonb, timestamptz, text[]).
+    good =
+      for {id, i} <- Enum.with_index(ids, 1) do
+        batch(id, project, 1, fn b ->
+          b
+          |> Batch.add_event(1, "started", "x")
+          |> Batch.set_invocation(%{
+            command: "build #{i}",
+            targets_configured: i,
+            stream_finished: rem(i, 2) == 0,
+            tags: %{"n" => "#{i}"},
+            finished_at: finished,
+            patterns: ["//p#{i}", "//q"],
+            abort_reason: nil
+          })
+        end)
+      end
+
+    # Expects last_event_seq 6 on a row that is at 0.
+    fenced =
+      batch(hd(ids), project, 7, fn b ->
+        b
+        |> Batch.add_event(7, "progress", "y")
+        |> Batch.set_invocation(%{
+          command: "late",
+          targets_configured: 9,
+          stream_finished: true,
+          tags: %{},
+          finished_at: finished,
+          patterns: [],
+          abort_reason: nil
+        })
+      end)
+
+    # All batches go to one writer regardless of their shard so they share a flush.
+    writer = WriterPool.for_invocation(hd(ids))
+    Enum.each(good ++ [fenced], &Writer.submit(writer, &1))
+
+    for b <- good do
+      ref = b.ref
+      assert_receive {:batch_committed, ^ref}, 5_000
+    end
+
+    fenced_ref = fenced.ref
+    assert_receive {:batch_failed, ^fenced_ref, {:fenced, 6}}, 5_000
+
+    for {id, i} <- Enum.with_index(ids, 1) do
+      inv = Repo.get!(Invocation, id)
+      assert inv.last_event_seq == 1
+      assert inv.command == "build #{i}" and inv.targets_configured == i
+      assert inv.stream_finished == (rem(i, 2) == 0)
+      assert inv.tags == %{"n" => "#{i}"}
+      assert inv.finished_at == finished
+      assert inv.patterns == ["//p#{i}", "//q"]
+      assert inv.abort_reason == nil
+      assert inv.last_event_at != nil
+    end
+  end
+
+  test "two units of one invocation in a flush are applied in order, in separate statements",
+       %{id: id, project: project} do
+    first = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))
+    # Leaves a gap: only valid once the row is at 4, which it never is in this flush.
+    resumed = batch(id, project, 5, &Batch.add_event(&1, 5, "progress", "b"))
+    writer = WriterPool.for_invocation(id)
+    Writer.submit(writer, first)
+    Writer.submit(writer, resumed)
+    first_ref = first.ref
+    resumed_ref = resumed.ref
+    assert_receive {:batch_committed, ^first_ref}, 5_000
+    assert_receive {:batch_failed, ^resumed_ref, {:fenced, 4}}, 5_000
+    assert Repo.get!(Invocation, id).last_event_seq == 1
+  end
 end

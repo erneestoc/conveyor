@@ -112,6 +112,75 @@ defmodule Conveyor.Ingest.Batch do
     }
   end
 
+  @doc """
+  One batch equivalent to applying `a` then `b` for the same invocation, where `b` starts
+  where `a` ended. The writer merges the batches an invocation has in one flush so the
+  flush writes one segment, one log row and one fenced update for it (PLAN §24 item 1).
+  Acks are still released per original batch (the worker keeps their refs).
+  """
+  @spec merge(t(), t()) :: t()
+  def merge(%__MODULE__{} = a, %__MODULE__{} = b) do
+    unless contiguous?(a, b), do: raise(ArgumentError, "batches are not contiguous")
+
+    %__MODULE__{
+      ref: a.ref,
+      invocation_id: a.invocation_id,
+      project_id: a.project_id,
+      day: a.day,
+      first_seq: a.first_seq,
+      last_seq: b.last_seq,
+      # Lists are newest-first.
+      events: b.events ++ a.events,
+      event_bytes: a.event_bytes + b.event_bytes,
+      log: b.log ++ a.log,
+      log_bytes: a.log_bytes + b.log_bytes,
+      log_lines: a.log_lines + b.log_lines,
+      log_byte_offset: a.log_byte_offset,
+      log_line_offset: a.log_line_offset,
+      targets: Map.merge(a.targets, b.targets, fn _k, x, y -> Map.merge(x, y) end),
+      tests: Map.merge(a.tests, b.tests, fn _k, x, y -> Map.merge(x, y) end),
+      actions: b.actions ++ a.actions,
+      named_sets: b.named_sets ++ a.named_sets,
+      metrics: merge_metrics(a.metrics, b.metrics),
+      invocation: Map.merge(a.invocation, b.invocation),
+      tag_keys: Map.merge(a.tag_keys, b.tag_keys, fn _k, x, y -> x + y end),
+      waiters: b.waiters ++ a.waiters,
+      finalize: a.finalize or b.finalize
+    }
+  end
+
+  @doc "True when `b` continues `a` (same invocation, next sequence number)."
+  @spec contiguous?(t(), t()) :: boolean()
+  def contiguous?(%__MODULE__{} = a, %__MODULE__{} = b),
+    do: a.invocation_id == b.invocation_id and b.first_seq == a.last_seq + 1
+
+  @doc """
+  Merges each batch into the last unit of its invocation when it continues it, keeping the
+  units in order of first appearance. A non-contiguous batch of one invocation (a resumed
+  stream after a takeover) starts a new unit, so a flush can hold two units for one
+  invocation; the writer keeps those in separate statements.
+  """
+  @spec coalesce([t()]) :: [t()]
+  def coalesce(batches) do
+    {units_by_id, order} =
+      Enum.reduce(batches, {%{}, []}, fn b, {by_id, order} ->
+        case Map.fetch(by_id, b.invocation_id) do
+          {:ok, [last | rest]} ->
+            units = if contiguous?(last, b), do: [merge(last, b) | rest], else: [b, last | rest]
+            {Map.put(by_id, b.invocation_id, units), order}
+
+          :error ->
+            {Map.put(by_id, b.invocation_id, [b]), [b.invocation_id | order]}
+        end
+      end)
+
+    order |> Enum.reverse() |> Enum.flat_map(&Enum.reverse(units_by_id[&1]))
+  end
+
+  defp merge_metrics(nil, m), do: m
+  defp merge_metrics(m, nil), do: m
+  defp merge_metrics(a, b), do: Map.merge(a, b)
+
   @spec empty?(t()) :: boolean()
   def empty?(%__MODULE__{} = b) do
     b.events == [] and b.log == [] and b.targets == %{} and b.tests == %{} and b.actions == [] and
