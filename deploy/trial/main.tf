@@ -38,7 +38,7 @@ variable "conveyor_instance_type" { default = "t4g.medium" }
 variable "conveyor_count" { default = 1 }
 variable "edge" {
   description = "How clients reach Conveyor: \"nlb\" (TLS at a Network Load Balancer with an ACM certificate, any node count) or \"caddy\" (one node with a Caddy sidecar: Let's Encrypt on 443 and h2 on 1985, an Elastic IP, no balancer)."
-  default     = "nlb"
+  default     = "caddy"
   validation {
     condition     = contains(["nlb", "caddy"], var.edge)
     error_message = "edge must be nlb or caddy"
