@@ -672,5 +672,9 @@ per project under a key prefix, per-project retention, orphan pruning); item 2 (
 done — the Oban "stall" was the execution-log parser's exponential list expansion on
 input-set DAGs meeting Oban Lifeline's naive rescue (details in docs/scale.md), fixed
 with map unions, a parse queue, timeouts and backlog metrics + alert rules; item 2 (b)
-run locally with node kills (zero fenced, zero errors), not yet behind the NLB; item 3's
-parser and alert-rule bullets landed with 2 (c). HANDOFF §7 has the per-item detail.
+run locally with node kills (zero fenced, zero errors) and behind the NLB on 2026-09-22
+(two nodes, TLS, in-container kill -9 every 10 minutes); item 3 done (DATABASE_SSL +
+RDS bundle, Caddy single-node edge in deploy/trial, snapshot restore variable, rehearsed
+backup/restore, alert rules + Helm PrometheusRule; found: NLB cross-zone balancing must
+be on); item 4 done (project settings page, per-project admin groups, shared authorized
+handlers). HANDOFF §7 has the per-item detail and the trial's final shape.
