@@ -3,7 +3,7 @@ name: conveyor
 description: Self-hosted Bazel Build Event Service server with a real-time UI, dashboards and execution-log insights
 type: application
 version: 0.2.0
-appVersion: "0.1.0"
+appVersion: "0.2.0"
 kubeVersion: ">=1.25.0"
 home: https://erneestoc.github.io/conveyor/
 sources: [https://github.com/erneestoc/conveyor]
@@ -24,6 +24,12 @@ annotations:
     - name: Source
       url: https://github.com/erneestoc/conveyor
   artifacthub.io/changes: |
+    - kind: added
+      description: Hourly dashboard rollups (invocation_rollups, kept by a job every five minutes; a dashboard load with 100k builds went from 2.2 s to 0.5 s)
+    - kind: changed
+      description: Ingest uses about 40 % less CPU per event and 27 % less memory per stream; event segments are compressed with a BEP zstd dictionary (−38 %)
+    - kind: added
+      description: INGEST_WRITER_MAX_PENDING bounds the batches a writer shard commits early
     - kind: added
       description: ServiceAccount with annotations (IRSA), extraVolumes and extraVolumeMounts (database CA bundle)
     - kind: added

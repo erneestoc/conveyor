@@ -1,8 +1,33 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 (2026-09-22)
 
-Project boundary, hardening and product separation (M10).
+Speed and capacity (PLAN §24), then project boundary, hardening and product separation
+(M10). Every speed change was measured with the new benchmark harness; numbers are in
+docs/capacity.md.
+
+- **Benchmark harness.** `bench/run.sh` hosts a production build of the server, drives
+  the load generator as a child process and records events per second per app vCPU and
+  per PostgreSQL vCPU, WAL bytes per event, RSS per stream, storage per build, round
+  trips per flush and the persistence oracle for every run.
+- **Fewer statements per flush and per build.** Batches of one invocation are merged per
+  flush and the fenced invocation updates of a flush go out as one statement per set of
+  columns; the worker creates or loads its row in one round trip; a profile Bazel wrote
+  to a local file is settled in the final batch. Round trips −24 % (−32 % for paced
+  builds), transactions −42 %, WAL −3.5 %.
+- **Ingest CPU.** The credential scrubber runs its regexes only on strings that can
+  match: node CPU 5.5 → 3.4 vCPU at 20k events/s, ack p99 425 → 217 ms.
+- **Memory per stream.** Quiet workers hibernate and finished ones drop their wide
+  columns: 610 → 443 KB per open stream; a node with 10,000 finished builds lingering
+  went from 3.2 GB to 1.85 GB.
+- **Raw storage.** Event segments are compressed with a zstd dictionary trained on BEP
+  (`priv/zstd/bep-1.dict`, retrain with `bench/train_dict.sh`); rows written before it
+  still decode. Storage per build −10 %, event segments −38 %, WAL −10 %.
+- **Dashboards from hourly rollups.** Summary tiles, the series, phases over time, queue
+  time and actions by mnemonic read `invocation_rollups` (kept by a job every five
+  minutes; reads repair missing hours themselves; segments and free-form queries stay
+  exact): a dashboard load with 100k builds in range went from 2.2 s to 0.5 s.
+- `INGEST_WRITER_MAX_PENDING` (default 256) bounds the batches a writer shard commits early.
 
 - **The project is the hard boundary.** Every read is restricted in SQL to the projects
   the viewer may see: builds list and facets, invocation pages, downloads and artifacts,
