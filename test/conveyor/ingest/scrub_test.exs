@@ -120,4 +120,22 @@ defmodule Conveyor.Ingest.ScrubTest do
       assert {^event, false} = Scrub.event(event)
     end
   end
+
+  test "the prefilter only skips strings no pattern can match" do
+    refute Scrub.candidate?("//app:pass_test")
+    refute Scrub.candidate?("Build completed successfully, 12 total actions\n")
+    refute Scrub.candidate?("--jobs=8")
+    refute Scrub.candidate?("--client_env=HOME=/home/me")
+    assert Scrub.candidate?("--client_env=GITHUB_TOKEN=abc")
+    assert Scrub.candidate?("--bes_header=x-api-key=abc")
+    assert Scrub.candidate?("https://user:pw@host/repo")
+    assert Scrub.candidate?("Authorization: bEaReR abc.def")
+
+    assert Scrub.text("--jobs=8") == "--jobs=8"
+    assert Scrub.text("Authorization: bEaReR abc.def") == "Authorization: bEaReR <redacted>"
+    assert Scrub.text("ssh://user:pw@host/repo") == "ssh://<redacted>@host/repo"
+
+    assert Scrub.text("--client_env=NPM_AUTH=xyz --jobs=8") ==
+             "--client_env=NPM_AUTH=<redacted> --jobs=8"
+  end
 end

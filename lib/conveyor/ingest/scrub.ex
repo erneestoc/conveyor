@@ -1,3 +1,22 @@
+defmodule Conveyor.Ingest.Scrub.Casings do
+  @moduledoc false
+  # Every casing of a short word, for a byte search that is case-insensitive like the
+  # scrubber's regexes without downcasing the string first.
+  @spec of(String.t()) :: [String.t()]
+  def of(word) do
+    n = String.length(word)
+
+    for bits <- 0..(Integer.pow(2, n) - 1) do
+      word
+      |> String.graphemes()
+      |> Enum.with_index()
+      |> Enum.map_join(fn {c, i} ->
+        if Bitwise.band(bits, Bitwise.bsl(1, i)) == 0, do: c, else: String.upcase(c)
+      end)
+    end
+  end
+end
+
 defmodule Conveyor.Ingest.Scrub do
   @moduledoc """
   Removes credentials from BEP events before they are persisted.
@@ -24,11 +43,59 @@ defmodule Conveyor.Ingest.Scrub do
   # name says it holds a credential: AWS_SECRET_ACCESS_KEY, GITHUB_TOKEN, NPM_AUTH, ...
   @env_re ~r/(\b[A-Za-z_][A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE|ACCESS_KEY|API_KEY|APIKEY|AUTH)[A-Za-z0-9_]*=)([^\s"']+)/i
 
+  # Every pattern above needs one of these: a `NAME=` (header flags, generic credentials,
+  # environment variables), a `://` (URL credentials) or the word Bearer. Most strings in
+  # a build (labels, paths, log lines) carry none, so a byte search decides first and the
+  # five regex passes (which dominated the ingest CPU, PLAN §24 item 4) run only on
+  # candidates. The regexes stay the source of truth; the prefilter only skips strings no
+  # regex could match.
+  alias Conveyor.Ingest.Scrub.Casings
+
+  # URL credentials and Bearer tokens are candidates on their own.
+  @strong ["://"] ++ Casings.of("bearer")
+  # A `NAME=` string is a candidate only when the name carries a credential word; a stem of
+  # each word (token, secret, password/passwd, api_key/access_key, authorization/auth,
+  # credential, private, the header flags) is enough to decide.
+  @keywords ["_header="] ++
+              Casings.of("tok") ++
+              Casings.of("sec") ++
+              Casings.of("pass") ++
+              Casings.of("key") ++
+              Casings.of("auth") ++
+              Casings.of("cred") ++
+              Casings.of("priv")
+
   @doc "Scrubs one string."
   @spec text(String.t() | nil) :: String.t() | nil
   def text(nil), do: nil
 
   def text(string) when is_binary(string) do
+    if candidate?(string), do: scrub(string), else: string
+  end
+
+  @doc false
+  def candidate?(string) do
+    :binary.match(string, pattern(:strong, @strong)) != :nomatch or
+      (:binary.match(string, "=") != :nomatch and
+         :binary.match(string, pattern(:keywords, @keywords)) != :nomatch)
+  end
+
+  # Compiled once per node; a compiled pattern cannot be a module attribute.
+  defp pattern(name, list) do
+    key = {__MODULE__, name}
+
+    case :persistent_term.get(key, nil) do
+      nil ->
+        compiled = :binary.compile_pattern(list)
+        :persistent_term.put(key, compiled)
+        compiled
+
+      compiled ->
+        compiled
+    end
+  end
+
+  defp scrub(string) do
     string
     |> then(&Regex.replace(@header_re, &1, "\\1#{@redacted}"))
     |> then(&Regex.replace(@url_cred_re, &1, "\\1#{@redacted}@"))
