@@ -73,6 +73,40 @@ defmodule Conveyor.BlobsTest do
     refute File.regular?(path_b)
   end
 
+  test "legacy flat-layout rows shared by two projects keep the object until the last goes", %{
+    project: project
+  } do
+    import Ecto.Query
+    {:ok, other} = Projects.create_project(%{slug: "blobs-legacy", name: "Legacy"})
+    content = "legacy #{System.unique_integer()}"
+    digest = Blobs.digest(content)
+    {Disk, opts} = Blobs.adapter()
+    # Written before prefixes existed: bytes at the flat path, prefix nil on both rows.
+    :ok = Disk.put(digest, [content], opts)
+
+    for p <- [project, other] do
+      Repo.insert!(%Blobs.Blob{
+        project_id: p.id,
+        digest: digest,
+        prefix: nil,
+        size: byte_size(content),
+        storage: "disk",
+        source: "fetch",
+        inserted_at: DateTime.utc_now()
+      })
+    end
+
+    assert Blobs.exists?(project, digest) and Blobs.exists?(other, digest)
+    assert {:ok, ^content} = Blobs.read(other, digest)
+    assert :ok = Blobs.delete(other, digest)
+    refute Blobs.exists?(other, digest)
+    assert Blobs.exists?(project, digest)
+    assert File.regular?(Disk.path(digest, opts))
+    assert :ok = Blobs.delete(project, digest)
+    refute File.regular?(Disk.path(digest, opts))
+    assert Repo.all(from b in Blobs.Blob, where: b.digest == ^digest) == []
+  end
+
   test "refuses content that does not match the declared digest", %{project: project} do
     other = Blobs.digest("something else")
     assert {:error, :digest_mismatch} = Blobs.put(project, "content", digest: other)

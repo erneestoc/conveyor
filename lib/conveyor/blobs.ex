@@ -287,16 +287,31 @@ defmodule Conveyor.Blobs do
     end
   end
 
+  # Rows written before prefixes existed (`prefix` nil) may share one flat object across
+  # projects (the migration copied rows per referencing project): the object goes only
+  # when the last such row does.
   defp delete_blob(%Blob{} = blob) do
     {adapter, aopts} = adapter(blob.prefix)
 
-    with :ok <- counted(:delete, adapter.delete(blob.digest, aopts)) do
+    result =
+      if blob.prefix == nil and shared_flat_object?(blob),
+        do: :ok,
+        else: counted(:delete, adapter.delete(blob.digest, aopts))
+
+    with :ok <- result do
       Repo.delete_all(
         from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
       )
 
       :ok
     end
+  end
+
+  defp shared_flat_object?(%Blob{project_id: project_id, digest: digest}) do
+    Repo.exists?(
+      from b in Blob,
+        where: b.digest == ^digest and is_nil(b.prefix) and b.project_id != ^project_id
+    )
   end
 
   @doc "Removes the expiry so retention never drops a blob an invocation references."
