@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Rollup staleness (found by model checking).** A build that changed while its hour was
+  being rolled up could stay hidden until the next change; rows are now stamped from
+  before their builds are read. The writer's group commit and Oban's rescue window were
+  modelled too: the writer holds every property (tag counts are undercounted only when a
+  committed group's acknowledgement is lost, an accepted inexactness), and the parse
+  timeout is now pinned below the rescue window by a test. `docs/spec/`.
+
 - **Blob references can no longer point at deleted bytes (found by model checking).** An
   attach pinned the blob and inserted the reference in two statements while orphan
   pruning or TTL expiry could delete the blob in between (and deleted the object before

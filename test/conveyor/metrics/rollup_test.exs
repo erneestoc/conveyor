@@ -103,6 +103,15 @@ defmodule Conveyor.Metrics.RollupTest do
     assert n > 0
   end
 
+  test "a row is stamped from before its builds were read (docs/spec/Rollup.tla)", %{
+    project: project
+  } do
+    before = DateTime.utc_now()
+    row = Rollup.roll!(project.id, DateTime.add(@now, -3600, :second))
+    # a change committed during the compute (or up to 5 s before it, clock skew) is newer
+    assert DateTime.compare(row.updated_at, DateTime.add(before, -4, :second)) == :lt
+  end
+
   test "rollups can be switched off" do
     Application.put_env(:conveyor, Rollup, enabled: false)
     on_exit(fn -> Application.put_env(:conveyor, Rollup, enabled: true) end)

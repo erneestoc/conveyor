@@ -46,6 +46,33 @@ Fixed in `Conveyor.Blobs` (`pin/2` returns `{:error, :blob_gone}` on a missing r
 and `Conveyor.Artifacts.attach/4` (one transaction, `{:ok, artifact} | {:error, :blob_gone}`;
 a vanished profile blob makes the fetch job retry, an upload answers 503).
 
+## Writer group commit (`Writer.tla`)
+
+One shard, two invocations, stale submissions, the group commit with its per-batch
+fallback, tag counts added after the commit. Without chaos every property holds
+(`Writer_fixed.cfg`, 686 states): a batch's rows land exactly once and in order, and the
+counted tags equal the committed batches. `Writer_current.cfg` adds a lost commit
+acknowledgement (the transaction committed, the writer saw an error and retried): the retry
+fences, the fallback fails every batch, the clients re-synchronise through dedup, nothing
+is lost or duplicated, but the tag counts of that group are never added. Accepted:
+facet counts are approximate by design and `Invocations.rebuild_tag_keys!/1` restores them.
+
+## Rollup staleness (`Rollup.tla`)
+
+One project-hour, builds changing while the hour is computed. Property `Fresh`: a row that
+passes the staleness check reflects every change. `Rollup_current.cfg` (row stamped when it
+is written) fails: a build finishing during the compute is newer than the read but older
+than the stamp, so the hour stays wrong until something else changes. Fixed: the stamp is
+taken before the read, five seconds early for clock skew (`Rollup.roll!/2`,
+`Rollup_fixed.cfg` holds).
+
+## Oban rescue (`Oban.tla`)
+
+One long job with Lifeline's rescue. `OneRun` (never two runs at once) holds when the
+job's timeout is shorter than the rescue window (`Oban_fixed.cfg`, 10 < 15 minutes as
+configured) and fails otherwise (`Oban_current.cfg`); `oban_rescue_test.exs` pins the
+configuration to that order.
+
 ## Running
 
 ```sh
@@ -53,10 +80,8 @@ docs/spec/check.sh                          # every configuration
 docs/spec/check.sh Ingest:fixed Blobs:fixed # the ones that must pass
 ```
 
-Candidates not yet modelled, in order of expected payoff: the writer's group commit with
-its per-batch fallback and tag counts (every event once and in order, counts exact,
-whatever fails), rollup repair under concurrent job writes, late finishes and retention,
-and Oban's rescue window against long parses.
+Not modelled: retention against live ingest (a deleted build whose stream resumes), and
+the drain on shutdown beyond what the ingest model's exits cover.
 
 TLC needs Java and `tla2tools.jar` (`TLA_TOOLS=/path/to/tla2tools.jar`, default
 `~/tla/tla2tools.jar` from https://github.com/tlaplus/tlaplus/releases). Re-run the model

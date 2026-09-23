@@ -5,7 +5,7 @@ cd "$(dirname "$0")"
 JAR="${TLA_TOOLS:-$HOME/tla/tla2tools.jar}"
 [ -f "$JAR" ] || { echo "tla2tools.jar not found; set TLA_TOOLS"; exit 1; }
 # Each entry is Module:config; the "fixed" configs must pass, the others document bugs.
-configs=("$@"); [ ${#configs[@]} -gt 0 ] || configs=(Ingest:fixed Ingest:current Ingest:pre_m10 Blobs:fixed Blobs:current)
+configs=("$@"); [ ${#configs[@]} -gt 0 ] || configs=(Ingest:fixed Ingest:current Ingest:pre_m10 Blobs:fixed Blobs:current Writer:fixed Writer:current Rollup:fixed Rollup:current Oban:fixed Oban:current)
 status=0
 for entry in "${configs[@]}"; do
   m="${entry%%:*}"; c="${entry##*:}"

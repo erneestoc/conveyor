@@ -222,6 +222,10 @@ defmodule Conveyor.Metrics.Rollup do
   @spec roll!(integer(), DateTime.t()) :: Row.t()
   def roll!(project_id, hour) do
     hour = truncate(hour, :hour)
+    # The row is stamped from before the builds are read, with a margin for clock skew
+    # between nodes: a build that changes while the hour is being computed must leave the
+    # row stale, or that change would stay hidden (docs/spec/Rollup.tla).
+    stamp = DateTime.add(DateTime.utc_now(), -5, :second)
 
     row =
       compute(
@@ -230,20 +234,18 @@ defmodule Conveyor.Metrics.Rollup do
         DateTime.add(hour, 3600, :second)
       )
 
-    now = DateTime.utc_now()
-
     attrs =
       row
       |> Map.from_struct()
       |> Map.drop([:__meta__])
-      |> Map.merge(%{project_id: project_id, hour: hour, updated_at: now})
+      |> Map.merge(%{project_id: project_id, hour: hour, updated_at: stamp})
 
     Repo.insert_all(Row, [attrs],
       on_conflict: {:replace_all_except, [:project_id, :hour]},
       conflict_target: [:project_id, :hour]
     )
 
-    %{row | project_id: project_id, updated_at: now}
+    %{row | project_id: project_id, updated_at: stamp}
   end
 
   @doc """
