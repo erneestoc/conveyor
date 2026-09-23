@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-09-23)
 
 - **Ingest correctness (found by model checking).** A client that reconnected to the same
   node and resent an event the worker had absorbed but not yet committed was acknowledged

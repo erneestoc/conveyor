@@ -2,8 +2,8 @@ apiVersion: v2
 name: conveyor
 description: Self-hosted Bazel Build Event Service server with a real-time UI, dashboards and execution-log insights
 type: application
-version: 0.2.0
-appVersion: "0.2.0"
+version: 0.2.1
+appVersion: "0.2.1"
 kubeVersion: ">=1.25.0"
 home: https://erneestoc.github.io/conveyor/
 sources: [https://github.com/erneestoc/conveyor]
@@ -24,6 +24,10 @@ annotations:
     - name: Source
       url: https://github.com/erneestoc/conveyor
   artifacthub.io/changes: |
+    - kind: fixed
+      description: A resend of an absorbed, uncommitted event is acknowledged by its commit, not on sight (found by the TLA+ model of the ingest protocol)
+    - kind: changed
+      description: Dashboard panels load once per view; spawn reports read the hourly rollups
     - kind: added
       description: Hourly dashboard rollups (invocation_rollups, kept by a job every five minutes; a dashboard load with 100k builds went from 2.2 s to 0.5 s)
     - kind: changed
