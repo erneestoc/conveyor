@@ -94,6 +94,14 @@ load = 17 panels:
 |---|---|---|---|---|
 | exact panels | 1.90 s | 2.11 s | 2.20 s | `actions_by_mnemonic` 0.8–1.0 s, `phases_over_time` 0.3 s, `queue_trend` 0.15 s (jsonb aggregation over every build) |
 | 6 hourly rollups | 0.54 s | 0.53 s | 0.51 s | summary, series, phases, queue, mnemonics read `invocation_rollups` (674 project-hours, 704 kB; backfill 4.3 s); a window check of 65–80 ms per page load repairs stale or missing hours, edges are computed exactly; the rest is the still-exact panels (`target_regressions` 0.1 s, `by_user`, `slowest_builds`) |
+
+On the trial (one `t4g.medium`, RDS `db.t3.micro`, 3.6k builds and 48k spawns): a dashboard
+view took 3.3–4.3 s before the panels were loaded once per view (the disconnected render
+and the connected mount each loaded everything), the window's rows were computed once per
+page, and the spawn reports (cache by mnemonic, cache-missing targets, remote bytes) came
+from the rollups. After: first byte 0.34–0.41 s, then 1.5 s of panels over the socket of
+which `non_hermetic` alone is 1.1 s (a parallel hash self-join over every spawn, the next
+report to precompute at parse time); every rolled panel is under 15 ms.
 | 5 hibernate quiet workers | 990 | 68 / 255 | 96.1k | 443 KB | 0.50 | workers 179 MB (was 378); flat-out peak RSS 1.85 GB with 10,000 lingering workers (was 3.2 GB), CPU unchanged |
 
 ## Starting points
