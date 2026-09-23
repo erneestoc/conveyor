@@ -234,4 +234,30 @@ defmodule Conveyor.Ingest.WorkerTest do
 
     assert :ok = await_worker_exit(id)
   end
+
+  @tag :capture_log
+  test "a resend of an absorbed, uncommitted event is acknowledged only by its commit", %{
+    ctx: ctx
+  } do
+    id = Replay.uuid()
+    [e1, e2 | _] = events("clean_build_and_test")
+
+    # Absorb 1 and 2 without waiting for the commit; the acks go to another process.
+    sink = spawn(fn -> Process.sleep(:infinity) end)
+    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), sink)
+    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 2, e2), sink)
+
+    # A reconnected client resends 1: below the worker's expected sequence but not yet
+    # committed. The old rule acked it inside the call; now nothing arrives until the
+    # batch commits, and then the ack reaches this connection.
+    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), self())
+    refute_received {:ack, 1}
+    assert_receive {:ack, 1}, 5_000
+    assert reload(id).last_event_seq >= 1
+
+    # Once committed, a resend is acknowledged at once.
+    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), self())
+    assert_received {:ack, 1}
+    Process.exit(sink, :kill)
+  end
 end

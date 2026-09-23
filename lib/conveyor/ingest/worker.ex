@@ -161,10 +161,17 @@ defmodule Conveyor.Ingest.Worker do
     state = %{state | last_event_at: System.monotonic_time(:millisecond)} |> reset_idle()
 
     cond do
-      seq < state.expected_seq ->
+      seq <= state.committed_seq ->
         # Already committed (client resend after a retry): ack immediately.
         send(acker, {:ack, seq})
         {:reply, :ok, state}
+
+      seq < state.expected_seq ->
+        # Absorbed but not committed: a client that reconnected to this node (after a
+        # drop or a balancer retry) resends what it never saw acknowledged. The ack must
+        # wait for the commit, on this connection; acking now would let a failed commit
+        # lose the event for good (docs/spec/Ingest.tla, Durability).
+        {:reply, :ok, await_commit(state, seq, acker)}
 
       seq > state.expected_seq ->
         case takeover(state, seq) do
@@ -448,6 +455,19 @@ defmodule Conveyor.Ingest.Worker do
       {{:ack, pid}, seq} when reply == :ok -> send(pid, {:ack, seq})
       {{:ack, pid}, seq} -> send(pid, {:ack_failed, seq, elem(reply, 1)})
     end)
+  end
+
+  # Registers `acker` for the ack of an absorbed, uncommitted sequence: on the batch still
+  # being built, or on the in-flight batch that carries it.
+  defp await_commit(state, seq, acker) do
+    if seq >= state.batch.first_seq do
+      %{state | batch: Batch.add_waiter(state.batch, {:ack, acker}, seq)}
+    else
+      case Enum.find(state.inflight, fn {_ref, b} -> seq >= b.first_seq and seq <= b.last_seq end) do
+        {ref, b} -> put_in(state.inflight[ref], Batch.add_waiter(b, {:ack, acker}, seq))
+        nil -> state
+      end
+    end
   end
 
   defp unacked(state), do: state.expected_seq - 1 - state.committed_seq

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **Ingest correctness (found by model checking).** A client that reconnected to the same
+  node and resent an event the worker had absorbed but not yet committed was acknowledged
+  at once; a failed commit could then lose that event for good, since Bazel never resends
+  what it believes stored. A resend is now acknowledged immediately only when it is
+  committed; otherwise the new connection waits for the commit. The protocol is specified
+  in TLA+ (`docs/spec/`) and checked with TLC: acknowledged events are durable and every
+  run completes under bounded drops and a failed commit; the configuration with the old
+  rule fails in seven steps, and the pre-M10 lifecycle behaviour reproduces the trial's
+  stuck builds.
+- **Dashboard** loads its panels once per view (the first response paints the shell), the
+  window's rollup rows are computed once per page, and the execution-log reports (cache by
+  mnemonic, cache-missing targets, remote bytes) read the hourly rollups. On the trial a
+  dashboard view went from 3.3–4.3 s to 0.4 s to first byte plus about 1.5 s of panels.
+
 ## 0.2.0 (2026-09-22)
 
 Speed and capacity (PLAN §24), then project boundary, hardening and product separation

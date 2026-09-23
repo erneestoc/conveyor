@@ -43,3 +43,8 @@ test/fixtures/workspace/bazel-*
 .env
 /bes_loadgen
 /site/
+
+# TLC output
+/docs/spec/states/
+/docs/spec/tlc_*.log
+/docs/spec/Ingest.cfg

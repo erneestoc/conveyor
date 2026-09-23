@@ -51,6 +51,12 @@ implementation notes.
 
 ## Provability: golden data, properties, contract tests, mutation checks
 
+The ingest protocol itself (resends, fencing across nodes, takeovers, lifecycle
+notifications) is specified in TLA+ under `docs/spec/` and model-checked with TLC
+(`docs/spec/check.sh`); the [spec page](spec/README.md) lists the properties, the three
+configurations and what the model found. Re-run it when `worker.ex`, `writer.ex` or
+`ingest.ex` change how sequences, acks or the fence behave.
+
 - **Golden data.** `Conveyor.GoldenData` (test/support) is a hand-written dataset whose
   dashboard numbers are computed by hand in the moduledoc of
   `test/conveyor/metrics/golden_test.exs` and asserted exactly. Extend it rather than
