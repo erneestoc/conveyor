@@ -108,7 +108,17 @@ defmodule Conveyor.Artifacts do
   @spec attach(Invocation.t() | String.t(), String.t(), Blobs.Blob.t(), String.t()) ::
           Artifact.t()
   def attach(inv, name, %Blobs.Blob{} = blob, source) do
-    Blobs.pin(blob.project_id, blob.digest)
+    # Pin and reference in one transaction: a blob expiry or pruning removed meanwhile
+    # fails the pin, and no reference to missing bytes is written (docs/spec/Blobs.tla).
+    Repo.transaction(fn ->
+      case Blobs.pin(blob.project_id, blob.digest) do
+        :ok -> insert_artifact(inv, name, blob, source)
+        {:error, :blob_gone} -> Repo.rollback(:blob_gone)
+      end
+    end)
+  end
+
+  defp insert_artifact(inv, name, blob, source) do
     now = DateTime.utc_now()
 
     row = %{
@@ -152,9 +162,12 @@ defmodule Conveyor.Artifacts do
       %Invocation{profile_status: "referenced", profile_uri: uri} = inv when is_binary(uri) ->
         case Resource.parse_uri(uri) do
           {:ok, %Resource{hash: hash}} ->
-            if Blobs.exists?(inv.project_id, hash),
-              do: profile_available(inv, Blobs.get(inv.project_id, hash)),
-              else: enqueue_profile_fetch(inv)
+            with true <- Blobs.exists?(inv.project_id, hash),
+                 :ok <- profile_available(inv, Blobs.get(inv.project_id, hash)) do
+              :ok
+            else
+              _ -> enqueue_profile_fetch(inv)
+            end
 
           {:error, reason} ->
             set_profile_status(inv, "unavailable", reason)
@@ -186,8 +199,8 @@ defmodule Conveyor.Artifacts do
 
     case fetch(inv, %{"uri" => uri, "name" => name}) do
       {:ok, digest} ->
+        # A vanished blob is a retryable failure: the job fetches again.
         profile_available(inv, Blobs.get(inv.project_id, digest))
-        :ok
 
       {:error, reason}
       when reason in [
@@ -214,10 +227,20 @@ defmodule Conveyor.Artifacts do
   def fetch_profile(%Invocation{}), do: {:unavailable, :no_uri}
 
   @doc "Records a profile blob as the invocation's profile and attaches it by name."
-  @spec profile_available(Invocation.t(), Blobs.Blob.t(), String.t()) :: :ok
+  @spec profile_available(Invocation.t(), Blobs.Blob.t(), String.t()) ::
+          :ok | {:error, :blob_gone}
   def profile_available(%Invocation{} = inv, %Blobs.Blob{} = blob, name \\ "command.profile.gz") do
-    attach(inv, name, blob, blob.source)
+    case attach(inv, name, blob, blob.source) do
+      {:ok, _} ->
+        profile_recorded(inv, blob)
 
+      {:error, :blob_gone} = error ->
+        set_profile_status(inv, "failed", :blob_gone)
+        error
+    end
+  end
+
+  defp profile_recorded(inv, blob) do
     Repo.update_all(from(i in Invocation, where: i.id == ^inv.id),
       set: [profile_blob: blob.digest, profile_status: "available"]
     )

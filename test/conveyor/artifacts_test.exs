@@ -134,10 +134,10 @@ defmodule Conveyor.ArtifactsTest do
   test "attaches named artifacts and replaces by name", %{inv: inv} do
     {:ok, b1} = Blobs.put(inv.project_id, "v1", ttl_seconds: 10)
     {:ok, b2} = Blobs.put(inv.project_id, "v2")
-    a1 = Artifacts.attach(inv, "notes.txt", b1, "upload")
+    {:ok, a1} = Artifacts.attach(inv, "notes.txt", b1, "upload")
     assert a1.digest == b1.digest
     assert Blobs.get(inv.project_id, b1.digest).expires_at == nil
-    a2 = Artifacts.attach(inv.id, "notes.txt", b2, "upload")
+    {:ok, a2} = Artifacts.attach(inv.id, "notes.txt", b2, "upload")
     assert a2.digest == b2.digest
     assert [%{name: "notes.txt", digest: digest}] = Artifacts.list(inv)
     assert digest == b2.digest
@@ -222,6 +222,36 @@ defmodule Conveyor.ArtifactsTest do
                perform_job(FetchProfile, %{invocation_id: Ecto.UUID.generate()})
 
       assert {:unavailable, :no_uri} = Artifacts.fetch_profile(%Invocation{id: inv.id})
+    end
+  end
+
+  describe "attach against blob removal (docs/spec/Blobs.tla)" do
+    test "a blob removed before the pin is not referenced", %{project: project} do
+      {:ok, blob} =
+        Blobs.put(project.id, "bytes #{System.unique_integer()}",
+          source: "upload",
+          ttl_seconds: 1
+        )
+
+      inv = insert_invocation(project, %{})
+      Repo.delete_all(from(b in Blobs.Blob, where: b.digest == ^blob.digest))
+
+      assert {:error, :blob_gone} = Artifacts.attach(inv, "gone.txt", blob, "upload")
+      assert Artifacts.list(inv) == []
+      assert {:error, :blob_gone} = Artifacts.profile_available(inv, blob)
+      assert Repo.get!(Invocation, inv.id).profile_status == "failed"
+    end
+
+    test "an intact blob attaches once, pinned", %{project: project} do
+      {:ok, blob} =
+        Blobs.put(project.id, "bytes #{System.unique_integer()}",
+          source: "upload",
+          ttl_seconds: 100
+        )
+
+      inv = insert_invocation(project, %{})
+      assert {:ok, %{name: "ok.txt"}} = Artifacts.attach(inv, "ok.txt", blob, "upload")
+      assert Blobs.get(project.id, blob.digest).expires_at == nil
     end
   end
 end

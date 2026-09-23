@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Blob references can no longer point at deleted bytes (found by model checking).** An
+  attach pinned the blob and inserted the reference in two statements while orphan
+  pruning or TTL expiry could delete the blob in between (and deleted the object before
+  the row). Pin and reference are one transaction that fails when the blob is gone;
+  deletions re-check under the row lock and drop the row before the object. A vanished
+  profile blob makes the fetch job retry; an upload racing a deletion answers 503.
+  `docs/spec/Blobs.tla`, `docs/spec/check.sh`.
+
 ## 0.2.1 (2026-09-23)
 
 - **Ingest correctness (found by model checking).** A client that reconnected to the same

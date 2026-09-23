@@ -30,12 +30,33 @@ immediately only when `seq <= committed_seq`; between `committed_seq` and `expec
 the new connection is registered as a waiter on the batch that carries the event, so the
 ack follows the commit (`worker_test.exs`, "a resend of an absorbed, uncommitted event").
 
-Run:
+## Blob lifecycle (`Blobs.tla`)
+
+One digest of one project: upload (object plus a row with a TTL), attach (exists check,
+pin, reference insert), TTL expiry and orphan pruning after the grace period. Property
+`ReferencedIntact`: a reference always points at a blob whose row and object exist.
+
+| Config | Knobs | Result |
+|---|---|---|
+| `Blobs_current.cfg` | pin and reference as two statements, pin ignores a missing row; deletion removes the object, then the row | violated in 8 steps: the attacher pins, pruning passes its orphan check and deletes the object, the reference is inserted |
+| `Blobs_fixed.cfg` | pin and reference in one transaction and the pin must hit the row; deletion re-checks the pin and the references under the row lock and drops the row before the object | holds |
+
+Fixed in `Conveyor.Blobs` (`pin/2` returns `{:error, :blob_gone}` on a missing row,
+`delete_blob/2` locks, re-checks and drops the row first; the explicit `delete/2` forces)
+and `Conveyor.Artifacts.attach/4` (one transaction, `{:ok, artifact} | {:error, :blob_gone}`;
+a vanished profile blob makes the fetch job retry, an upload answers 503).
+
+## Running
 
 ```sh
-docs/spec/check.sh            # all three configurations
-docs/spec/check.sh fixed      # one
+docs/spec/check.sh                          # every configuration
+docs/spec/check.sh Ingest:fixed Blobs:fixed # the ones that must pass
 ```
+
+Candidates not yet modelled, in order of expected payoff: the writer's group commit with
+its per-batch fallback and tag counts (every event once and in order, counts exact,
+whatever fails), rollup repair under concurrent job writes, late finishes and retention,
+and Oban's rescue window against long parses.
 
 TLC needs Java and `tla2tools.jar` (`TLA_TOOLS=/path/to/tla2tools.jar`, default
 `~/tla/tla2tools.jar` from https://github.com/tlaplus/tlaplus/releases). Re-run the model

@@ -24,8 +24,8 @@ defmodule ConveyorWeb.UploadController do
 
     with {:ok, inv} <- owned_invocation(id, key),
          :ok <- valid_name(name),
-         {:ok, blob} <- store_body(conn, name) do
-      artifact = Artifacts.attach(inv, name, blob, "upload")
+         {:ok, blob} <- store_body(conn, name),
+         {:ok, artifact} <- Artifacts.attach(inv, name, blob, "upload") do
       if Artifacts.profile_name?(name), do: Artifacts.profile_available(inv, blob, name)
       if Conveyor.ExecLog.name?(name), do: Conveyor.ExecLog.available(inv, blob)
 
@@ -46,7 +46,11 @@ defmodule ConveyorWeb.UploadController do
         content_type: artifact.content_type
       })
     else
-      {:error, status, message} -> error(conn, status, message)
+      {:error, :blob_gone} ->
+        error(conn, 503, "the blob was removed before it could be attached; retry")
+
+      {:error, status, message} ->
+        error(conn, status, message)
     end
   end
 

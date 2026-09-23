@@ -283,28 +283,83 @@ defmodule Conveyor.Blobs do
   def delete(project, digest) do
     case get(project, digest) do
       nil -> :ok
-      blob -> delete_blob(blob)
+      blob -> delete_blob(blob, :force)
     end
   end
 
   # Rows written before prefixes existed (`prefix` nil) may share one flat object across
   # projects (the migration copied rows per referencing project): the object goes only
   # when the last such row does.
-  defp delete_blob(%Blob{} = blob) do
-    {adapter, aopts} = adapter(blob.prefix)
+  # Deletes a blob whose expiry or orphan check passed. The row goes first, under its lock,
+  # after re-checking that nothing pinned or referenced it since the check (an attach in
+  # flight is serialized by the lock and then fails its pin); the object goes once the row
+  # is gone, so a reference can never point at bytes that were deleted (docs/spec/Blobs.tla).
+  defp delete_blob(%Blob{} = blob, mode \\ :checked) do
+    now = DateTime.utc_now()
 
-    result =
-      if blob.prefix == nil and shared_flat_object?(blob),
-        do: :ok,
-        else: counted(:delete, adapter.delete(blob.digest, aopts))
+    dropped =
+      Repo.transaction(fn ->
+        locked =
+          Repo.one(
+            from(b in Blob,
+              where: b.project_id == ^blob.project_id and b.digest == ^blob.digest,
+              lock: "FOR UPDATE"
+            )
+          )
 
-    with :ok <- result do
-      Repo.delete_all(
-        from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
-      )
+        cond do
+          locked == nil ->
+            :gone
 
-      :ok
+          mode == :force ->
+            drop(locked)
+
+          locked.expires_at != nil and DateTime.compare(locked.expires_at, now) == :lt ->
+            drop(locked)
+
+          locked.expires_at == nil and not referenced?(locked) ->
+            drop(locked)
+
+          true ->
+            :skipped
+        end
+      end)
+
+    case dropped do
+      {:ok, :dropped} ->
+        {adapter, aopts} = adapter(blob.prefix)
+
+        if blob.prefix == nil and shared_flat_object?(blob),
+          do: :ok,
+          else: counted(:delete, adapter.delete(blob.digest, aopts))
+
+      {:ok, other} ->
+        other
+
+      {:error, reason} ->
+        {:error, reason}
     end
+  end
+
+  defp drop(%Blob{} = blob) do
+    Repo.delete_all(
+      from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
+    )
+
+    :dropped
+  end
+
+  defp referenced?(%Blob{project_id: project_id, digest: digest}) do
+    Repo.exists?(
+      from a in "invocation_artifacts",
+        join: i in "invocations",
+        on: i.id == a.invocation_id,
+        where: a.digest == ^digest and i.project_id == ^project_id
+    ) or
+      Repo.exists?(
+        from i in "invocations",
+          where: i.profile_blob == ^digest and i.project_id == ^project_id
+      )
   end
 
   defp shared_flat_object?(%Blob{project_id: project_id, digest: digest}) do
@@ -316,15 +371,19 @@ defmodule Conveyor.Blobs do
 
   @doc "Removes the expiry so retention never drops a blob an invocation references."
   @spec pin(project(), digest()) :: :ok
+  @spec pin(Projects.Project.t() | integer(), String.t()) :: :ok | {:error, :blob_gone}
   def pin(project, digest) do
     project_id = project_id(project)
 
-    Repo.update_all(
-      from(b in Blob, where: b.project_id == ^project_id and b.digest == ^digest),
-      set: [expires_at: nil]
-    )
-
-    :ok
+    # A pin that hits no row means expiry or pruning removed the blob between the
+    # caller's check and now (docs/spec/Blobs.tla); the caller must not reference it.
+    case Repo.update_all(
+           from(b in Blob, where: b.project_id == ^project_id and b.digest == ^digest),
+           set: [expires_at: nil]
+         ) do
+      {1, _} -> :ok
+      {0, _} -> {:error, :blob_gone}
+    end
   end
 
   defp touch(%Blob{project_id: project_id, digest: digest}) do
