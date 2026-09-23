@@ -61,7 +61,8 @@ test("log viewer: lines render, filter works, follow toggles", async ({page}) =>
   for (const href of hrefs.slice(0, 8)) {
     await page.goto(`${href}/log`)
     await expect(viewer.locator("[data-log-status]")).toContainText("lines", {timeout: 20_000})
-    if (await viewer.locator("[data-line]").count() > 0) { found = true; break }
+    // rows are virtualized and paint after the status: give them a moment
+    try { await expect(viewer.locator("[data-line]").first()).toBeVisible({timeout: 3_000}); found = true; break } catch {}
   }
   expect(found, "a seeded build with log lines").toBe(true)
   await expect(viewer.locator("[data-line]").first()).toBeVisible()
