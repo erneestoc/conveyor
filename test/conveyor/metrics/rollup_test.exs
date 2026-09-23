@@ -42,6 +42,24 @@ defmodule Conveyor.Metrics.RollupTest do
 
       assert Dashboard.actions_by_mnemonic(scope, 10) ==
                Dashboard.exact_actions_by_mnemonic(scope, 10)
+
+      assert Dashboard.cache_by_mnemonic(scope, 10) ==
+               Dashboard.exact_cache_by_mnemonic(scope, 10)
+
+      assert Dashboard.top_cache_missing_targets(scope, 10) ==
+               Dashboard.exact_top_cache_missing_targets(scope, 10)
+
+      assert Dashboard.remote_bytes(scope) == Dashboard.exact_remote_bytes(scope)
+
+      # A page verifies its window once and every panel reuses the rows.
+      ensured = Rollup.ensure!(scope)
+      assert is_list(ensured.rollup_rows)
+      assert Dashboard.summary(ensured) == Dashboard.summary(scope)
+      # derived windows never inherit the cached rows
+      assert Scope.previous(ensured).rollup_rows == nil
+
+      assert Dashboard.summary(Scope.previous(ensured)) ==
+               Dashboard.exact_summary(Scope.previous(scope))
     end
 
     # A free-form query keeps the exact path.

@@ -92,20 +92,35 @@ defmodule ConveyorWeb.DashboardLive do
     segments = socket.assigns.segments
     scope = if s = socket.assigns.segment, do: segment_scope(base, segments, s), else: base
 
-    compare =
-      socket.assigns.compare &&
-        Enum.map(socket.assigns.compare, &{&1, load_scope(segment_scope(base, segments, &1))})
+    # The panels are loaded once per page view, in the connected mount: the disconnected
+    # render only paints the shell, so the first byte does not wait for the database and the
+    # database does the work once, not twice.
+    if connected?(socket) do
+      compare =
+        socket.assigns.compare &&
+          Enum.map(socket.assigns.compare, &{&1, load_scope(segment_scope(base, segments, &1))})
 
-    assign(socket,
-      scope: scope,
-      main: load_scope(scope),
-      comparison: compare,
-      segment_summaries:
-        base
-        |> Scope.segments(segments)
-        |> Enum.map(&{&1.name, Dashboard.summary(&1)}),
-      bucket: Scope.bucket(scope)
-    )
+      assign(socket,
+        scope: scope,
+        loading: false,
+        main: load_scope(scope),
+        comparison: compare,
+        segment_summaries:
+          base
+          |> Scope.segments(segments)
+          |> Enum.map(&{&1.name, Dashboard.summary(&1)}),
+        bucket: Scope.bucket(scope)
+      )
+    else
+      assign(socket,
+        scope: scope,
+        loading: true,
+        main: nil,
+        comparison: nil,
+        segment_summaries: [],
+        bucket: Scope.bucket(scope)
+      )
+    end
   end
 
   defp segment_scope(base, segments, name) do
@@ -211,9 +226,8 @@ defmodule ConveyorWeb.DashboardLive do
         <div>
           <h1 class="text-lg font-semibold tracking-tight">Dashboard</h1>
           <p class="text-xs text-base-content/60">
-            {if @project, do: @project.name, else: "All projects"} · last {@range} · {Format.number(
-              @main.summary.builds
-            )} builds
+            {if @project, do: @project.name, else: "All projects"} · last {@range}{if @main,
+              do: " · #{Format.number(@main.summary.builds)} builds"}
           </p>
         </div>
         <form
@@ -339,7 +353,15 @@ defmodule ConveyorWeb.DashboardLive do
         </section>
       </div>
 
-      <div :if={is_nil(@comparison)}>
+      <div
+        :if={@loading}
+        id="dashboard-loading"
+        class="py-12 text-center text-sm text-base-content/60"
+      >
+        Loading…
+      </div>
+
+      <div :if={is_nil(@comparison) and @main}>
         <.tiles data={@main} sfx="" class="grid-cols-2 sm:grid-cols-3 lg:grid-cols-6" />
 
         <div class="mt-4 overflow-x-auto rounded-md border border-base-300" id="segments">

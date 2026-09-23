@@ -10,6 +10,7 @@ defmodule Conveyor.Metrics.Rollup do
   """
   import Ecto.Query
 
+  alias Conveyor.ExecLog.Spawn
   alias Conveyor.Invocations.{Invocation, Metrics}
   alias Conveyor.Metrics.{Digest, Scope}
   alias Conveyor.Repo
@@ -39,6 +40,11 @@ defmodule Conveyor.Metrics.Rollup do
       field :profiled, :integer, default: 0
       field :mnemonic_counts, :map, default: %{}
       field :mnemonic_ms, :map, default: %{}
+      field :spawns, :integer, default: 0
+      field :spawn_mnemonics, :map, default: %{}
+      field :spawn_misses, :map, default: %{}
+      field :remote_sent, :integer
+      field :remote_fetched, :integer
       field :updated_at, :utc_datetime_usec
     end
   end
@@ -153,6 +159,35 @@ defmodule Conveyor.Metrics.Rollup do
       |> Repo.all()
       |> Map.new()
 
+    spawns = join(Spawn, :inner, [s], i in subquery(finished), on: i.id == s.invocation_id)
+
+    spawn_mnemonics =
+      spawns
+      |> group_by([s], s.mnemonic)
+      |> select(
+        [s],
+        {s.mnemonic, count(s.id), fragment("count(*) FILTER (WHERE ?)", s.cache_hit)}
+      )
+      |> Repo.all()
+      |> Map.new(fn {name, n, hits} -> {name, [n, hits]} end)
+
+    spawn_misses =
+      spawns
+      |> where([s], not s.cache_hit)
+      |> group_by([s], s.target_label)
+      |> select([s], {s.target_label, count(s.id)})
+      |> Repo.all()
+      |> Map.new()
+
+    {spawn_count, sent, fetched} =
+      spawns
+      |> select([s], {
+        count(s.id),
+        sum(s.input_bytes) |> filter(s.runner == "remote" and not s.cache_hit),
+        sum(s.output_bytes) |> filter(s.runner == "remote" or s.cache_hit)
+      })
+      |> Repo.one()
+
     succeeded = Map.get(counts, "succeeded", 0)
     failed = Map.get(counts, "failed", 0)
 
@@ -174,7 +209,12 @@ defmodule Conveyor.Metrics.Rollup do
       queued_ms: num(queued),
       profiled: profiled || 0,
       mnemonic_counts: mnemonic_counts,
-      mnemonic_ms: mnemonic_ms
+      mnemonic_ms: mnemonic_ms,
+      spawns: spawn_count || 0,
+      spawn_mnemonics: spawn_mnemonics,
+      spawn_misses: spawn_misses,
+      remote_sent: num(sent),
+      remote_fetched: num(fetched)
     }
   end
 
@@ -264,7 +304,8 @@ defmodule Conveyor.Metrics.Rollup do
       if DateTime.compare(first_full, last_full) == :lt,
         do: repair!(filter(scope), first_full, last_full)
 
-      %{scope | rolled: true}
+      scope = %{scope | rolled: true}
+      %{scope | rollup_rows: rows(scope)}
     else
       scope
     end
@@ -281,6 +322,8 @@ defmodule Conveyor.Metrics.Rollup do
   hour it belongs to.
   """
   @spec rows(Scope.t()) :: [Row.t()]
+  def rows(%Scope{rollup_rows: rows}) when is_list(rows), do: rows
+
   def rows(%Scope{from: from, to: to} = scope) do
     filter = filter(scope)
     # the stored middle stops one hour before the end, that hour is computed exactly
@@ -336,7 +379,15 @@ defmodule Conveyor.Metrics.Rollup do
           Map.merge(acc.mnemonic_counts, r.mnemonic_counts, fn _, [c1, e1], [c2, e2] ->
             [c1 + c2, e1 + e2]
           end),
-        mnemonic_ms: Map.merge(acc.mnemonic_ms, r.mnemonic_ms, fn _, a, b -> a + b end)
+        mnemonic_ms: Map.merge(acc.mnemonic_ms, r.mnemonic_ms, fn _, a, b -> a + b end),
+        spawns: acc.spawns + r.spawns,
+        spawn_mnemonics:
+          Map.merge(acc.spawn_mnemonics, r.spawn_mnemonics, fn _, [n1, h1], [n2, h2] ->
+            [n1 + n2, h1 + h2]
+          end),
+        spawn_misses: Map.merge(acc.spawn_misses, r.spawn_misses, fn _, a, b -> a + b end),
+        remote_sent: nil_sum(acc.remote_sent, r.remote_sent),
+        remote_fetched: nil_sum(acc.remote_fetched, r.remote_fetched)
       }
     end)
   end

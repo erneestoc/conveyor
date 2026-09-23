@@ -24,8 +24,10 @@ defmodule Conveyor.Metrics.Scope do
             to: nil,
             query: [],
             name: nil,
-            # set by Conveyor.Metrics.Rollup.ensure!/1 once a page has verified the window
-            rolled: false
+            # set by Conveyor.Metrics.Rollup.ensure!/1 once a page has verified the window,
+            # with the window's rows so every panel of the page reuses them
+            rolled: false,
+            rollup_rows: nil
 
   @ranges %{"24h" => 24 * 3600, "7d" => 7 * 86_400, "30d" => 30 * 86_400, "90d" => 90 * 86_400}
 
@@ -55,14 +57,27 @@ defmodule Conveyor.Metrics.Scope do
   @spec previous(t()) :: t()
   def previous(%__MODULE__{from: from, to: to} = scope) do
     length = DateTime.diff(to, from, :microsecond)
-    %{scope | from: DateTime.add(from, -length, :microsecond), to: from}
+    # a derived window has its own rollup rows
+    %{
+      scope
+      | from: DateTime.add(from, -length, :microsecond),
+        to: from,
+        rolled: false,
+        rollup_rows: nil
+    }
   end
 
   @doc "Returns one scope per segment, each with the segment's query added."
   @spec segments(t(), [map()]) :: [t()]
   def segments(%__MODULE__{} = scope, segments) do
     Enum.map(segments, fn %{"name" => name, "query" => q} ->
-      %{scope | name: name, query: scope.query ++ Query.parse!(q)}
+      %{
+        scope
+        | name: name,
+          query: scope.query ++ Query.parse!(q),
+          rolled: false,
+          rollup_rows: nil
+      }
     end)
   end
 

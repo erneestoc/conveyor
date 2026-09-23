@@ -581,6 +581,22 @@ defmodule Conveyor.Metrics.Dashboard do
   @doc "Remote cache hit rate per mnemonic across the scope's execution logs, busiest first."
   @spec cache_by_mnemonic(Scope.t(), pos_integer()) :: [map()]
   def cache_by_mnemonic(scope, limit \\ 10) do
+    if Rollup.applicable?(scope) do
+      r = scope |> Rollup.rows() |> Rollup.combine()
+
+      r.spawn_mnemonics
+      |> Enum.map(fn {name, [n, hits]} ->
+        %{mnemonic: name, spawns: n, hits: hits, hit_rate: hits / n}
+      end)
+      |> Enum.sort_by(&{-&1.spawns, &1.mnemonic})
+      |> Enum.take(limit)
+    else
+      exact_cache_by_mnemonic(scope, limit)
+    end
+  end
+
+  @doc false
+  def exact_cache_by_mnemonic(scope, limit) do
     scope
     |> spawns()
     |> group_by([s], s.mnemonic)
@@ -598,6 +614,20 @@ defmodule Conveyor.Metrics.Dashboard do
   @doc "Targets whose spawns missed the remote cache most often (executed instead)."
   @spec top_cache_missing_targets(Scope.t(), pos_integer()) :: [map()]
   def top_cache_missing_targets(scope, limit \\ 10) do
+    if Rollup.applicable?(scope) do
+      r = scope |> Rollup.rows() |> Rollup.combine()
+
+      r.spawn_misses
+      |> Enum.map(fn {label, misses} -> %{label: label, misses: misses} end)
+      |> Enum.sort_by(&{-&1.misses, &1.label})
+      |> Enum.take(limit)
+    else
+      exact_top_cache_missing_targets(scope, limit)
+    end
+  end
+
+  @doc false
+  def exact_top_cache_missing_targets(scope, limit) do
     scope
     |> spawns()
     |> where([s], not s.cache_hit)
@@ -641,6 +671,24 @@ defmodule Conveyor.Metrics.Dashboard do
   """
   @spec remote_bytes(Scope.t()) :: [map()]
   def remote_bytes(scope) do
+    if Rollup.applicable?(scope), do: rolled_remote_bytes(scope), else: exact_remote_bytes(scope)
+  end
+
+  defp rolled_remote_bytes(scope) do
+    bucket = Scope.bucket(scope)
+    by_bucket = scope |> Rollup.rows() |> Enum.group_by(&Rollup.bucket(&1, bucket))
+
+    for b <- buckets(scope.from, scope.to, bucket) do
+      r = by_bucket |> Map.get(b, []) |> Rollup.combine()
+
+      if r.spawns > 0,
+        do: %{bucket: b, sent: round(r.remote_sent || 0), fetched: round(r.remote_fetched || 0)},
+        else: %{bucket: b, sent: nil, fetched: nil}
+    end
+  end
+
+  @doc false
+  def exact_remote_bytes(scope) do
     bucket = Scope.bucket(scope)
 
     rows =
