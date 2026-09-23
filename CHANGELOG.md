@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.2 (2026-09-23)
 
 - **Rollup staleness (found by model checking).** A build that changed while its hour was
   being rolled up could stay hidden until the next change; rows are now stamped from

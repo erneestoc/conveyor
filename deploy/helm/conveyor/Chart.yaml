@@ -2,8 +2,8 @@ apiVersion: v2
 name: conveyor
 description: Self-hosted Bazel Build Event Service server with a real-time UI, dashboards and execution-log insights
 type: application
-version: 0.2.1
-appVersion: "0.2.1"
+version: 0.2.2
+appVersion: "0.2.2"
 kubeVersion: ">=1.25.0"
 home: https://erneestoc.github.io/conveyor/
 sources: [https://github.com/erneestoc/conveyor]
@@ -24,6 +24,8 @@ annotations:
     - name: Source
       url: https://github.com/erneestoc/conveyor
   artifacthub.io/changes: |
+    - kind: fixed
+      description: Blob references can no longer point at deleted bytes; rollup rows are stamped before their builds are read (both found by TLA+ model checking)
     - kind: fixed
       description: A resend of an absorbed, uncommitted event is acknowledged by its commit, not on sight (found by the TLA+ model of the ingest protocol)
     - kind: changed

@@ -15,7 +15,7 @@ kubectl -n conveyor create secret generic conveyor \
   --from-literal=RELEASE_COOKIE="$(openssl rand -base64 32)" \
   --from-literal=ADMIN_TOKEN="$(openssl rand -hex 16)"
 
-helm install conveyor oci://ghcr.io/erneestoc/charts/conveyor --version 0.2.1 -n conveyor \
+helm install conveyor oci://ghcr.io/erneestoc/charts/conveyor --version 0.2.2 -n conveyor \
   --set existingSecret=conveyor \
   --set hosts.web=conveyor.example.com --set hosts.grpc=bes.example.com \
   --set config.S3_BUCKET=my-conveyor-blobs --set config.S3_REGION=us-east-1
