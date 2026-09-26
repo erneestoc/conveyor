@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Builds orphaned by a dead node no longer stay "in progress" forever.** A job marks
+  builds `disconnected` when their row has not changed for two idle windows (no node
+  serves them; a live worker would have marked its own build disconnected after one), as
+  the worker's idle timeout would have done. The trial had 28 such builds from node
+  replacements and kill tests.
 - **Move builds between projects.** `Conveyor.Release.move_builds(from, to, query)` (on a
   node: `bin/conveyor rpc`) moves a project's finished builds matching a search query to
   another project, creating it if needed: their blobs (profiles, artifacts, archived raw

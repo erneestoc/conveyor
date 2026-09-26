@@ -69,6 +69,11 @@ readable; new writes go under the prefix.
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).
 
+Every ten minutes `SweepStale` marks builds `disconnected` that are still `in_progress`
+but whose row has not changed for two idle windows (`INGEST_IDLE_TIMEOUT_MS`, 10 minutes
+by default): a node died under them and Bazel gave up. A client that comes back later
+resumes the build as after an idle timeout.
+
 ### Splitting a project
 
 Builds land in the project of the API key that sent them. To split an existing project
