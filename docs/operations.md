@@ -69,6 +69,37 @@ readable; new writes go under the prefix.
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).
 
+### Raw archive
+
+With `RAW_ARCHIVE_ENABLED=true`, every 15 minutes the `ArchiveRaw` job enqueues one job
+per build that finished more than `RAW_ARCHIVE_AFTER_HOURS` ago (and whose row has not
+changed for two idle windows) on the `archive` queue. Each copies the build's event
+segments into one blob (a zstd-compressed `--build_event_binary_file`) and its log into
+another, checks the counts against the row, and points the build at them
+(`invocations.raw_status = 'archived'`, `raw_blob`, `log_blob`). From then on the Events
+tab, the log viewer and the downloads read from the blob store (S3 in production): raw
+data lives there after a day, PostgreSQL keeps only the build's rows. The segment rows
+stay until their daily partition is dropped; the hourly partition job keeps a day that
+still holds a finished build the archive has not reached, so an outage of the store
+delays the drop instead of losing events.
+
+- Storage: one object per build for events and one for the log, under the project's
+  prefix, pinned; build retention makes them orphans and the nightly prune removes them.
+  Requests: two PUTs per finished build (about $0.50/day of S3 PUTs at 100k builds/day)
+  plus a GET per Events-tab or log view of an archived build.
+- Metrics: `conveyor_raw_archived_count`, `conveyor_raw_archived_bytes`,
+  `conveyor_raw_archive_failures_count{reason}` and `conveyor_raw_archive_overdue_seconds`
+  (how long the oldest due build has waited past the delay). Alerts:
+  `ConveyorRawArchiveBehind` (over 6 hours for 30 minutes: store credentials, bucket
+  policy or a failing queue; nothing is lost, the database grows meanwhile) and
+  `ConveyorRawArchiveMismatch` (a build's segments did not match its row; it is marked
+  `skipped` and keeps its segments until `RETENTION_RAW_DAYS` — run
+  `Conveyor.Ingest.Verify.check/2` on it).
+- Rollout: enable, watch the gauge fall to zero and the failures stay at zero for a day,
+  then lower `RETENTION_RAW_DAYS` (at least `RAW_ARCHIVE_AFTER_HOURS/24 + 1`, so 2 with
+  the default delay). Turning it off again is safe: archived builds keep reading from the
+  store, new ones stay in the segments.
+
 ## Runbooks
 
 Each alert in `deploy/prometheus/alerts.yml` maps to one of these.
@@ -103,8 +134,8 @@ boot (`docker logs` / pod logs show "Could not create schema migrations table" w
 database itself is the problem). A node that never finishes draining holds open streams
 longer than `SHUTDOWN_DRAIN_SECONDS`; the balancer's deregistration delay must exceed it.
 
-**Database full or slow**. Retention is the lever: lower `RETENTION_RAW_DAYS` first (raw
-events and logs are the bulk), then `RETENTION_DAYS` per project in Settings; run
+**Database full or slow**. Retention is the lever: enable the raw archive and lower
+`RETENTION_RAW_DAYS` first (raw events and logs are the bulk), then `RETENTION_DAYS` per project in Settings; run
 `VACUUM` on `invocations` if dead tuples exceed a few percent. Growth per build is about
 27 KB compressed for small builds and scales with targets, actions and log size.
 

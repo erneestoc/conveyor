@@ -33,7 +33,9 @@ config :conveyor, Conveyor.Ingest,
 config :conveyor, Oban,
   repo: Conveyor.Repo,
   # Execution-log parses are CPU- and database-heavy: two at a time, on their own queue.
-  queues: [default: 10, maintenance: 2, parse: 2],
+  # The raw archive (Conveyor.RawArchive) has its own queue so a backlog never delays
+  # maintenance.
+  queues: [default: 10, maintenance: 2, parse: 2, archive: 2],
   plugins: [
     {Oban.Plugins.Pruner, max_age: 7 * 24 * 60 * 60},
     # Jobs left "executing" by a node that died or a producer that restarted go back to
@@ -45,9 +47,14 @@ config :conveyor, Oban,
        {"30 3 * * *", Conveyor.Workers.BlobMaintenance},
        {"0 2 * * *", Conveyor.Workers.BuildRetention},
        {"*/5 * * * *", Conveyor.Workers.Rollup},
-       {"20 1 * * *", Conveyor.Workers.Rollup, args: %{days: 90}}
+       {"20 1 * * *", Conveyor.Workers.Rollup, args: %{days: 90}},
+       {"*/15 * * * *", Conveyor.Workers.ArchiveRaw}
      ]}
   ]
+
+# Raw write-behind: finished builds' events and log move to the blob store after
+# `after_hours` (RAW_ARCHIVE_ENABLED, RAW_ARCHIVE_AFTER_HOURS in production).
+config :conveyor, Conveyor.RawArchive, enabled: false, after_hours: 24
 
 # Dashboards read hourly rollups for scopes without a free-form query (PLAN §24 item 6)
 config :conveyor, Conveyor.Metrics.Rollup, enabled: true

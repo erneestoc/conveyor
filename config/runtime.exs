@@ -77,9 +77,27 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
 
   # Retention: builds (rows, cascading) and raw event/log segments (dropped by day).
+  retention_raw_days = String.to_integer(System.get_env("RETENTION_RAW_DAYS", "14"))
+
   config :conveyor,
     retention_days: String.to_integer(System.get_env("RETENTION_DAYS", "90")),
-    retention_raw_days: String.to_integer(System.get_env("RETENTION_RAW_DAYS", "14"))
+    retention_raw_days: retention_raw_days
+
+  # Raw write-behind to the blob store (Conveyor.RawArchive). The segments must outlive
+  # the archive delay by a day; the partition drop also keeps any day not yet archived.
+  raw_archive_enabled = System.get_env("RAW_ARCHIVE_ENABLED", "false") in ~w(true 1)
+  raw_archive_after_hours = String.to_integer(System.get_env("RAW_ARCHIVE_AFTER_HOURS", "24"))
+
+  if raw_archive_enabled and retention_raw_days * 24 < raw_archive_after_hours + 24 do
+    raise """
+    RETENTION_RAW_DAYS=#{retention_raw_days} is too short for RAW_ARCHIVE_AFTER_HOURS=#{raw_archive_after_hours}:
+    raw segments must be kept at least one day longer than the archive delay.
+    """
+  end
+
+  config :conveyor, Conveyor.RawArchive,
+    enabled: raw_archive_enabled,
+    after_hours: raw_archive_after_hours
 
   # Ingest tuning (see Conveyor.Ingest and PLAN §13); defaults are in config.exs.
   ingest_env = fn var, key ->

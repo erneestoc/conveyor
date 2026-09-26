@@ -32,6 +32,8 @@ config:
   # S3_PATH_STYLE: "true"
   RETENTION_DAYS: "90"
   RETENTION_RAW_DAYS: "14"
+  RAW_ARCHIVE_ENABLED: "false"  # move finished builds' raw events and log to the blob store
+  RAW_ARCHIVE_AFTER_HOURS: "24"
   POOL_SIZE: "40"
   MAX_STREAMS_PER_KEY: "500"
   MAX_EVENTS_PER_SECOND_PER_KEY: "5000"

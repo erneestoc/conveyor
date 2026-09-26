@@ -29,7 +29,11 @@ the order of a few thousand events per second, not tens of thousands.
   time per node) and are the CPU spikes.
 - **Storage** is ≈ 27 KB per small build compressed (row 9 KB, raw events 16 KB, log
   1 KB); real builds scale with targets, actions and log size. Raw segments are dropped
-  after `RETENTION_RAW_DAYS`, everything else after `RETENTION_DAYS` (per project).
+  after `RETENTION_RAW_DAYS`, everything else after `RETENTION_DAYS` (per project). With
+  the raw archive on (`RAW_ARCHIVE_ENABLED`), raw events and logs leave PostgreSQL a day
+  after the build and live in the blob store as one object each, so the database holds
+  about `RAW_ARCHIVE_AFTER_HOURS/24 + 1` days of raw data whatever the raw retention is
+  (measured per build in the ledger below).
 
 ## Benchmark harness
 

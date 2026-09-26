@@ -43,6 +43,21 @@ groups:
           summary: "Oban jobs waiting for more than 10 minutes in {{ $labels.queue }}"
           description: "The queue is not draining: producers down, jobs with attempt = max_attempts (rescue with Oban.retry_all_jobs, never by editing state), or parses slower than the job timeout."
 
+      - alert: ConveyorRawArchiveBehind
+        expr: max(conveyor_raw_archive_overdue_seconds) > 21600
+        for: 30m
+        labels: {severity: warning}
+        annotations:
+          summary: "Raw archive more than 6 hours behind"
+          description: "Finished builds are not moving to the blob store (store outage, credentials, failing jobs: see conveyor_raw_archive_failures_count and the archive queue). Nothing is lost: the partition drop keeps those days, so Postgres grows until the archive catches up."
+
+      - alert: ConveyorRawArchiveMismatch
+        expr: increase(conveyor_raw_archive_failures_count{reason="mismatch"}[1h]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "A build's raw segments did not match its row"
+          description: "The raw archive skipped it (raw_status = skipped); its events stay in the segments until RETENTION_RAW_DAYS. Run Conveyor.Ingest.Verify.check on the invocation from the log line."
+
       - alert: ConveyorBlobErrors
         expr: increase(conveyor_blobs_errors_count[10m]) > 0
         labels: {severity: warning}

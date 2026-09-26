@@ -287,66 +287,95 @@ defmodule Conveyor.Blobs do
     end
   end
 
+  @doc """
+  Deletes a blob unless something pins or references it (the checked delete that expiry
+  and pruning use). For a writer that stored a blob and then found it is not needed, such
+  as an archiver that lost the race to archive a build (`Conveyor.RawArchive`): the same
+  content may be referenced by someone else, which keeps it.
+  """
+  @spec discard(project(), digest()) :: :ok | :skipped | :gone | {:error, term()}
+  def discard(project, digest) do
+    case get(project, digest) do
+      nil -> :gone
+      blob -> delete_blob(blob, :unreferenced)
+    end
+  end
+
+  # Deletes a blob whose expiry or orphan check passed. Under the row lock it re-checks
+  # that nothing pinned or referenced it since the check (an attach in flight is serialized
+  # by the lock and then fails its pin), deletes the object, then drops the row. The object
+  # goes while the lock is held: deleted after the commit, a re-upload of the same content
+  # in between would land its row, get pinned and referenced, and then lose its bytes
+  # (docs/spec/Blobs.tla, Archive.tla). A failure after the object delete leaves a row
+  # without bytes, which `pin/2` refuses and the next prune removes.
+  #
   # Rows written before prefixes existed (`prefix` nil) may share one flat object across
   # projects (the migration copied rows per referencing project): the object goes only
   # when the last such row does.
-  # Deletes a blob whose expiry or orphan check passed. The row goes first, under its lock,
-  # after re-checking that nothing pinned or referenced it since the check (an attach in
-  # flight is serialized by the lock and then fails its pin); the object goes once the row
-  # is gone, so a reference can never point at bytes that were deleted (docs/spec/Blobs.tla).
   defp delete_blob(%Blob{} = blob, mode \\ :checked) do
     now = DateTime.utc_now()
 
-    dropped =
-      Repo.transaction(fn ->
-        locked =
-          Repo.one(
-            from(b in Blob,
-              where: b.project_id == ^blob.project_id and b.digest == ^blob.digest,
-              lock: "FOR UPDATE"
+    result =
+      Repo.transaction(
+        fn ->
+          locked =
+            Repo.one(
+              from(b in Blob,
+                where: b.project_id == ^blob.project_id and b.digest == ^blob.digest,
+                lock: "FOR UPDATE"
+              )
             )
-          )
 
-        cond do
-          locked == nil ->
-            :gone
+          cond do
+            locked == nil ->
+              :gone
 
-          mode == :force ->
-            drop(locked)
+            mode == :force ->
+              drop(locked)
 
-          locked.expires_at != nil and DateTime.compare(locked.expires_at, now) == :lt ->
-            drop(locked)
+            mode == :unreferenced and locked.expires_at == nil and not referenced?(locked) ->
+              drop(locked)
 
-          locked.expires_at == nil and not referenced?(locked) ->
-            drop(locked)
+            mode == :checked and locked.expires_at != nil and
+                DateTime.compare(locked.expires_at, now) == :lt ->
+              drop(locked)
 
-          true ->
-            :skipped
-        end
-      end)
+            mode == :checked and locked.expires_at == nil and not referenced?(locked) ->
+              drop(locked)
 
-    case dropped do
-      {:ok, :dropped} ->
-        {adapter, aopts} = adapter(blob.prefix)
+            true ->
+              :skipped
+          end
+        end,
+        timeout: :timer.minutes(2)
+      )
 
-        if blob.prefix == nil and shared_flat_object?(blob),
-          do: :ok,
-          else: counted(:delete, adapter.delete(blob.digest, aopts))
-
-      {:ok, other} ->
-        other
-
-      {:error, reason} ->
-        {:error, reason}
+    case result do
+      {:ok, :dropped} -> :ok
+      {:ok, other} -> other
+      {:error, reason} -> {:error, reason}
     end
   end
 
   defp drop(%Blob{} = blob) do
-    Repo.delete_all(
-      from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
-    )
+    {adapter, aopts} = adapter(blob.prefix)
 
-    :dropped
+    deleted =
+      if blob.prefix == nil and shared_flat_object?(blob),
+        do: :ok,
+        else: counted(:delete, adapter.delete(blob.digest, aopts))
+
+    case deleted do
+      :ok ->
+        Repo.delete_all(
+          from b in Blob, where: b.project_id == ^blob.project_id and b.digest == ^blob.digest
+        )
+
+        :dropped
+
+      {:error, reason} ->
+        Repo.rollback(reason)
+    end
   end
 
   defp referenced?(%Blob{project_id: project_id, digest: digest}) do
@@ -358,7 +387,9 @@ defmodule Conveyor.Blobs do
     ) or
       Repo.exists?(
         from i in "invocations",
-          where: i.profile_blob == ^digest and i.project_id == ^project_id
+          where:
+            i.project_id == ^project_id and
+              (i.profile_blob == ^digest or i.raw_blob == ^digest or i.log_blob == ^digest)
       )
   end
 
@@ -369,20 +400,30 @@ defmodule Conveyor.Blobs do
     )
   end
 
-  @doc "Removes the expiry so retention never drops a blob an invocation references."
-  @spec pin(project(), digest()) :: :ok
-  @spec pin(Projects.Project.t() | integer(), String.t()) :: :ok | {:error, :blob_gone}
+  @doc """
+  Removes the expiry so retention never drops a blob an invocation references, and checks
+  the bytes are still in the store. Call it in the transaction that writes the reference:
+  the row stays locked until the commit, so a delete (which re-checks references under the
+  same lock) cannot remove the blob between the check and the reference. `{:error,
+  :blob_gone}` when the row or its object is missing (docs/spec/Blobs.tla).
+  """
+  @spec pin(project(), digest()) :: :ok | {:error, :blob_gone}
   def pin(project, digest) do
     project_id = project_id(project)
 
-    # A pin that hits no row means expiry or pruning removed the blob between the
-    # caller's check and now (docs/spec/Blobs.tla); the caller must not reference it.
     case Repo.update_all(
-           from(b in Blob, where: b.project_id == ^project_id and b.digest == ^digest),
+           from(b in Blob,
+             where: b.project_id == ^project_id and b.digest == ^digest,
+             select: b.prefix
+           ),
            set: [expires_at: nil]
          ) do
-      {1, _} -> :ok
-      {0, _} -> {:error, :blob_gone}
+      {1, [prefix]} ->
+        {adapter, aopts} = adapter(prefix)
+        if adapter.exists?(digest, aopts), do: :ok, else: {:error, :blob_gone}
+
+      {0, _} ->
+        {:error, :blob_gone}
     end
   end
 
@@ -405,7 +446,8 @@ defmodule Conveyor.Blobs do
 
   @doc """
   Deletes pinned blobs nothing references any more: no artifact of an invocation in the
-  same project and no invocation's profile. Build retention deletes invocations (and their
+  same project, no invocation's profile and no build's archived raw events or log
+  (`raw_blob`, `log_blob`). Build retention deletes invocations (and their
   artifact rows cascade); this is what frees their bytes. Blobs younger than `grace`
   seconds are kept, so a blob stored moments before its artifact row is never touched.
   """
@@ -421,17 +463,19 @@ defmodule Conveyor.Blobs do
           a.digest == parent_as(:blob).digest and i.project_id == parent_as(:blob).project_id,
         select: 1
 
-    referenced_as_profile =
+    # A profile, or a build's archived raw events or log (Conveyor.RawArchive).
+    referenced_by_invocation =
       from i in "invocations",
         where:
-          i.profile_blob == parent_as(:blob).digest and
-            i.project_id == parent_as(:blob).project_id,
+          i.project_id == parent_as(:blob).project_id and
+            (i.profile_blob == parent_as(:blob).digest or i.raw_blob == parent_as(:blob).digest or
+               i.log_blob == parent_as(:blob).digest),
         select: 1
 
     from(b in Blob, as: :blob)
     |> where([b], is_nil(b.expires_at) and b.inserted_at < ^cutoff)
     |> where([b], not exists(subquery(referenced_by_artifact)))
-    |> where([b], not exists(subquery(referenced_as_profile)))
+    |> where([b], not exists(subquery(referenced_by_invocation)))
     |> Repo.all()
     |> Enum.count(fn blob -> delete_blob(blob) == :ok end)
   end

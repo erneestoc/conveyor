@@ -162,9 +162,49 @@ defmodule Conveyor.Invocations do
   def events(%Invocation{} = inv),
     do: inv |> raw_frames() |> Enum.map(&BuildEventStream.BuildEvent.decode/1)
 
-  @doc "Raw protobuf frames of every BEP event, in sequence order."
+  @doc """
+  Raw protobuf frames of every BEP event, in sequence order: from the archived blob once
+  `Conveyor.RawArchive` has moved the build there, from the segments before.
+  """
   @spec raw_frames(Invocation.t()) :: [binary()]
-  def raw_frames(%Invocation{id: id} = inv) do
+  def raw_frames(%Invocation{} = inv) do
+    if archived?(inv),
+      do: inv |> stream_raw() |> Enum.to_list() |> IO.iodata_to_binary() |> Fixture.frames(),
+      else: segment_frames(inv)
+  end
+
+  @doc "True once the build's raw events and log live in the blob store."
+  @spec archived?(Invocation.t()) :: boolean()
+  def archived?(%Invocation{raw_status: "archived", raw_blob: blob}) when is_binary(blob),
+    do: true
+
+  def archived?(%Invocation{}), do: false
+
+  @doc """
+  The build's events as `--build_event_binary_file` bytes (varint-delimited frames), a
+  lazy stream of chunks: decompressed from the archived blob as it is read, or segment by
+  segment.
+  """
+  @spec stream_raw(Invocation.t()) :: Enumerable.t()
+  def stream_raw(%Invocation{} = inv) do
+    if archived?(inv) do
+      stream_blob(inv, inv.raw_blob)
+    else
+      inv
+      |> segment_frames()
+      |> Stream.map(&[Fixture.encode_varint(byte_size(&1)), &1])
+    end
+  end
+
+  # A blob that is gone from the store reads as an error, never as an empty build.
+  defp stream_blob(%Invocation{project_id: project_id}, digest) do
+    case Conveyor.Blobs.stream(project_id, digest, chunk_size: 256 * 1024) do
+      {:ok, chunks} -> zstd_stream(chunks, :decompress)
+      {:error, reason} -> raise "blob #{digest} of an archived build: #{inspect(reason)}"
+    end
+  end
+
+  defp segment_frames(%Invocation{id: id} = inv) do
     from(s in EventSegment,
       where: s.invocation_id == ^id and s.day == ^day(inv),
       order_by: s.first_seq,
@@ -184,7 +224,15 @@ defmodule Conveyor.Invocations do
   metadata (`log_segments/1`) to stream exactly that snapshot.
   """
   @spec stream_log(Invocation.t(), [LogSegment.t()] | nil) :: Enumerable.t()
-  def stream_log(%Invocation{id: id} = inv, segments \\ nil) do
+  def stream_log(inv, segments \\ nil)
+
+  def stream_log(%Invocation{log_blob: nil} = inv, _segments) when inv.raw_status == "archived",
+    do: []
+
+  def stream_log(%Invocation{raw_status: "archived", log_blob: digest} = inv, _segments),
+    do: stream_blob(inv, digest)
+
+  def stream_log(%Invocation{id: id} = inv, segments) do
     day = day(inv)
     segments = segments || log_segments(inv)
 
@@ -202,8 +250,26 @@ defmodule Conveyor.Invocations do
     end)
   end
 
-  @doc "Log segments metadata (offsets) for seeking without decompressing everything."
+  @doc """
+  Log segments metadata (offsets) for seeking without decompressing everything. An
+  archived log is one piece, described by the row's totals.
+  """
   @spec log_segments(Invocation.t()) :: [LogSegment.t()]
+  def log_segments(%Invocation{raw_status: "archived", log_bytes: 0}), do: []
+
+  def log_segments(%Invocation{raw_status: "archived"} = inv) do
+    [
+      %LogSegment{
+        first_seq: 1,
+        last_seq: inv.last_event_seq,
+        byte_offset: 0,
+        line_offset: 0,
+        byte_size: inv.log_bytes,
+        line_count: inv.log_lines
+      }
+    ]
+  end
+
   def log_segments(%Invocation{id: id} = inv) do
     Repo.all(
       from s in LogSegment,
@@ -315,6 +381,68 @@ defmodule Conveyor.Invocations do
       {:ok, %{dictID: id}} -> :zstd.decompress(binary, %{dictionary: zstd_dict(:decompress, id)})
     end
     |> IO.iodata_to_binary()
+  end
+
+  @doc """
+  Compresses or decompresses a stream of chunks through one zstd context, so a build of
+  any size is never held in memory whole. Compression with `dictionary: true` uses the BEP
+  dictionary and records its id in the frame; decompression reads the id from the frame
+  header and loads the matching dictionary.
+  """
+  @spec zstd_stream(Enumerable.t(), :compress | :decompress, keyword()) :: Enumerable.t()
+  def zstd_stream(chunks, mode, opts \\ []) do
+    Stream.transform(
+      chunks,
+      fn -> {:zstd, nil, ""} end,
+      fn chunk, {:zstd, ctx, pending} -> zstd_feed(ctx, pending <> chunk, mode, opts) end,
+      fn
+        {:zstd, nil, ""} = acc ->
+          {[], acc}
+
+        {:zstd, ctx, pending} ->
+          ctx = ctx || zstd_context(mode, pending, opts)
+          {:done, out} = :zstd.finish(ctx, pending)
+          {[IO.iodata_to_binary(out)], {:zstd, ctx, ""}}
+      end,
+      fn
+        {:zstd, nil, _} -> :ok
+        {:zstd, ctx, _} -> :zstd.close(ctx)
+      end
+    )
+    |> Stream.reject(&(&1 == ""))
+  end
+
+  # Decompression needs the frame header (up to 18 bytes) to pick the dictionary.
+  defp zstd_feed(nil, data, :decompress, _opts) when byte_size(data) < 18,
+    do: {[], {:zstd, nil, data}}
+
+  defp zstd_feed(nil, data, mode, opts),
+    do: zstd_feed(zstd_context(mode, data, opts), data, mode, opts)
+
+  defp zstd_feed(ctx, data, _mode, _opts) do
+    {:continue, out} = :zstd.stream(ctx, data)
+    {[IO.iodata_to_binary(out)], {:zstd, ctx, ""}}
+  end
+
+  defp zstd_context(:compress, _data, opts) do
+    params =
+      if Keyword.get(opts, :dictionary, false),
+        do: %{dictionary: zstd_dict(:compress, @bep_dict_id)},
+        else: %{}
+
+    {:ok, ctx} = :zstd.context(:compress, params)
+    ctx
+  end
+
+  defp zstd_context(:decompress, data, _opts) do
+    params =
+      case :zstd.get_frame_header(data) do
+        {:ok, %{dictID: id}} when id != 0 -> %{dictionary: zstd_dict(:decompress, id)}
+        _ -> %{}
+      end
+
+    {:ok, ctx} = :zstd.context(:decompress, params)
+    ctx
   end
 
   # Dictionaries are loaded once per node.

@@ -81,6 +81,21 @@ defmodule ConveyorWeb.Telemetry do
         description:
           "Age of the oldest job waiting in the queue (a backlog that only grows means the queue is not being drained: alert above 600)"
       ),
+      counter("conveyor.raw.archived.count",
+        description: "Builds whose raw events and log moved to the blob store"
+      ),
+      sum("conveyor.raw.archived.bytes",
+        description: "Compressed bytes written to the blob store by the raw archive"
+      ),
+      counter("conveyor.raw_archive.failures.count",
+        tags: [:reason],
+        description:
+          "Raw archive failures: error (retried: store or database) or mismatch (segments did not match the row; the build keeps its segments)"
+      ),
+      last_value("conveyor.raw_archive.overdue.seconds",
+        description:
+          "How long the oldest finished build has waited past RAW_ARCHIVE_AFTER_HOURS (0 when the archive is keeping up; the partition drop holds days back meanwhile)"
+      ),
       distribution("conveyor.repo.query.total_time",
         unit: {:native, :millisecond},
         reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]],
@@ -134,6 +149,33 @@ defmodule ConveyorWeb.Telemetry do
     :telemetry.execute([:conveyor, :ingest, :workers], %{count: workers()}, %{})
     :telemetry.execute([:conveyor, :ingest, :streams], %{count: streams()}, %{})
     measure_oban()
+    measure_raw_archive()
+  end
+
+  # One query over the days whose partitions still exist; recomputed at most once a minute
+  # per node (the poller ticks every 10 s).
+  @doc false
+  def measure_raw_archive(now \\ System.monotonic_time(:millisecond)) do
+    if Conveyor.RawArchive.enabled?() do
+      key = {__MODULE__, :raw_archive_overdue}
+
+      seconds =
+        case :persistent_term.get(key, nil) do
+          {at, value} when now - at < 60_000 ->
+            value
+
+          _ ->
+            value = Conveyor.RawArchive.overdue_seconds()
+            :persistent_term.put(key, {now, value})
+            value
+        end
+
+      :telemetry.execute([:conveyor, :raw_archive, :overdue], %{seconds: seconds}, %{})
+    end
+
+    :ok
+  rescue
+    _ -> :ok
   end
 
   @oban_states ~w(available scheduled executing retryable)

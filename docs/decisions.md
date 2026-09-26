@@ -33,6 +33,14 @@ The full BEP stream is stored compressed for `RETENTION_RAW_DAYS` (14 by default
 that any question the UI does not answer today can be answered later, and so the
 Events tab and downloads are exact. Normalized rows stay for `RETENTION_DAYS` (90).
 
+With the raw archive on, a finished build's raw events and log move to the blob store a
+day later, one object each, written behind the acknowledgement: every ack is still a
+PostgreSQL commit (raw bytes skipping the database would need the store or a log in the
+ack path), and one object per finished build keeps request costs at two PUTs per build
+where one object per flush would cost twenty times more. The database is not sharded:
+one database carries tens of thousands of events/s, so history size, not commit rate,
+was the first limit (`docs/spec/Archive.tla` checks the handover).
+
 ## Tag counts are eventually consistent
 
 Facet counts are hints for autocomplete and ordering. Updating them inside the ingest

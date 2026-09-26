@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Raw write-behind to the blob store (off by default: `RAW_ARCHIVE_ENABLED`).** A day
+  after a build finishes (`RAW_ARCHIVE_AFTER_HOURS`, 24), its raw BEP events and log move
+  from the PostgreSQL segment partitions into the blob store as one object each: the
+  events object is a zstd-compressed `--build_event_binary_file`. Every acknowledgement
+  is still a PostgreSQL commit; the Events tab, the log viewer, the downloads and the
+  oracle read the blobs once a build is archived, byte for byte the same. Raw history
+  stops growing the database and can be kept as long as the bucket allows. The partition
+  drop keeps any day the archive has not finished with (a store outage delays the drop
+  instead of losing events); `conveyor_raw_archive_overdue_seconds` and two alert rules
+  watch it. Modelled first in `docs/spec/Archive.tla`.
+- **Blob deletion no longer races a re-upload (found by model checking).** A blob deleted
+  while the same content was being uploaded again could lose the new upload's bytes
+  under a fresh reference: the object was deleted after the row's transaction. The object
+  now goes while the row lock is held, and pinning a blob checks that its bytes exist.
+  `docs/spec/Blobs.tla` gained concurrent re-uploads.
 - **Retention leaves live builds alone (found by model checking).** A build still
   streaming past its retention cutoff was deleted under its worker, which fenced the
   commit and left an empty row when the client retried; retention now skips in-progress

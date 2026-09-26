@@ -2,7 +2,10 @@ defmodule Conveyor.Ingest.Verify do
   @moduledoc """
   Correctness oracle for replays and load tests: proves that an invocation was persisted
   exactly once and completely — final status, contiguous event segments covering 1..N with
-  no gaps or overlaps, a matching decoded event count, and log offsets that chain.
+  no gaps or overlaps, a matching decoded event count, and log offsets that chain. For a
+  build the raw archive moved to the blob store, the blobs are checked instead: the
+  decoded events and the log length must match the row (one object is contiguous by
+  construction).
   """
   import Ecto.Query
 
@@ -20,41 +23,63 @@ defmodule Conveyor.Ingest.Verify do
         {:error, [{:missing_invocation, invocation_id}]}
 
       inv ->
-        segments =
-          Repo.all(
-            from s in EventSegment,
-              where: s.invocation_id == ^inv.id,
-              order_by: s.first_seq,
-              select: {s.first_seq, s.last_seq, s.count}
-          )
-
-        logs =
-          Repo.all(
-            from s in LogSegment,
-              where: s.invocation_id == ^inv.id,
-              order_by: s.first_seq,
-              select: {s.byte_offset, s.byte_size, s.line_offset, s.line_count}
-          )
-
-        segment_events = segments |> Enum.map(&elem(&1, 2)) |> Enum.sum()
-        decoded = inv |> Invocations.raw_frames() |> length()
-
-        problems =
-          []
-          |> check(not inv.stream_finished, {:stream_not_finished, inv.status})
-          |> check(inv.status in ["in_progress", "disconnected"], {:not_final, inv.status})
-          |> check(
-            inv.last_event_seq != sent_events + 1,
-            {:last_event_seq, inv.last_event_seq, sent_events + 1}
-          )
-          |> check(inv.event_count != sent_events, {:event_count, inv.event_count, sent_events})
-          |> check(segment_events != sent_events, {:segment_events, segment_events, sent_events})
-          |> check(not contiguous?(segments), {:segments_not_contiguous, segments})
-          |> check(not log_chain?(logs), {:log_offsets_broken, logs})
-          |> check(decoded != sent_events, {:decoded_events, decoded, sent_events})
-
-        if problems == [], do: :ok, else: {:error, Enum.reverse(problems)}
+        check_invocation(inv, sent_events)
     end
+  end
+
+  defp check_invocation(inv, sent_events) do
+    archived? = Invocations.archived?(inv)
+
+    {segments, logs} =
+      if archived?, do: {nil, nil}, else: {event_segments(inv), log_segments(inv)}
+
+    decoded = inv |> Invocations.raw_frames() |> length()
+
+    problems =
+      []
+      |> check(not inv.stream_finished, {:stream_not_finished, inv.status})
+      |> check(inv.status in ["in_progress", "disconnected"], {:not_final, inv.status})
+      |> check(
+        inv.last_event_seq != sent_events + 1,
+        {:last_event_seq, inv.last_event_seq, sent_events + 1}
+      )
+      |> check(inv.event_count != sent_events, {:event_count, inv.event_count, sent_events})
+      |> check_storage(archived?, inv, segments, logs, sent_events)
+      |> check(decoded != sent_events, {:decoded_events, decoded, sent_events})
+
+    if problems == [], do: :ok, else: {:error, Enum.reverse(problems)}
+  end
+
+  defp check_storage(problems, true, inv, _segments, _logs, _sent) do
+    log_bytes = inv |> Invocations.stream_log() |> Enum.reduce(0, &(byte_size(&1) + &2))
+    check(problems, log_bytes != inv.log_bytes, {:archived_log_bytes, log_bytes, inv.log_bytes})
+  end
+
+  defp check_storage(problems, false, _inv, segments, logs, sent_events) do
+    segment_events = segments |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+
+    problems
+    |> check(segment_events != sent_events, {:segment_events, segment_events, sent_events})
+    |> check(not contiguous?(segments), {:segments_not_contiguous, segments})
+    |> check(not log_chain?(logs), {:log_offsets_broken, logs})
+  end
+
+  defp event_segments(inv) do
+    Repo.all(
+      from s in EventSegment,
+        where: s.invocation_id == ^inv.id,
+        order_by: s.first_seq,
+        select: {s.first_seq, s.last_seq, s.count}
+    )
+  end
+
+  defp log_segments(inv) do
+    Repo.all(
+      from s in LogSegment,
+        where: s.invocation_id == ^inv.id,
+        order_by: s.first_seq,
+        select: {s.byte_offset, s.byte_size, s.line_offset, s.line_count}
+    )
   end
 
   defp check(problems, true, problem), do: [problem | problems]

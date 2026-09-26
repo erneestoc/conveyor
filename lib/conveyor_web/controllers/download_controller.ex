@@ -2,7 +2,6 @@ defmodule ConveyorWeb.DownloadController do
   @moduledoc "Raw downloads of an invocation: the build log and the BEP event stream."
   use ConveyorWeb, :controller
 
-  alias Conveyor.Bep.Fixture
   alias Conveyor.Invocations
 
   def show(conn, %{"id" => id, "kind" => "profile"}), do: profile(conn, %{"id" => id})
@@ -12,8 +11,9 @@ defmodule ConveyorWeb.DownloadController do
 
     case kind do
       "log" ->
-        # Streamed segment by segment; the log viewer fetches this too and uses the byte
-        # total to splice live appends without gaps or duplicates.
+        # Streamed segment by segment (or decompressed from the archived blob as it is
+        # read); the log viewer fetches this too and uses the byte total to splice live
+        # appends without gaps or duplicates.
         segments = Invocations.log_segments(inv)
         bytes = segments |> Enum.map(& &1.byte_size) |> Enum.sum()
 
@@ -27,14 +27,13 @@ defmodule ConveyorWeb.DownloadController do
         |> send_chunks(Invocations.stream_log(inv, segments))
 
       "events" ->
-        body =
-          inv |> Invocations.raw_frames() |> Enum.map(&[Fixture.encode_varint(byte_size(&1)), &1])
-
+        # A `--build_event_binary_file`: streamed from the segments or the archived blob.
         conn
         |> put_resp_content_type("application/octet-stream")
         |> put_resp_header("content-disposition", ~s(attachment; filename="#{inv.id}.bep"))
         |> put_resp_header("x-content-type-options", "nosniff")
-        |> send_resp(200, body)
+        |> send_chunked(200)
+        |> send_chunks(Invocations.stream_raw(inv))
     end
   end
 

@@ -28,13 +28,29 @@ defmodule Conveyor.Storage.Partitions do
     Enum.each(@tables, &create(&1, day))
   end
 
-  @doc "Drops every daily partition strictly older than `cutoff` and returns their names."
-  @spec drop_before(Date.t()) :: [String.t()]
-  def drop_before(cutoff) do
+  @doc """
+  Drops every daily partition strictly older than `cutoff` and returns their names. A day
+  for which `keep?` answers true stays (both tables): with the raw archive on, a day that
+  still holds a finished build not yet archived (`Conveyor.RawArchive.holds_unarchived?/1`,
+  docs/spec/Archive.tla).
+  """
+  @spec drop_before(Date.t(), (Date.t() -> boolean())) :: [String.t()]
+  def drop_before(cutoff, keep? \\ fn _day -> false end) do
+    kept =
+      for table <- @tables,
+          name <- partition_names(table),
+          day = day_of(table, name),
+          Date.compare(day, cutoff) == :lt,
+          uniq: true,
+          do: day
+
+    kept = kept |> Enum.filter(keep?) |> MapSet.new()
+
     for table <- @tables,
         name <- partition_names(table),
         day = day_of(table, name),
-        Date.compare(day, cutoff) == :lt do
+        Date.compare(day, cutoff) == :lt,
+        day not in kept do
       Repo.query!("DROP TABLE IF EXISTS #{name}")
       name
     end
@@ -83,7 +99,9 @@ defmodule Conveyor.Storage.Partitions do
   @doc false
   def partition_name(table, day), do: "#{table}_#{Calendar.strftime(day, "%Y%m%d")}"
 
-  defp day_of(table, name) do
+  @doc "The day a partition name stands for (`event_segments_20260926` → 2026-09-26)."
+  @spec day_of(String.t(), String.t()) :: Date.t()
+  def day_of(table, name) do
     prefix = byte_size(table) + 1
     <<_::binary-size(^prefix), y::binary-4, m::binary-2, d::binary-2>> = name
     Date.new!(String.to_integer(y), String.to_integer(m), String.to_integer(d))
