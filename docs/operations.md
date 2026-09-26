@@ -69,6 +69,21 @@ readable; new writes go under the prefix.
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).
 
+### Splitting a project
+
+Builds land in the project of the API key that sent them. To split an existing project
+(everything went to `default` before teams had keys), move its finished builds by search
+query, then hand each team a key of its new project:
+
+```sh
+bin/conveyor rpc 'Conveyor.Release.move_builds("default", "grpc", "repo:grpc", "gRPC")'
+```
+
+The target is created when missing. Every blob a moved build references is copied under
+the target's prefix first (the source copies are pruned as orphans), rollups of the
+affected hours and both projects' tag facets are recomputed, and the move is recorded in
+the audit log. Builds still streaming are skipped.
+
 ### Raw archive
 
 With `RAW_ARCHIVE_ENABLED=true`, every 15 minutes the `ArchiveRaw` job enqueues one job

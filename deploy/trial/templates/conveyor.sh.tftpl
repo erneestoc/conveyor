@@ -86,7 +86,7 @@ docker run -d --name conveyor --restart unless-stopped --network host \
   -e BLOB_STORE=s3 -e S3_BUCKET='${bucket}' -e AWS_REGION='${region}' \
   -e CAS_SINK_ENABLED=true -e POOL_SIZE=40 \
   -e CLUSTER_STRATEGY=ec2 -e CLUSTER_EC2_TAG=conveyor-cluster -e CLUSTER_EC2_TAG_VALUE='${name}' \
-  -e SHUTDOWN_DRAIN_SECONDS='${drain_seconds}' \
+  -e SHUTDOWN_DRAIN_SECONDS='${drain_seconds}' -e RAW_ARCHIVE_ENABLED='${raw_archive}' \
   --stop-timeout $(( ${drain_seconds} + 15 )) \
   '${image}'
 

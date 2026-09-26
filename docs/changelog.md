@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Move builds between projects.** `Conveyor.Release.move_builds(from, to, query)` (on a
+  node: `bin/conveyor rpc`) moves a project's finished builds matching a search query to
+  another project, creating it if needed: their blobs (profiles, artifacts, archived raw
+  data) are copied under the target's prefix, both projects' rollups and facets are
+  recomputed, and the move is audited. An invalid query is refused rather than read as
+  "everything". For splitting a `default` project that collected every team's builds.
 - **Deploys on the single-node Caddy shape without failed builds.** The trial's nodes
   restore Caddy's certificate store from SSM before Caddy starts and save it when it
   changes, so a replacement node serves TLS as soon as the Elastic IP moves: a 10-minute

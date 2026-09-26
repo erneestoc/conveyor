@@ -310,6 +310,7 @@ resource "aws_launch_template" "conveyor" {
     edge            = var.edge
     eip_allocation  = var.edge == "caddy" ? aws_eip.conveyor[0].id : ""
     caddy_certs     = aws_ssm_parameter.caddy_certs.name
+    raw_archive     = var.raw_archive_enabled
   }))
 }
 

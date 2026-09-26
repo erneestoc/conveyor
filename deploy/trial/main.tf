@@ -60,6 +60,8 @@ variable "allow_cidrs" {
   default     = []
 }
 variable "drain_seconds" { default = 45 }
+# Raw write-behind to the blob store (RAW_ARCHIVE_ENABLED): on in the trial since 2026-09-26.
+variable "raw_archive_enabled" { default = true }
 
 data "aws_caller_identity" "me" {}
 data "aws_vpc" "default" { default = true }

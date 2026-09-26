@@ -16,6 +16,32 @@ defmodule Conveyor.Release do
   end
 
   @doc """
+  Moves a project's finished builds matching a search query to another project, creating
+  the target (named `name`, the slug by default) when it does not exist. For splitting
+  `default` on a running node:
+
+      bin/conveyor rpc 'Conveyor.Release.move_builds("default", "grpc", "repo:grpc")'
+  """
+  @spec move_builds(String.t(), String.t(), String.t(), String.t() | nil) ::
+          {:ok, map()} | {:error, term()}
+  def move_builds(from_slug, to_slug, query, name \\ nil) do
+    alias Conveyor.Projects
+
+    with %Projects.Project{} = from <-
+           Projects.get_project_by_slug(from_slug) || {:error, :no_source},
+         {:ok, to} <- target(to_slug, name) do
+      Projects.Move.builds(from, to, query)
+    end
+  end
+
+  defp target(slug, name) do
+    case Conveyor.Projects.get_project_by_slug(slug) do
+      nil -> Conveyor.Projects.create_project(%{slug: slug, name: name || slug})
+      project -> {:ok, project}
+    end
+  end
+
+  @doc """
   The Repo `:ssl` option from the environment: `false` unless `DATABASE_SSL` is `true`/`1`;
   then the server certificate is verified against `DATABASE_SSL_CA` (a PEM bundle such as
   the AWS RDS global bundle) or, when unset, the operating system's trust store, with the
