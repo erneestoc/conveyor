@@ -84,6 +84,26 @@ Flat-out profile, 200 streams × 10,000 builds (438,750 events), medians of thre
 | 6 dashboards from rollups | — | — | — | — | — | — | read side, see the table below: 2.2 s → 0.5 s per dashboard load with 100k builds in range |
 | 3 BEP zstd dictionary | 19,726 | 5,806 | 23,589 | 731 | 47 / 213 | 107k | storage per build 33.1 → 29.7 KB (event segments 135 → 84 MB for the same 10k builds), WAL −10 %; CPU unchanged. Dictionary `priv/zstd/bep-1.dict` trained on the fixtures (`bench/train_dict.sh`); held out, a 15-event segment compresses 8.5× instead of 4.1×. Postgres exec time spreads 45–80k events per exec-second between runs depending on whether a checkpoint lands mid-run |
 
+| raw write-behind (`1b986fa`), A/B against `333da0b` | 19,551 (baseline 19,115) | 5,802 (5,793) | 28,846 (21,497) | 713 (711) | 49 / 242 (54 / 250) | 106k | ingest unchanged by the archive's migration (four unindexed columns, an index on `inserted_at`): same harness on both sides, the baseline run from a worktree with the migration rolled back; Postgres per vCPU spreads 21–30k on both sides with checkpoint timing; oracle 10,000/10,000 and 0 missing acks on all six runs |
+
+**Raw archive on the bench database** (10,000 flat-out builds from the run above, disk
+blob store, `RawArchive.archive/2` over every build at concurrency 8, then the hourly
+partition drop with its guard, then `Verify.check/2` on every build):
+
+| | database per build | event segments | log segments | invocations | blobs table | blob store |
+|---|---|---|---|---|---|---|
+| before | 31.4 KB | 8.4 KB | 0.7 KB | 10.1 KB | — | — |
+| archived, partitions still there | 31.8 KB | 8.4 KB | 0.7 KB | 10.1 KB | 0.35 KB | 6.6 KB |
+| after the partition drop | **22.7 KB (−28 %)** | 0 | 0 | 10.1 KB | 0.35 KB | 6.6 KB |
+
+10,000 archived in 10.6 s (944 builds/s), 10,000/10,000 verified from the blobs after the
+drop. One object per build compresses the whole event stream at once: 6.6 KB against
+8.4 KB of per-flush segments. The replayed fixtures repeat their log text, so logs
+deduplicated to 8 objects here; real logs are one object per build. What stays in
+PostgreSQL per build is the row and its normalized tables (targets, tests, actions,
+metrics), which `RETENTION_DAYS` governs; raw data now costs the blob store's price
+($0.023/GB-month on S3) for as long as it is kept, plus two PUTs per build.
+
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 
 | Step | events/s | ack p50 / p99 ms | round trips | RSS per stream | app vCPU | notes |
