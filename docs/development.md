@@ -77,6 +77,10 @@ configurations and what the model found. Re-run it when `worker.ex`, `writer.ex`
     AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... mix test --only s3
   ```
 
+  Besides the adapter contract (`s3_contract_test.exs`) this runs the raw archive end to
+  end against the store (`raw_archive_s3_test.exs`: archive, one-shot streamed reads
+  identical to the segments, prune after the build is deleted).
+
   OIDC against a real provider is a manual check for now (`AUTH_MODE=oidc` with the
   provider's issuer and client, sign in through the browser); the fake provider covers the
   flow in CI.
