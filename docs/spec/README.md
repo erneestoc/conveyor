@@ -46,6 +46,46 @@ Fixed in `Conveyor.Blobs` (`pin/2` returns `{:error, :blob_gone}` on a missing r
 and `Conveyor.Artifacts.attach/4` (one transaction, `{:ok, artifact} | {:error, :blob_gone}`;
 a vanished profile blob makes the fetch job retry, an upload answers 503).
 
+Round two (found through `Archive.tla`, 2026-09-26): the model's upload was atomic and
+waited for a deletion in flight, which hid a re-upload of the same content. Uploads now
+write the object, then upsert the row, at any time. `Blobs_reupload.cfg` (the 0.2.2 code:
+the row dropped under the lock, the object after the commit) violates `ReferencedIntact`
+in 11 steps: a re-upload writes the object, the deleter drops the row, the re-upload's row
+lands, an attacher checks and pins it, and the deleter's object delete (after its commit)
+removes the bytes under a fresh reference. `ObjectUnderLock` (in `Blobs_fixed.cfg`): `delete_blob/2`
+deletes the object while it holds the row lock and drops the row after, and `pin/2`
+checks that the object exists while it holds the lock (`{:error, :blob_gone}` otherwise).
+A deleter that dies after the object delete leaves a row without bytes; the pin check
+refuses it and the next prune removes it.
+
+## Raw archive write-behind (`Archive.tla`)
+
+One finished build, its daily segment partition, two nodes running `ArchiveRaw`, orphan
+pruning, build retention and the partition drop. The archiver reads the segments, puts one
+blob (object, then row; the same content always gets the same digest) and records the
+reference with `UPDATE … WHERE raw_status = 'segments'`; the loser of that update deletes
+its blob through the checked delete. Chaos: archivers crash between any two steps, a
+deleter's transaction dies after the object delete, the job does not run for days (a
+store outage), a late finish notification touches the row, retention deletes the build.
+Properties: `Stored` (every event is in the segments or in the referenced blob) and
+`ReferencedIntact`. `RETENTION_RAW_DAYS` = 2, archive delay one day (the target defaults).
+
+| Config | Knobs | Result |
+|---|---|---|
+| `Archive_fixed.cfg` | drop guard, pinned reference, object deleted under the row lock | holds (11k states) |
+| `Archive_current.cfg` | the design as first written (HANDOFF §7): date-only partition drop, plain conditional `UPDATE`, 0.2.2 blob deletion | `Stored` violated in 7 steps: the archive has not run (store outage, or a build that crossed midnight gets one hour of slack) when the partition's date passes |
+| `Archive_noguard.cfg` | everything but the drop guard | `Stored` violated the same way: no delay/retention arithmetic survives an outage |
+| `Archive_plainref.cfg` | the reference without pinning the row | `ReferencedIntact` violated in 13 steps: put, the node stalls past the pruning grace, prune deletes the orphan, the reference lands on nothing (a later partition drop then loses the events) |
+| `Archive_reput.cfg` | 0.2.2 blob deletion (object after commit) | `ReferencedIntact` violated in 16 steps: a crashed archiver's orphan is pruned, the next run re-puts the same digest between prune's commit and its object delete, pins the fresh row and references bytes that are then deleted |
+
+Design changes before any code (`Conveyor.Workers.ArchiveRaw`, `Conveyor.Storage.Partitions`,
+`Conveyor.Blobs`): the partition drop skips a day that still holds a finished build with
+`raw_status = 'segments'` (the oldest-unarchived gauge alerts instead of data being lost);
+the reference is recorded in one transaction that pins the blob (`Blobs.pin/2`, which now
+checks the object under the lock); blob deletion as in the Blobs round two above. Out of
+the model: builds that never finish are never archived and their segments go with the
+partition after `RETENTION_RAW_DAYS`, as before the archive.
+
 ## Writer group commit (`Writer.tla`)
 
 One shard, two invocations, stale submissions, the group commit with its per-batch
