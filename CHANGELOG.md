@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.3 (2026-09-26)
 
 - **Raw write-behind to the blob store (off by default: `RAW_ARCHIVE_ENABLED`).** A day
   after a build finishes (`RAW_ARCHIVE_AFTER_HOURS`, 24), its raw BEP events and log move
