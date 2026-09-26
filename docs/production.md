@@ -17,7 +17,10 @@ on your own hardware before committing to a size (`mix conveyor.loadgen --help`)
 - **Single node without a balancer**: put Caddy in front (`reverse_proxy 127.0.0.1:4000`
   for the UI and `reverse_proxy h2c://127.0.0.1:1986` on `:1985` for gRPC, with Conveyor
   on `GRPC_PORT=1986`); Caddy obtains the certificate from Let's Encrypt and serves h2 to
-  Bazel. `deploy/trial` does exactly this in its staging shape (`edge = "caddy"`).
+  Bazel. `deploy/trial` does exactly this in its staging shape (`edge = "caddy"`). Keep
+  Caddy's data directory (its certificates) across node replacements — a volume, or a
+  copy restored before Caddy starts as the trial does through SSM — or every deploy waits
+  for a new certificate, which Caddy can only obtain once traffic reaches the new node.
 - **Auto Scaling / orchestrators**: base instance replacement on the node itself
   (EC2 status, liveness), not on `/health/ready`: readiness depends on the database, and a
   slow database would otherwise replace healthy nodes and make things worse (seen on the

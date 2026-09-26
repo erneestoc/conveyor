@@ -22,9 +22,27 @@ resource "aws_iam_role_policy" "conveyor" {
       { Effect = "Allow", Action = ["ec2:AssociateAddress"], Resource = "*",
       Condition = { StringEquals = { "aws:ResourceTag/project" = "conveyor-trial" } } },
       { Effect = "Allow", Action = ["ecr:GetAuthorizationToken", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"], Resource = "*" },
-      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "*" }
+      { Effect = "Allow", Action = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"], Resource = "*" },
+      # The Caddy edge: its certificate store survives node replacements (see caddy_certs).
+      { Effect = "Allow", Action = ["ssm:GetParameter", "ssm:PutParameter"], Resource = aws_ssm_parameter.caddy_certs.arn }
     ]
   })
+}
+
+# Caddy's certificate store (a base64 tar.gz of /data/caddy/certificates), written by the
+# node whenever Caddy obtains or renews a certificate and restored by the next node before
+# Caddy starts. Without it every instance refresh asked Let's Encrypt for a new certificate,
+# which it could only get once the Elastic IP had moved: about 50 s of failed TLS
+# handshakes per deploy, and the five-per-week duplicate-certificate limit. Advanced tier
+# (8 KB, $0.05/month): a chain, key and metadata base64 come close to the 4 KB standard limit.
+resource "aws_ssm_parameter" "caddy_certs" {
+  name  = "/${var.name}/caddy-certs"
+  type  = "SecureString"
+  tier  = "Advanced"
+  value = "none"
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 resource "aws_iam_instance_profile" "conveyor" {
   name = "${var.name}-conveyor"
@@ -274,7 +292,7 @@ resource "aws_launch_template" "conveyor" {
     resource_type = "instance"
     # `project` is what the IAM condition for AssociateAddress checks; provider default
     # tags do not reach instances the group launches.
-    tags          = { Name = "${var.name}-conveyor", conveyor-cluster = var.name, project = "conveyor-trial" }
+    tags = { Name = "${var.name}-conveyor", conveyor-cluster = var.name, project = "conveyor-trial" }
   }
   user_data = base64encode(templatefile("${path.module}/templates/conveyor.sh.tftpl", {
     ecr             = local.ecr
@@ -291,6 +309,7 @@ resource "aws_launch_template" "conveyor" {
     rbe_ca          = tls_self_signed_cert.ca.cert_pem
     edge            = var.edge
     eip_allocation  = var.edge == "caddy" ? aws_eip.conveyor[0].id : ""
+    caddy_certs     = aws_ssm_parameter.caddy_certs.name
   }))
 }
 

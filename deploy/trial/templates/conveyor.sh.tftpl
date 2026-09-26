@@ -19,7 +19,7 @@ aws ecr get-login-password --region '${region}' | docker login --username AWS --
 # deploy costs one reconnect (covered by Bazel's retries), not a minute of downtime.
 GRPC_PORT=1986
 FORCE_SSL=true
-mkdir -p /etc/caddy
+mkdir -p /etc/caddy /var/lib/caddy
 cat > /etc/caddy/Caddyfile <<'CADDY'
 ${phx_host} {
   reverse_proxy 127.0.0.1:4000
@@ -28,8 +28,47 @@ ${phx_host}:1985 {
   reverse_proxy h2c://127.0.0.1:1986
 }
 CADDY
+# The certificate store travels between nodes through SSM (${caddy_certs}): restored
+# before Caddy starts, so the new node already holds a valid certificate when the Elastic
+# IP moves to it, and saved every ten minutes when Caddy obtained or renewed one.
+cat > /usr/local/bin/caddy-certs <<'CERTS'
+#!/bin/bash
+# caddy-certs restore|save: Caddy's certificate store <-> the SSM parameter.
+set -euo pipefail
+cd /var/lib/caddy
+param='${caddy_certs}'; region='${region}'
+current() { aws ssm get-parameter --region "$region" --name "$param" --with-decryption --query Parameter.Value --output text; }
+case "$1" in
+  restore)
+    value=$(current) || exit 0
+    [ "$value" = none ] || { echo "$value" | base64 -d | tar -xzf -; echo "caddy-certs: restored"; } ;;
+  save)
+    [ -d caddy/certificates ] || exit 0
+    value=$(tar -cf - --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner caddy/certificates | gzip -9n | base64 -w0)
+    [ "$value" = "$(current)" ] || { aws ssm put-parameter --region "$region" --name "$param" --type SecureString --tier Advanced --value "$value" --overwrite >/dev/null; echo "caddy-certs: saved"; } ;;
+esac
+CERTS
+chmod 755 /usr/local/bin/caddy-certs
+/usr/local/bin/caddy-certs restore || true
+cat > /etc/systemd/system/caddy-certs.service <<'UNIT'
+[Unit]
+Description=Save Caddy's certificate store to SSM
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/caddy-certs save
+UNIT
+cat > /etc/systemd/system/caddy-certs.timer <<'UNIT'
+[Unit]
+Description=Save Caddy's certificate store to SSM every ten minutes
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=10min
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload && systemctl enable --now caddy-certs.timer
 docker run -d --name caddy --restart unless-stopped --network host \
-  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v caddy_data:/data -v caddy_config:/config \
+  -v /etc/caddy/Caddyfile:/etc/caddy/Caddyfile:ro -v /var/lib/caddy:/data -v caddy_config:/config \
   caddy:2
 %{ else ~}
 GRPC_PORT=1985

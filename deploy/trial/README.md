@@ -17,8 +17,14 @@ ECS Fargate "builder" tasks ── bazel --bes_backend=grpcs://conveyor… --rem
 - **Staging (default):** `edge = "caddy"`, one `t4g.medium` node with a Caddy sidecar that
   terminates TLS itself (Let's Encrypt for the UI on 443 and gRPC/h2 on 1985), an Elastic
   IP the node claims at boot and DNS pointing at it; no balancer. About $2.30/day with the
-  `db.t3.micro`. Caddy keeps its certificate in a Docker volume on the instance, so an
-  instance refresh re-issues it (Let's Encrypt allows five per week for the same name).
+  `db.t3.micro`. Caddy's certificate store lives in `/var/lib/caddy` and travels between
+  nodes through the SSM parameter `/conveyor-trial/caddy-certs` (SecureString, Advanced
+  tier: the store is about 5 KB of base64): restored at boot before Caddy starts, saved by
+  the `caddy-certs.timer` every ten minutes when it changed. A new node therefore serves
+  TLS the moment the Elastic IP moves to it, and a refresh does not ask Let's Encrypt for
+  a certificate (five per week per name). Measured 2026-09-26: a 10-minute paced TLS run
+  through an instance refresh, 396/396 builds, 0 failed (before: 109 of 477 failed during
+  ≈ 50 s of failed handshakes). `terraform destroy` removes the parameter.
 - **Soak / multi-node:** `-var edge=nlb -var conveyor_count=2` puts the nodes behind the
   Network Load Balancer with the ACM certificate. Switching shapes changes DNS and rolls
   the nodes (a few minutes of unavailability).

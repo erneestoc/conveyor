@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Deploys on the single-node Caddy shape without failed builds.** The trial's nodes
+  restore Caddy's certificate store from SSM before Caddy starts and save it when it
+  changes, so a replacement node serves TLS as soon as the Elastic IP moves: a 10-minute
+  paced run through an instance refresh completed 396 of 396 builds (109 of 477 failed
+  before, during ≈ 50 s of certificate issuance). `docs/production.md` recommends the same
+  for any single-node Caddy setup.
+
 ## 0.2.3 (2026-09-26)
 
 - **Raw write-behind to the blob store (off by default: `RAW_ARCHIVE_ENABLED`).** A day
