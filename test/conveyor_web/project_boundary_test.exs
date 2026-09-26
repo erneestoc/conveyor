@@ -186,7 +186,7 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     assert Invocations.facets(nil, project_ids: [b.id]) != []
     assert Invocations.facets(nil, project_ids: []) == []
 
-    all = Metrics.Scope.new("7d", nil, [])
+    all = Metrics.Scope.new("90d", nil, [])
     assert Metrics.Dashboard.summary(all).builds == 2
     assert Metrics.Dashboard.summary(Metrics.Scope.restrict(all, [a.id])).builds == 1
     assert Metrics.Dashboard.summary(Metrics.Scope.restrict(all, [])).builds == 0

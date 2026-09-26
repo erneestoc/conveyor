@@ -312,7 +312,13 @@ resource "aws_autoscaling_group" "conveyor" {
   }
   instance_refresh {
     strategy = "Rolling"
-    preferences { min_healthy_percentage = var.edge == "nlb" ? 50 : 0 }
+    # launch the new node before terminating the old one (the boot script claims the
+    # Elastic IP only once the new node is ready); behind the NLB half the fleet at a time
+    preferences {
+      min_healthy_percentage = var.edge == "nlb" ? 50 : 100
+      max_healthy_percentage = var.edge == "nlb" ? 100 : 200
+      instance_warmup        = 120
+    }
   }
   tag {
     key                 = "conveyor-cluster"

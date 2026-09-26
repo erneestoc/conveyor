@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Retention leaves live builds alone (found by model checking).** A build still
+  streaming past its retention cutoff was deleted under its worker, which fenced the
+  commit and left an empty row when the client retried; retention now skips in-progress
+  and disconnected builds that changed recently (`docs/spec/Retention.tla`).
+- **Deploys without downtime on the EC2 shape.** The trial's boot script claims the
+  Elastic IP only after the node answers `/health/ready`, and instance refreshes launch the
+  new node before terminating the old one.
+
 ## 0.2.2 (2026-09-23)
 
 - **Rollup staleness (found by model checking).** A build that changed while its hour was

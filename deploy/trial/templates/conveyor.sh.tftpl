@@ -14,9 +14,9 @@ aws ecr get-login-password --region '${region}' | docker login --username AWS --
 %{ if edge == "caddy" ~}
 # Caddy edge: claim the stack's Elastic IP, then terminate TLS here (Let's Encrypt) for
 # the UI on 443 and gRPC (h2) on 1985; Conveyor itself listens on 4000 and 1986.
-TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
-INSTANCE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-aws ec2 associate-address --region '${region}' --allocation-id '${eip_allocation}' --instance-id "$INSTANCE" --allow-reassociation
+# The Elastic IP is claimed at the end of this script, once Conveyor answers /health/ready:
+# during an instance refresh the old node keeps serving until the new one is ready, so a
+# deploy costs one reconnect (covered by Bazel's retries), not a minute of downtime.
 GRPC_PORT=1986
 FORCE_SSL=true
 mkdir -p /etc/caddy
@@ -50,3 +50,10 @@ docker run -d --name conveyor --restart unless-stopped --network host \
   -e SHUTDOWN_DRAIN_SECONDS='${drain_seconds}' \
   --stop-timeout $(( ${drain_seconds} + 15 )) \
   '${image}'
+
+%{ if edge == "caddy" ~}
+for i in $(seq 1 120); do curl -sf localhost:4000/health/ready >/dev/null && break; sleep 5; done
+TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 60')
+INSTANCE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+aws ec2 associate-address --region '${region}' --allocation-id '${eip_allocation}' --instance-id "$INSTANCE" --allow-reassociation
+%{ endif ~}

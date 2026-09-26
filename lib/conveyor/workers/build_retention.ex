@@ -39,11 +39,18 @@ defmodule Conveyor.Workers.BuildRetention do
   @doc "Deletes a project's builds that started (or, lacking a start, were inserted) before `cutoff`."
   @spec delete_before(Project.t(), DateTime.t(), non_neg_integer()) :: non_neg_integer()
   def delete_before(%Project{id: project_id} = project, cutoff, acc) do
+    idle_ms = Conveyor.Ingest.config(:idle_timeout_ms, 600_000)
+    recent = DateTime.add(DateTime.utc_now(), -2 * idle_ms, :millisecond)
+
     ids =
       Repo.all(
         from i in Invocation,
           where: i.project_id == ^project_id,
           where: coalesce(i.started_at, i.inserted_at) < ^cutoff,
+          # A build whose row changed within the idle window may still be streaming (or
+          # about to resume); deleting it would fence the worker and leave an empty row
+          # behind when the client retries (docs/spec/Retention.tla).
+          where: i.status not in ["in_progress", "disconnected"] or i.updated_at < ^recent,
           select: i.id,
           limit: @batch
       )

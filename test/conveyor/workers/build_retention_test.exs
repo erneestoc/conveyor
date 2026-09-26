@@ -16,13 +16,20 @@ defmodule Conveyor.Workers.BuildRetentionTest do
       Repo.insert!(%Invocation{
         id: Conveyor.Bep.Replay.uuid(),
         project_id: project.id,
+        status: "succeeded",
         started_at: started,
         tags: tags
       })
     end
 
     old = insert.(DateTime.add(now, -100, :day), %{"team" => "old"})
-    no_start = Repo.insert!(%Invocation{id: Conveyor.Bep.Replay.uuid(), project_id: project.id})
+
+    no_start =
+      Repo.insert!(%Invocation{
+        id: Conveyor.Bep.Replay.uuid(),
+        project_id: project.id,
+        status: "failed"
+      })
 
     Repo.update_all(from(i in Invocation, where: i.id == ^no_start.id),
       set: [inserted_at: DateTime.add(now, -200, :day)]
@@ -42,6 +49,7 @@ defmodule Conveyor.Workers.BuildRetentionTest do
       Repo.insert!(%Invocation{
         id: Conveyor.Bep.Replay.uuid(),
         project_id: short.id,
+        status: "succeeded",
         started_at: DateTime.add(now, -10, :day)
       })
 
@@ -49,6 +57,7 @@ defmodule Conveyor.Workers.BuildRetentionTest do
       Repo.insert!(%Invocation{
         id: Conveyor.Bep.Replay.uuid(),
         project_id: short.id,
+        status: "succeeded",
         started_at: DateTime.add(now, -3, :day)
       })
 
@@ -75,5 +84,39 @@ defmodule Conveyor.Workers.BuildRetentionTest do
 
     assert Projects.retention_days(short) == nil and Projects.blob_prefix(short) == "short-lived"
     assert Projects.blob_prefix(short.id) == "short-lived"
+  end
+
+  test "a build still streaming is left alone even past the cutoff (docs/spec/Retention.tla)" do
+    project = Conveyor.Projects.ensure_default_project!()
+    old = DateTime.add(DateTime.utc_now(), -200, :day)
+
+    live =
+      Repo.insert!(%Conveyor.Invocations.Invocation{
+        id: Conveyor.Bep.Replay.uuid(),
+        project_id: project.id,
+        status: "in_progress",
+        started_at: old,
+        inserted_at: old,
+        updated_at: DateTime.utc_now()
+      })
+
+    stale =
+      Repo.insert!(%Conveyor.Invocations.Invocation{
+        id: Conveyor.Bep.Replay.uuid(),
+        project_id: project.id,
+        status: "in_progress",
+        started_at: old,
+        inserted_at: old,
+        updated_at: old
+      })
+
+    Conveyor.Workers.BuildRetention.delete_before(
+      project,
+      DateTime.add(DateTime.utc_now(), -90, :day),
+      0
+    )
+
+    assert Repo.get(Conveyor.Invocations.Invocation, live.id)
+    refute Repo.get(Conveyor.Invocations.Invocation, stale.id)
   end
 end

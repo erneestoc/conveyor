@@ -73,6 +73,15 @@ job's timeout is shorter than the rescue window (`Oban_fixed.cfg`, 10 < 15 minut
 configured) and fails otherwise (`Oban_current.cfg`); `oban_rescue_test.exs` pins the
 configuration to that order.
 
+## Retention against a live stream (`Retention.tla`)
+
+Retention deletes a build that started before the cutoff while its stream is still live or
+about to resume: the worker's next commit is fenced (row gone), the client retries, the
+row is created again empty and the resent sequence is ahead of it, so the upload fails for
+good and an empty `in_progress` row stays behind (`Retention_current.cfg` violates
+`NoZombie`). Fixed: retention skips `in_progress` and `disconnected` builds whose row
+changed within two idle windows (`BuildRetention.delete_before/3`, `Retention_fixed.cfg`).
+
 ## Running
 
 ```sh
@@ -80,8 +89,7 @@ docs/spec/check.sh                          # every configuration
 docs/spec/check.sh Ingest:fixed Blobs:fixed # the ones that must pass
 ```
 
-Not modelled: retention against live ingest (a deleted build whose stream resumes), and
-the drain on shutdown beyond what the ingest model's exits cover.
+Not modelled: the drain on shutdown beyond what the ingest model's exits cover.
 
 TLC needs Java and `tla2tools.jar` (`TLA_TOOLS=/path/to/tla2tools.jar`, default
 `~/tla/tla2tools.jar` from https://github.com/tlaplus/tlaplus/releases). Re-run the model
