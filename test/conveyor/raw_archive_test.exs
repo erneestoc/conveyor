@@ -42,7 +42,7 @@ defmodule Conveyor.RawArchiveTest do
     assert :ok = Verify.check(id, sent(before))
 
     assert {:ok, :not_due} = RawArchive.archive(id)
-    assert id in RawArchive.candidates(later)
+    assert id in RawArchive.all_candidates(later)
     assert RawArchive.overdue_seconds(later) > 0
     assert RawArchive.holds_unarchived?(Invocations.day(before))
 
@@ -68,10 +68,24 @@ defmodule Conveyor.RawArchiveTest do
     assert {:ok, log} = Blobs.read(inv.project_id, inv.log_blob)
     assert Invocations.decompress(log) == expected.log
 
-    refute id in RawArchive.candidates(later)
+    refute id in RawArchive.all_candidates(later)
     refute RawArchive.holds_unarchived?(Invocations.day(inv))
     assert {:ok, :already_archived} = RawArchive.archive(id, later)
     assert {:ok, :not_found} = RawArchive.archive(Ecto.UUID.generate(), later)
+  end
+
+  test "a run sees every due build, not one page", %{ctx: ctx, later: later} do
+    ids =
+      for f <- ~w(clean_build_and_test build_failure test_failure), do: ingest_fixture!(f, ctx)
+
+    # Same finish time for two of them: the cursor breaks ties by id.
+    at = DateTime.utc_now()
+    Repo.update_all(from(i in Invocation, where: i.id in ^ids), set: [finished_at: at])
+
+    found = RawArchive.all_candidates(later, 2)
+    assert Enum.sort(found) == Enum.sort(found |> Enum.uniq())
+    assert Enum.all?(ids, &(&1 in found))
+    assert length(RawArchive.candidates(later, 2)) == 2
   end
 
   test "the loser of two archivers keeps the winner's blobs; retention frees them", %{

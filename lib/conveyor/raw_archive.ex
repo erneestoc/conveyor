@@ -47,10 +47,12 @@ defmodule Conveyor.RawArchive do
   Ids of finished builds due for archiving, oldest finish first: `raw_status` still
   `segments`, finished more than `after_hours` ago, and their row unchanged for two idle
   windows (a late finish notification or anything else touching the row waits a round).
-  Only builds whose partition still exists are considered.
+  Only builds whose partition still exists are considered. One page of `limit`; pass the
+  last `{finished_at, id}` of a page as `cursor` for the next (`all_candidates/1` walks them).
   """
-  @spec candidates(DateTime.t(), pos_integer()) :: [Ecto.UUID.t()]
-  def candidates(now \\ DateTime.utc_now(), limit \\ 1000) do
+  @spec candidates(DateTime.t(), pos_integer(), {DateTime.t(), Ecto.UUID.t()} | nil) ::
+          [{DateTime.t(), Ecto.UUID.t()}]
+  def candidates(now \\ DateTime.utc_now(), limit \\ 1000, cursor \\ nil) do
     case due_query(now) do
       nil ->
         []
@@ -61,11 +63,38 @@ defmodule Conveyor.RawArchive do
 
         query
         |> where([i], i.updated_at < ^recent)
-        |> order_by([i], i.finished_at)
+        |> after_cursor(cursor)
+        |> order_by([i], [i.finished_at, i.id])
         |> limit(^limit)
-        |> select([i], i.id)
+        |> select([i], {i.finished_at, i.id})
         |> Repo.all()
     end
+  end
+
+  defp after_cursor(query, nil), do: query
+
+  defp after_cursor(query, {at, id}),
+    do: where(query, [i], i.finished_at > ^at or (i.finished_at == ^at and i.id > ^id))
+
+  @doc """
+  Every due build, page by page (a run must not stop at one page: a fixed page per
+  15-minute run capped the archive at 96k builds a day while one node drains 20–30k an
+  hour).
+  """
+  @spec all_candidates(DateTime.t(), pos_integer()) :: [Ecto.UUID.t()]
+  def all_candidates(now \\ DateTime.utc_now(), page \\ 1000) do
+    Stream.unfold(:start, fn
+      :done ->
+        nil
+
+      cursor ->
+        case candidates(now, page, if(cursor == :start, do: nil, else: cursor)) do
+          [] -> nil
+          rows when length(rows) < page -> {rows, :done}
+          rows -> {rows, List.last(rows)}
+        end
+    end)
+    |> Enum.flat_map(fn rows -> Enum.map(rows, &elem(&1, 1)) end)
   end
 
   @doc """

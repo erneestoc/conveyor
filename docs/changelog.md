@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **The raw archive enqueues every due build each run.** A run took one page of 1,000,
+  capping the archive at 96k builds a day although one node drains 20–30k an hour
+  (measured on the trial); it now walks all due builds with a keyset cursor.
 - **Builds orphaned by a dead node no longer stay "in progress" forever.** A job marks
   builds `disconnected` when their row has not changed for two idle windows (no node
   serves them; a live worker would have marked its own build disconnected after one), as

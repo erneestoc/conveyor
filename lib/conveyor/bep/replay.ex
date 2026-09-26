@@ -80,9 +80,18 @@ defmodule Conveyor.Bep.Replay do
         # A stream the server closed early (e.g. UNAUTHENTICATED) makes later sends exit.
         :exit, reason -> {:error, {:stream_closed, reason}}
       after
-        GRPC.Stub.disconnect(channel)
+        disconnect(channel)
       end
     end
+  end
+
+  # Closing a connection whose peer went away can time out inside the client (5 s call);
+  # the build's outcome is already decided, so that must not take the caller down with it
+  # (a load run died this way when the network dropped mid-run).
+  defp disconnect(channel) do
+    GRPC.Stub.disconnect(channel)
+  catch
+    :exit, _ -> :ok
   end
 
   defp run_connected(
@@ -144,7 +153,7 @@ defmodule Conveyor.Bep.Replay do
              }}
           end
         after
-          if conn.channel != channel, do: GRPC.Stub.disconnect(conn.channel)
+          if conn.channel != channel, do: disconnect(conn.channel)
         end
       end
     end)

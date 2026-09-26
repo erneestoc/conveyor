@@ -1,7 +1,7 @@
 defmodule Conveyor.Workers.ArchiveRaw do
   @moduledoc """
   Raw write-behind (`Conveyor.RawArchive`). Without arguments (cron, every 15 minutes) it
-  enqueues one job per due build, unique per invocation while one is pending; with
+  enqueues one job per due build (all of them, page by page), unique per invocation while one is pending; with
   `%{"id" => id}` it archives that build. Runs on the `archive` queue so a backlog never
   delays partition maintenance, retention or rollups. Does nothing while
   `RAW_ARCHIVE_ENABLED` is off.
@@ -31,7 +31,7 @@ defmodule Conveyor.Workers.ArchiveRaw do
 
   def perform(%Oban.Job{}) do
     if RawArchive.enabled?() do
-      ids = RawArchive.candidates()
+      ids = RawArchive.all_candidates()
       Enum.each(ids, &Oban.insert!(new(%{id: &1})))
       {:ok, %{enqueued: length(ids)}}
     else
