@@ -15,6 +15,7 @@ defmodule Conveyor.Ingest.Worker do
   alias Conveyor.Bep.Event
   alias Conveyor.Ingest
   alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, WriterPool}
+  alias Conveyor.Watch
   alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -547,17 +548,8 @@ defmodule Conveyor.Ingest.Worker do
     if dirty.summary do
       summary = summary(state.norm, state)
 
-      Phoenix.PubSub.broadcast(
-        Conveyor.PubSub,
-        Ingest.project_topic(project_id),
-        {:invocation_updated, summary}
-      )
-
-      Phoenix.PubSub.broadcast(
-        Conveyor.PubSub,
-        Ingest.all_topic(),
-        {:invocation_updated, summary}
-      )
+      Watch.broadcast(Ingest.project_topic(project_id), {:invocation_updated, summary})
+      Watch.broadcast(Ingest.all_topic(), {:invocation_updated, summary})
     end
 
     if dirty.summary or dirty.targets != %{} or dirty.tests != %{} or dirty.actions != [] do
@@ -568,11 +560,7 @@ defmodule Conveyor.Ingest.Worker do
         actions: Enum.reverse(dirty.actions)
       }
 
-      Phoenix.PubSub.broadcast(
-        Conveyor.PubSub,
-        Ingest.invocation_topic(id),
-        {:invocation_detail, detail}
-      )
+      Watch.broadcast(Ingest.invocation_topic(id), {:invocation_detail, detail})
     end
 
     if dirty.log != [] do
@@ -580,11 +568,7 @@ defmodule Conveyor.Ingest.Worker do
       # over HTTP can splice live appends exactly.
       offset = max((state.norm.inv[:log_bytes] || 0) - IO.iodata_length(dirty.log), 0)
 
-      Phoenix.PubSub.broadcast(
-        Conveyor.PubSub,
-        Ingest.log_topic(id),
-        {:log_chunks, Enum.reverse(dirty.log), offset}
-      )
+      Watch.broadcast(Ingest.log_topic(id), {:log_chunks, Enum.reverse(dirty.log), offset})
     end
 
     %{state | dirty: fresh_dirty()}

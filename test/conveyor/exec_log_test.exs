@@ -150,7 +150,7 @@ defmodule Conveyor.ExecLogTest do
   test "the worker parses the uploaded artifact and reports failures", %{newer: inv} do
     {:ok, blob} = Blobs.put(inv.project_id, File.read!(@clean), content_type: "application/zstd")
     Artifacts.attach(inv, "execution.log.zst", blob, "upload")
-    Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
+    Conveyor.Watch.subscribe(Conveyor.Ingest.invocation_topic(inv.id))
 
     :ok = ExecLog.available(inv, blob)
     assert Repo.get!(Invocation, inv.id).exec_log_status == "available"

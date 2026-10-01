@@ -247,8 +247,7 @@ defmodule Conveyor.Artifacts do
 
     %{invocation_id: inv.id} |> Conveyor.Workers.ProfileSummary.new() |> Oban.insert()
 
-    Phoenix.PubSub.broadcast(
-      Conveyor.PubSub,
+    Conveyor.Watch.broadcast(
       Conveyor.Ingest.invocation_topic(inv.id),
       {:artifacts_changed, inv.id}
     )

@@ -163,7 +163,7 @@ defmodule Conveyor.ArtifactsTest do
       {:ok, blob} = Blobs.put(project.id, "gzipped profile", source: "cas", ttl_seconds: 100)
       uri = "bytestream://anything/blobs/#{blob.digest}/#{blob.size}"
       inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
-      Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
+      Conveyor.Watch.subscribe(Conveyor.Ingest.invocation_topic(inv.id))
       :ok = Artifacts.on_finalized(inv.id)
       assert %{profile_status: "available", profile_blob: digest} = Repo.get!(Invocation, inv.id)
       assert digest == blob.digest

@@ -34,7 +34,7 @@ defmodule ConveyorWeb.BuildsLive do
 
     if connected?(socket) do
       topic = if project, do: Ingest.project_topic(project.id), else: Ingest.all_topic()
-      Phoenix.PubSub.subscribe(Conveyor.PubSub, topic)
+      Conveyor.Watch.subscribe(topic)
     end
 
     # Every read below is restricted to the projects this viewer may see; the all-builds

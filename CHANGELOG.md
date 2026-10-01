@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Live updates are published only for builds somebody is watching.** Every ingest worker
+  broadcast its build's summary, detail and log chunks four times a second, and across a
+  cluster `Phoenix.PubSub` forwards each message to one process per other node: at about
+  3,000 streams per node (the fleet test's rolling deploy under 5,000 builds) that process
+  fell behind, its queue reached 6 GB and every node was killed out of memory. Pages now
+  subscribe through `Conveyor.Watch`, which records the subscription in a cluster-wide
+  `:pg` group, and workers broadcast a topic only while it has a subscriber anywhere.
 - **The load generator survives a lost connection the way Bazel does.** Its BES client
   (`Conveyor.Bep.Replay`, behind `mix conveyor.loadgen` and the fleet tasks) gives a stream
   up when no acknowledgement arrives for `--ack-timeout-ms` (30 s) while events are

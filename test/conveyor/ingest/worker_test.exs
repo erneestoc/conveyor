@@ -40,9 +40,9 @@ defmodule Conveyor.Ingest.WorkerTest do
     with_linger(2_000)
     id = Replay.uuid()
     events = events("clean_build_and_test")
-    Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.project_topic(ctx.project_id))
-    Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.invocation_topic(id))
-    Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.log_topic(id))
+    Conveyor.Watch.subscribe(Ingest.project_topic(ctx.project_id))
+    Conveyor.Watch.subscribe(Ingest.invocation_topic(id))
+    Conveyor.Watch.subscribe(Ingest.log_topic(id))
 
     assert :ok =
              Ingest.lifecycle(

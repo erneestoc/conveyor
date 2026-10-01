@@ -27,7 +27,7 @@ defmodule ConveyorWeb.InvocationLive do
     project = Enum.find(projects, &(&1.id == inv.project_id))
 
     if connected?(socket),
-      do: Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.invocation_topic(inv.id))
+      do: Conveyor.Watch.subscribe(Ingest.invocation_topic(inv.id))
 
     {:ok,
      socket
@@ -91,7 +91,7 @@ defmodule ConveyorWeb.InvocationLive do
 
   defp load_tab(socket, "log", _page) do
     if connected?(socket) and not socket.assigns.log_subscribed do
-      Phoenix.PubSub.subscribe(Conveyor.PubSub, Ingest.log_topic(socket.assigns.invocation.id))
+      Conveyor.Watch.subscribe(Ingest.log_topic(socket.assigns.invocation.id))
       assign(socket, log_subscribed: true)
     else
       socket

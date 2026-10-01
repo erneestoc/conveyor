@@ -15,6 +15,7 @@ defmodule Conveyor.Application do
       Supervisor.child_spec({Task, &Conveyor.Cluster.check!/0}, id: :cluster_check),
       {Cluster.Supervisor, [Conveyor.Cluster.topologies(), [name: Conveyor.ClusterSupervisor]]},
       {Phoenix.PubSub, name: Conveyor.PubSub},
+      Conveyor.Watch,
       Conveyor.Projects.ApiKeyCache,
       Conveyor.Limits,
       Conveyor.Ingest.Supervisor,

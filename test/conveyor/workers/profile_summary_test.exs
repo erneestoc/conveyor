@@ -31,7 +31,7 @@ defmodule Conveyor.Workers.ProfileSummaryTest do
     {:ok, blob} =
       Blobs.put(inv.project_id, File.read!(@fixture), content_type: "application/gzip")
 
-    Phoenix.PubSub.subscribe(Conveyor.PubSub, Conveyor.Ingest.invocation_topic(inv.id))
+    Conveyor.Watch.subscribe(Conveyor.Ingest.invocation_topic(inv.id))
     :ok = Artifacts.profile_available(inv, blob)
     assert_enqueued(worker: ProfileSummary, args: %{invocation_id: inv.id})
 

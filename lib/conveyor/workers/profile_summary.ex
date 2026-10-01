@@ -20,8 +20,7 @@ defmodule Conveyor.Workers.ProfileSummary do
         conflict_target: :invocation_id
       )
 
-      Phoenix.PubSub.broadcast(
-        Conveyor.PubSub,
+      Conveyor.Watch.broadcast(
         Conveyor.Ingest.invocation_topic(inv.id),
         {:artifacts_changed, inv.id}
       )

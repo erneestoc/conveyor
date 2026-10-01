@@ -28,8 +28,7 @@ defmodule ConveyorWeb.DashboardLive do
       end
 
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(
-        Conveyor.PubSub,
+      Conveyor.Watch.subscribe(
         if(project, do: Ingest.project_topic(project.id), else: Ingest.all_topic())
       )
     end
