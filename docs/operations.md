@@ -71,6 +71,12 @@ readable; new writes go under the prefix.
 Watch `pg_stat_user_tables` for dead tuples on `invocations` (autovacuum runs at 2 %) and
 the size of the TOAST relation of `invocations` (`options` is the large column).
 
+**After upgrading to 0.2.4** (input lists moved out of `spawns`): the migration copies the
+lists into `spawn_inputs` and drops the column, but PostgreSQL keeps a dropped column's
+data until the table is rewritten. Run `VACUUM FULL spawns` once, at a quiet moment (it
+locks the table for the rewrite: 6 s for the trial's 1.2 GB table on its smallest instance) to get
+the space back; until then the table stays its old size.
+
 Every ten minutes `SweepStale` marks builds `disconnected` that are still `in_progress`
 but whose row has not changed for two idle windows (`INGEST_IDLE_TIMEOUT_MS`, 10 minutes
 by default): a node died under them and Bazel gave up. A client that comes back later

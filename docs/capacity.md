@@ -126,8 +126,11 @@ deadlocked three writers: logs sharing lists in a different spawn order locked t
 rows in a different order. Stores now upsert their lists sorted by digest, one global lock
 order (`ExecLog.input_rows/3`, pinned by a test).
 
-The trial's real data before the migration: 48,030 spawns, 10,109 distinct lists, 1,220 MB
-of a 1,518 MB database. What remains per spawn is about 900 bytes of row (label, output
+The trial's real data: before the migration 48,030 spawns, 10,109 distinct lists, 1,220 MB
+of a 1,518 MB database; the migration moved 13,527 lists (per project) into 307 MB in 69 s
+on the `db.t3.micro`, and after `VACUUM FULL spawns` (6 s) the spawns table is 45 MB and
+the database 650 MB. The nightly job then expired a project's 71 builds older than its
+7-day spawn retention in 11 s. What remains per spawn is about 900 bytes of row (label, output
 path, outputs JSON, timings, digests, indexes), so spawn retention (`RETENTION_SPAWN_DAYS`,
 30 by default) bounds the table at days × builds × spawns × 1 KB plus one copy of each
 distinct list in the window.
