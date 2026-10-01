@@ -233,6 +233,7 @@ defmodule Conveyor.Metrics.Rollup do
         hour,
         DateTime.add(hour, 3600, :second)
       )
+      |> freeze_spawn_sums(project_id, hour)
 
     attrs =
       row
@@ -246,6 +247,24 @@ defmodule Conveyor.Metrics.Rollup do
     )
 
     %{row | project_id: project_id, updated_at: stamp}
+  end
+
+  # Spawn rows are deleted after the project's spawn retention while builds stay; an hour
+  # past that cutoff keeps the execution-log sums its existing row holds (computed while
+  # the spawns existed) instead of recomputing them as zero.
+  @spawn_fields [:spawns, :spawn_mnemonics, :spawn_misses, :remote_sent, :remote_fetched]
+
+  defp freeze_spawn_sums(%Row{} = row, project_id, hour) do
+    cutoff = Conveyor.ExecLog.retention_cutoff(project_id)
+
+    if DateTime.compare(DateTime.add(hour, 3600, :second), cutoff) == :lt do
+      case Repo.get_by(Row, project_id: project_id, hour: hour) do
+        nil -> row
+        existing -> Map.merge(row, Map.take(existing, @spawn_fields))
+      end
+    else
+      row
+    end
   end
 
   @doc """

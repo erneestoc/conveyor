@@ -81,7 +81,8 @@ if config_env() == :prod do
 
   config :conveyor,
     retention_days: String.to_integer(System.get_env("RETENTION_DAYS", "90")),
-    retention_raw_days: retention_raw_days
+    retention_raw_days: retention_raw_days,
+    retention_spawn_days: String.to_integer(System.get_env("RETENTION_SPAWN_DAYS", "30"))
 
   # Raw write-behind to the blob store (Conveyor.RawArchive). The segments must outlive
   # the archive delay by a day; the partition drop also keeps any day not yet archived.

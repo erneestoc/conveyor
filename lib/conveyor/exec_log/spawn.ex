@@ -2,7 +2,7 @@ defmodule Conveyor.ExecLog.Spawn do
   @moduledoc """
   One spawn from Bazel's compact execution log: an action that ran (or was served from the
   remote cache), with its inputs as a digest over `path → content digest` (the full sorted
-  list is kept zstd-compressed in `inputs_blob` for diffs), its outputs and its timings.
+  list lives once per digest in `Conveyor.ExecLog.SpawnInput`), its outputs and timings.
   """
   use Ecto.Schema
 
@@ -33,7 +33,6 @@ defmodule Conveyor.ExecLog.Spawn do
     field :inputs_digest, :string
     field :outputs_digest, :string
     field :outputs, :map, default: %{}
-    field :inputs_blob, :binary, load_in_query: false
     field :inserted_at, :utc_datetime_usec
   end
 

@@ -32,6 +32,7 @@ config:
   # S3_PATH_STYLE: "true"
   RETENTION_DAYS: "90"
   RETENTION_RAW_DAYS: "14"
+  RETENTION_SPAWN_DAYS: "30"    # execution-log spawns (the bulk of storage with logs uploaded)
   RAW_ARCHIVE_ENABLED: "false"  # move finished builds' raw events and log to the blob store
   RAW_ARCHIVE_AFTER_HOURS: "24"
   POOL_SIZE: "40"

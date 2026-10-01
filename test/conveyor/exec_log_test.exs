@@ -58,7 +58,7 @@ defmodule Conveyor.ExecLogTest do
 
     assert test_spawn.mnemonic == "TestRunner" and test_spawn.input_files == 5
     assert xml_spawn.primary_output =~ ~r{pass_test/test.xml$} and xml_spawn.input_files == 2
-    inputs = test_spawn.inputs_blob |> :zstd.decompress() |> IO.iodata_to_binary()
+    inputs = test_spawn.inputs_list |> :zstd.decompress() |> IO.iodata_to_binary()
     assert inputs =~ "app/pass.sh\t"
     assert inputs =~ "external/bazel_tools/tools/test/test-setup.sh\t"
     assert inputs =~ "pass_test.runfiles/_repo_mapping\t"
@@ -232,7 +232,7 @@ defmodule Conveyor.ExecLogTest do
     assert div(us, 1000) < 2_000
     assert Enum.map(rows, & &1.input_files) == Enum.to_list(1..depth)
     last = List.last(rows)
-    inputs = last.inputs_blob |> :zstd.decompress() |> IO.iodata_to_binary() |> String.split("\n")
+    inputs = last.inputs_list |> :zstd.decompress() |> IO.iodata_to_binary() |> String.split("\n")
     assert length(inputs) == depth and hd(inputs) == "src/f1.h\t" <> String.duplicate("a", 64)
   end
 

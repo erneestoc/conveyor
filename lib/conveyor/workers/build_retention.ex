@@ -4,14 +4,16 @@ defmodule Conveyor.Workers.BuildRetention do
   90, unless the project sets its own days) in small batches. Targets, tests, actions,
   metrics, named sets and artifact rows cascade with the build; raw event and log segments
   are dropped by partition after `RETENTION_RAW_DAYS` (`Conveyor.Workers.PartitionMaintenance`)
-  and blobs nothing references any more by `Conveyor.Workers.BlobMaintenance`. Tag facet
-  counts are rebuilt for every project that lost builds.
+  and blobs nothing references any more by `Conveyor.Workers.BlobMaintenance`. Execution-log
+  spawns go earlier, after the project's spawn retention (`RETENTION_SPAWN_DAYS`), and the
+  input lists nothing references any more are pruned. Tag facet counts are rebuilt for
+  every project that lost builds.
   """
   use Oban.Worker, queue: :maintenance, max_attempts: 3, unique: [period: 3600]
 
   import Ecto.Query
 
-  alias Conveyor.{Invocations, Projects, Repo}
+  alias Conveyor.{ExecLog, Invocations, Projects, Repo}
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Projects.Project
 
@@ -29,11 +31,13 @@ defmodule Conveyor.Workers.BuildRetention do
         deleted = delete_before(project, cutoff, 0)
         if deleted > 0, do: Invocations.rebuild_tag_keys!(project.id)
         Conveyor.Metrics.Rollup.prune!(project.id, cutoff)
-        {project.slug, %{deleted: deleted, cutoff: cutoff}}
+        expired = ExecLog.expire_before(project, ExecLog.retention_cutoff(project, now))
+        {project.slug, %{deleted: deleted, cutoff: cutoff, expired: expired}}
       end
 
     deleted = per_project |> Enum.map(fn {_, r} -> r.deleted end) |> Enum.sum()
-    {:ok, %{deleted: deleted, projects: Map.new(per_project)}}
+    pruned_inputs = ExecLog.prune_orphan_inputs(now)
+    {:ok, %{deleted: deleted, pruned_inputs: pruned_inputs, projects: Map.new(per_project)}}
   end
 
   @doc "Deletes a project's builds that started (or, lacking a start, were inserted) before `cutoff`."

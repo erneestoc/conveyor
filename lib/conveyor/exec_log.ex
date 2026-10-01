@@ -12,16 +12,17 @@ defmodule Conveyor.ExecLog do
   """
   import Ecto.Query
 
-  alias Conveyor.ExecLog.Spawn
+  alias Conveyor.ExecLog.{Spawn, SpawnInput}
+  alias Conveyor.Projects
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
   alias Tools.Protos.ExecLogEntry, as: Entry
 
   @name_re ~r/exec(ution)?[._-]?log/i
-  # Rows carry a compressed input list each (kilobytes to a megabyte for a test's
-  # runfiles): small chunks and generous timeouts keep a modest database (the trial's
-  # db.t3.micro) inside the statement timeout; transient connection errors are retried
-  # rather than charged to the job's attempts.
+  # Input lists are kilobytes to a megabyte each (a test's runfiles): small chunks and
+  # generous timeouts keep a modest database (the trial's db.t3.micro) inside the statement
+  # timeout; transient connection errors are retried rather than charged to the job's
+  # attempts.
   @chunk 100
   @db_timeout :timer.minutes(5)
 
@@ -124,7 +125,7 @@ defmodule Conveyor.ExecLog do
         "files" =>
           Enum.map(outputs, &%{"path" => &1.path, "digest" => &1.digest, "size" => &1.size})
       },
-      inputs_blob:
+      inputs_list:
         inputs
         |> Enum.take(@max_stored_inputs)
         |> Enum.map_join("\n", fn {p, d, _} -> p <> "\t" <> d end)
@@ -251,13 +252,22 @@ defmodule Conveyor.ExecLog do
   end
 
   defp compress(text), do: text |> :zstd.compress() |> IO.iodata_to_binary()
+  defp maybe_decompress(""), do: ""
+  defp maybe_decompress(blob), do: :zstd.decompress(blob)
 
-  @doc "The sorted `{path, digest}` inputs of a stored spawn."
+  @doc "The sorted `{path, digest}` inputs of a stored spawn (its project's shared list)."
   @spec inputs(Spawn.t()) :: [{String.t(), String.t()}]
-  def inputs(%Spawn{id: id}) do
-    blob = Repo.one!(from s in Spawn, where: s.id == ^id, select: s.inputs_blob)
+  def inputs(%Spawn{invocation_id: invocation_id, inputs_digest: digest}) do
+    blob =
+      Repo.one(
+        from si in SpawnInput,
+          join: i in Invocation,
+          on: i.project_id == si.project_id,
+          where: i.id == ^invocation_id and si.digest == ^digest,
+          select: si.blob
+      )
 
-    case blob |> :zstd.decompress() |> IO.iodata_to_binary() do
+    case (blob || "") |> maybe_decompress() |> IO.iodata_to_binary() do
       "" ->
         []
 
@@ -278,17 +288,48 @@ defmodule Conveyor.ExecLog do
     :ok
   end
 
-  @doc "Replaces the invocation's spawns with the parsed ones. Returns the count."
+  @doc """
+  Replaces the invocation's spawns with the parsed ones. Returns the count. The input
+  lists go first, one row per distinct digest, as an upsert that refreshes `touched_at`:
+  `ON CONFLICT DO UPDATE` locks a list that already exists, so orphan pruning (which
+  re-checks references under the same lock) can neither delete it before the spawns that
+  reference it are committed nor miss them (docs/spec/SpawnInputs.tla, `prune_orphan_inputs/2`).
+  """
   @spec store!(Invocation.t(), %{spawns: [spawn()]}) :: non_neg_integer()
-  def store!(%Invocation{id: id} = inv, %{spawns: spawns}) do
+  def store!(%Invocation{id: id, project_id: project_id} = inv, %{spawns: spawns}) do
     now = DateTime.utc_now()
-    rows = Enum.map(spawns, &(Map.put(&1, :invocation_id, id) |> Map.put(:inserted_at, now)))
+
+    lists =
+      spawns
+      |> Enum.map(
+        &%{
+          project_id: project_id,
+          digest: &1.inputs_digest,
+          blob: &1.inputs_list,
+          touched_at: now
+        }
+      )
+      |> Enum.uniq_by(& &1.digest)
+
+    rows =
+      Enum.map(spawns, fn s ->
+        s |> Map.delete(:inputs_list) |> Map.put(:invocation_id, id) |> Map.put(:inserted_at, now)
+      end)
 
     Conveyor.Ingest.Retry.with_backoff(
       fn ->
         Repo.transaction(
           fn ->
             Repo.delete_all(from(s in Spawn, where: s.invocation_id == ^id), timeout: @db_timeout)
+
+            Enum.each(
+              Enum.chunk_every(lists, @chunk),
+              &Repo.insert_all(SpawnInput, &1,
+                on_conflict: [set: [touched_at: now]],
+                conflict_target: [:project_id, :digest],
+                timeout: @db_timeout
+              )
+            )
 
             Enum.each(
               Enum.chunk_every(rows, @chunk),
@@ -304,6 +345,146 @@ defmodule Conveyor.ExecLog do
     )
 
     length(rows)
+  end
+
+  # --- retention -------------------------------------------------------------------------------
+
+  @doc """
+  The spawn retention of a project in days: its own setting, else `RETENTION_SPAWN_DAYS`,
+  never longer than the project's build retention.
+  """
+  @spec retention_days(Projects.Project.t()) :: pos_integer()
+  def retention_days(%Projects.Project{} = project) do
+    builds =
+      Projects.retention_days(project) || Application.get_env(:conveyor, :retention_days, 90)
+
+    spawns =
+      Projects.spawn_retention_days(project) ||
+        Application.get_env(:conveyor, :retention_spawn_days, 30)
+
+    min(spawns, builds)
+  end
+
+  @doc "The moment before which a project's spawns are deleted by retention."
+  @spec retention_cutoff(Projects.Project.t() | integer(), DateTime.t()) :: DateTime.t()
+  def retention_cutoff(project, now \\ DateTime.utc_now())
+
+  def retention_cutoff(%Projects.Project{} = project, now),
+    do: DateTime.add(now, -retention_days(project), :day)
+
+  def retention_cutoff(project_id, now) when is_integer(project_id),
+    do: project_id |> Projects.get_project!() |> retention_cutoff(now)
+
+  @doc """
+  Deletes the spawns of a project's builds that started before `cutoff` and marks those
+  builds' execution log `expired` (the uploaded log stays as an artifact; everything else
+  about the build is untouched). Dashboards keep their numbers: the hourly rollups were
+  computed when the log was parsed and `Conveyor.Metrics.Rollup` freezes spawn sums past
+  this cutoff. Returns the number of builds expired.
+  """
+  @spec expire_before(Projects.Project.t(), DateTime.t()) :: non_neg_integer()
+  def expire_before(%Projects.Project{id: project_id}, cutoff) do
+    ids =
+      Repo.all(
+        from i in Invocation,
+          where: i.project_id == ^project_id and i.exec_log_status == "parsed",
+          where: coalesce(i.started_at, i.inserted_at) < ^cutoff,
+          select: i.id,
+          limit: 500
+      )
+
+    case ids do
+      [] ->
+        0
+
+      ids ->
+        Enum.each(ids, fn id ->
+          Repo.transaction(
+            fn ->
+              Repo.delete_all(from(s in Spawn, where: s.invocation_id == ^id),
+                timeout: @db_timeout
+              )
+
+              Repo.update_all(from(i in Invocation, where: i.id == ^id),
+                set: [exec_log_status: "expired"]
+              )
+            end,
+            timeout: @db_timeout
+          )
+        end)
+
+        length(ids) + expire_before(%Projects.Project{id: project_id}, cutoff)
+    end
+  end
+
+  @doc """
+  Deletes input lists older than `grace` seconds that no spawn references (retention made
+  them orphans). Each candidate is re-checked under its row lock before the delete, so a
+  store that is about to reference it either waits for the lock (its upsert takes it) or
+  is seen by the re-check (docs/spec/SpawnInputs.tla). Returns the number deleted.
+  """
+  @spec prune_orphan_inputs(DateTime.t(), non_neg_integer()) :: non_neg_integer()
+  def prune_orphan_inputs(now \\ DateTime.utc_now(), grace \\ 3600) do
+    cutoff = DateTime.add(now, -grace, :second)
+
+    from(si in SpawnInput, as: :list)
+    |> where([si], si.touched_at < ^cutoff)
+    |> where([si], not exists(referencing_spawns()))
+    |> select([si], {si.project_id, si.digest})
+    |> Repo.all(timeout: @db_timeout)
+    |> Enum.count(fn {project_id, digest} -> delete_input(project_id, digest) == :deleted end)
+  end
+
+  defp referencing_spawns do
+    from s in Spawn,
+      join: i in Invocation,
+      on: i.id == s.invocation_id,
+      where:
+        s.inputs_digest == parent_as(:list).digest and i.project_id == parent_as(:list).project_id,
+      select: 1
+  end
+
+  defp delete_input(project_id, digest) do
+    {:ok, result} =
+      Repo.transaction(
+        fn ->
+          locked =
+            Repo.one(
+              from(si in SpawnInput,
+                where: si.project_id == ^project_id and si.digest == ^digest,
+                lock: "FOR UPDATE"
+              )
+            )
+
+          referenced? =
+            locked != nil and
+              Repo.exists?(
+                from s in Spawn,
+                  join: i in Invocation,
+                  on: i.id == s.invocation_id,
+                  where: s.inputs_digest == ^digest and i.project_id == ^project_id
+              )
+
+          cond do
+            locked == nil ->
+              :gone
+
+            referenced? ->
+              :kept
+
+            true ->
+              Repo.delete_all(
+                from si in SpawnInput,
+                  where: si.project_id == ^project_id and si.digest == ^digest
+              )
+
+              :deleted
+          end
+        end,
+        timeout: @db_timeout
+      )
+
+    result
   end
 
   @spec set_status(Invocation.t(), String.t()) :: :ok

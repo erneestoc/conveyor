@@ -53,6 +53,10 @@ config :conveyor, Oban,
      ]}
   ]
 
+# Execution-log spawns are kept this many days (RETENTION_SPAWN_DAYS in production); the
+# build itself stays for RETENTION_DAYS.
+config :conveyor, retention_spawn_days: 30
+
 # Raw write-behind: finished builds' events and log move to the blob store after
 # `after_hours` (RAW_ARCHIVE_ENABLED, RAW_ARCHIVE_AFTER_HOURS in production).
 config :conveyor, Conveyor.RawArchive, enabled: false, after_hours: 24

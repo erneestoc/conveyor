@@ -62,7 +62,7 @@ build --bes_results_url=https://conveyor.example.com/invocation/
 | `config.BLOB_STORE` | `s3` | `s3` for any replica count; `disk` only with `replicaCount: 1` and `persistence.enabled` |
 | `config.S3_BUCKET`, `config.S3_REGION`, `config.S3_ENDPOINT`, `config.S3_PREFIX` | bucket, `us-east-1`, unset, `blobs` | S3-compatible stores (MinIO, R2) set `S3_ENDPOINT` and `S3_PATH_STYLE=true`; each project stores under `<S3_PREFIX>/<project prefix>/` |
 | `config.DATABASE_SSL`, `config.DATABASE_SSL_CA` | unset | `"true"` verifies PostgreSQL's certificate; point `DATABASE_SSL_CA` at a bundle mounted with `extraVolumes` |
-| `config.RETENTION_DAYS`, `config.RETENTION_RAW_DAYS` | `"90"`, `"14"` | builds and raw event/log segments; projects can shorten retention in Settings |
+| `config.RETENTION_DAYS`, `config.RETENTION_RAW_DAYS`, `config.RETENTION_SPAWN_DAYS` | `"90"`, `"14"`, `"30"` | builds, raw event/log segments and execution-log spawns; projects can shorten retention in Settings |
 | `config.RAW_ARCHIVE_ENABLED`, `config.RAW_ARCHIVE_AFTER_HOURS` | `"false"`, `"24"` | move finished builds' raw events and log from PostgreSQL to the blob store after this many hours (docs/operations.md "Raw archive") |
 | `config.POOL_SIZE` | `"40"` | PostgreSQL connections per pod; `max_connections` ≥ pods × pool + 20 |
 | `config.MAX_STREAMS_PER_KEY`, `config.MAX_EVENTS_PER_SECOND_PER_KEY`, `config.MAX_LOG_MB` | `"500"`, `"5000"`, `"256"` | per-key limits (per pod) |

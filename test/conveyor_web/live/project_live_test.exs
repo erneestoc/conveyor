@@ -70,10 +70,15 @@ defmodule ConveyorWeb.ProjectLiveTest do
     assert [%{name: "ci"}] = Projects.list_api_keys(alpha)
 
     view
-    |> form("#storage-form-#{alpha.id}", %{"retention_days" => "14", "blob_prefix" => ""})
+    |> form("#storage-form-#{alpha.id}", %{
+      "retention_days" => "14",
+      "spawn_retention_days" => "7",
+      "blob_prefix" => ""
+    })
     |> render_submit()
 
     assert Projects.retention_days(Projects.get_project!(alpha.id)) == 14
+    assert Projects.spawn_retention_days(Projects.get_project!(alpha.id)) == 7
 
     view
     |> form("#segment-form-#{alpha.id}", segment: %{name: "CI", query: "ci:true"})

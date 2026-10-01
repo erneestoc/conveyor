@@ -60,17 +60,21 @@ defmodule Conveyor.Projects do
   @max_retention_days 3650
 
   @doc """
-  Sets the project's retention (`"retention_days"`, blank = the global `RETENTION_DAYS`)
-  and blob key prefix (`"blob_prefix"`, blank = the slug). Blobs already stored keep the
-  prefix they were written under, so a change never orphans them.
+  Sets the project's retention (`"retention_days"`, blank = the global `RETENTION_DAYS`),
+  its execution-log retention (`"spawn_retention_days"`, blank = `RETENTION_SPAWN_DAYS`;
+  spawns never outlive their build) and blob key prefix (`"blob_prefix"`, blank = the
+  slug). Blobs already stored keep the prefix they were written under, so a change never
+  orphans them.
   """
   @spec put_storage(Project.t(), map()) :: {:ok, Project.t()} | {:error, String.t()}
   def put_storage(%Project{} = project, attrs) do
     with {:ok, days} <- parse_retention(attrs["retention_days"]),
+         {:ok, spawn_days} <- parse_retention(attrs["spawn_retention_days"]),
          {:ok, prefix} <- parse_prefix(attrs["blob_prefix"]) do
       settings =
         project.settings
         |> put_or_drop("retention_days", days)
+        |> put_or_drop("spawn_retention_days", spawn_days)
         |> put_or_drop("blob_prefix", prefix)
 
       case update_project(project, %{settings: settings}) do
@@ -122,6 +126,11 @@ defmodule Conveyor.Projects do
   @doc "Days this project keeps builds, or nil for the global default."
   @spec retention_days(Project.t()) :: pos_integer() | nil
   def retention_days(%Project{settings: settings}), do: Map.get(settings || %{}, "retention_days")
+
+  @doc "Days this project keeps execution-log spawns, or nil for the global default."
+  @spec spawn_retention_days(Project.t()) :: pos_integer() | nil
+  def spawn_retention_days(%Project{settings: settings}),
+    do: Map.get(settings || %{}, "spawn_retention_days")
 
   @doc """
   The key prefix a project's blobs are stored under (its slug unless overridden). Takes a

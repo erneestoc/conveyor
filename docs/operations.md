@@ -54,7 +54,9 @@ never the build.
 ## Retention and storage
 
 Nightly at 02:00 UTC builds older than `RETENTION_DAYS` (or the project's own retention,
-set in Settings) are deleted in batches per project; hourly the raw segment partitions
+set in Settings) are deleted in batches per project, execution-log spawns older than
+`RETENTION_SPAWN_DAYS` (per project too) are deleted and their builds marked `expired`
+on the Actions tab, and the input lists nothing references any more are pruned; hourly the raw segment partitions
 older than `RETENTION_RAW_DAYS` are dropped and upcoming partitions created; at 03:30
 unpinned blobs older than `CAS_TTL_DAYS` and blobs no remaining build references (their
 builds were retained away) are pruned. All three are Oban jobs; failures retry and show
@@ -154,8 +156,9 @@ boot (`docker logs` / pod logs show "Could not create schema migrations table" w
 database itself is the problem). A node that never finishes draining holds open streams
 longer than `SHUTDOWN_DRAIN_SECONDS`; the balancer's deregistration delay must exceed it.
 
-**Database full or slow**. Retention is the lever: enable the raw archive and lower
-`RETENTION_RAW_DAYS` first (raw events and logs are the bulk), then `RETENTION_DAYS` per project in Settings; run
+**Database full or slow**. Retention is the lever. With execution logs uploaded, spawn
+rows are the bulk (`SELECT pg_total_relation_size('spawns')`): lower `RETENTION_SPAWN_DAYS`.
+Otherwise enable the raw archive and lower `RETENTION_RAW_DAYS` (raw events and logs), then `RETENTION_DAYS` per project in Settings; run
 `VACUUM` on `invocations` if dead tuples exceed a few percent. Growth per build is about
 27 KB compressed for small builds and scales with targets, actions and log size.
 

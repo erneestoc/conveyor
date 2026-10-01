@@ -589,7 +589,20 @@ defmodule ConveyorWeb.InvocationLive do
             <.stat label="Cache hits">{Format.cache_hit_rate(@invocation) || "—"}</.stat>
             <.stat label="Critical path">{Format.duration(@invocation.critical_path_ms)}</.stat>
             <.stat label="Execution log">
-              <span :if={is_nil(@exec_summary)} class="text-base-content/40">—</span>
+              <span
+                :if={is_nil(@exec_summary) and @invocation.exec_log_status == "expired"}
+                id="stat-exec-log-expired"
+                class="text-base-content/50"
+                title="spawns deleted after the project's execution-log retention"
+              >
+                expired
+              </span>
+              <span
+                :if={is_nil(@exec_summary) and @invocation.exec_log_status != "expired"}
+                class="text-base-content/40"
+              >
+                —
+              </span>
               <.link
                 :if={@exec_summary}
                 patch={tab_path(@invocation, "actions")}
@@ -1130,6 +1143,11 @@ defmodule ConveyorWeb.InvocationLive do
       </p>
       <p :if={@status == "available"} id="exec-log-pending" class="text-xs text-base-content/60">
         Execution log uploaded, parsing…
+      </p>
+      <p :if={@status == "expired"} id="exec-log-expired" class="text-xs text-base-content/60">
+        This build's spawns were deleted after the project's execution-log retention
+        (older builds keep their dashboards, targets, tests, log and timeline). The uploaded
+        log is still attached under Details.
       </p>
       <p
         :if={@status == "failed"}

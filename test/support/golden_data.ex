@@ -149,7 +149,6 @@ defmodule Conveyor.GoldenData do
       inputs_digest: inputs,
       outputs_digest: outputs,
       outputs: %{},
-      inputs_blob: "" |> :zstd.compress() |> IO.iodata_to_binary(),
       input_bytes: in_bytes,
       output_bytes: out_bytes,
       inserted_at: row.started_at

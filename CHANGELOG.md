@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Execution-log storage: input lists deduplicated, spawns on their own retention.** A
+  spawn's input list (every path and digest an action read) was copied into each spawn
+  row: on the AWS trial 79 % of 48,030 lists were exact duplicates holding 96 % of the
+  table. Lists now live once per project and digest in `spawn_inputs`, referenced by the
+  spawns; the migration moves existing lists over. Spawns are deleted after
+  `RETENTION_SPAWN_DAYS` (30; per project in Settings → Storage), the build's Actions tab
+  then reads "expired", and dashboards keep their execution-log sums. The store/prune race
+  is modelled in `docs/spec/SpawnInputs.tla`: the list upsert takes the row lock and
+  pruning re-checks references under it.
 - **The raw archive enqueues every due build each run.** A run took one page of 1,000,
   capping the archive at 96k builds a day although one node drains 20–30k an hour
   (measured on the trial); it now walks all due builds with a keyset cursor.

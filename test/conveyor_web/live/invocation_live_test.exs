@@ -115,6 +115,24 @@ defmodule ConveyorWeb.InvocationLiveTest do
     {:ok, view, _} = live(conn, ~p"/invocation/#{newer_id}")
     assert has_element?(view, "#stat-exec-log", "8 ran · 0 cached")
 
+    # Spawns expired by retention: the tab says so and the overview stat reads "expired".
+    older = Conveyor.Invocations.get!(older_id)
+
+    older
+    |> Ecto.Changeset.change(started_at: DateTime.add(DateTime.utc_now(), -40, :day))
+    |> Conveyor.Repo.update!()
+
+    assert Conveyor.ExecLog.expire_before(
+             Conveyor.Projects.get_project!(older.project_id),
+             Conveyor.ExecLog.retention_cutoff(older.project_id)
+           ) == 1
+
+    {:ok, expired_view, _} = live(conn, ~p"/invocation/#{older_id}/actions")
+    assert has_element?(expired_view, "#exec-log-expired")
+    refute has_element?(expired_view, "#exec-log-summary")
+    {:ok, overview, _} = live(conn, ~p"/invocation/#{older_id}")
+    assert has_element?(overview, "#stat-exec-log-expired", "expired")
+
     # Status changes arrive over PubSub (the parse worker broadcasts artifacts_changed).
     Conveyor.ExecLog.set_status(Conveyor.Invocations.get!(failed_id), "available")
     {:ok, view, _} = live(conn, ~p"/invocation/#{failed_id}/actions")

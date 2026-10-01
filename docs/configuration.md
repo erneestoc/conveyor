@@ -45,6 +45,7 @@ shown.
 |---|---|---|
 | `RETENTION_DAYS` | `90` | builds older than this are deleted nightly, with their targets, tests, actions and metrics; a project can set its own days in Settings |
 | `RETENTION_RAW_DAYS` | `14` | raw event and log segments are dropped by daily partition after this |
+| `RETENTION_SPAWN_DAYS` | `30` | execution-log spawns (the per-action rows behind "why did it run?" and the cache reports) are deleted after this and the build's log shows as expired; dashboards keep their sums. Per project in Settings → Storage; never longer than the build retention |
 | `RAW_ARCHIVE_ENABLED` | `false` | move a finished build's raw events and log from PostgreSQL to the blob store (one object each) after `RAW_ARCHIVE_AFTER_HOURS`; see operations "Raw archive" |
 | `RAW_ARCHIVE_AFTER_HOURS` | `24` | how long after a build finishes its raw data moves; `RETENTION_RAW_DAYS` must cover it plus a day (the server refuses to start otherwise) |
 | `CAS_TTL_DAYS` | `14` | uploads through the CAS sink that no build references are pruned after this |

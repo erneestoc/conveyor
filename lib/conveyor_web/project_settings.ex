@@ -158,13 +158,17 @@ defmodule ConveyorWeb.ProjectSettings do
   def handle_event("put_storage", %{"project_id" => project_id} = params, socket) do
     project = authorize!(socket, project_id)
 
-    case Projects.put_storage(project, Map.take(params, ["retention_days", "blob_prefix"])) do
+    case Projects.put_storage(
+           project,
+           Map.take(params, ["retention_days", "spawn_retention_days", "blob_prefix"])
+         ) do
       {:ok, project} ->
         audit(socket, "project.storage",
           subject: {"project", project.id},
           project_id: project.id,
           metadata: %{
             "retention_days" => Projects.retention_days(project),
+            "spawn_retention_days" => Projects.spawn_retention_days(project),
             "blob_prefix" => Projects.blob_prefix(project)
           }
         )

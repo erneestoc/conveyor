@@ -191,6 +191,24 @@ defmodule ConveyorWeb.ProjectSettingsComponents do
         </label>
         <label class="flex flex-col gap-1">
           <span class="text-[11px] text-base-content/60">
+            Keep execution logs for (days; empty = server default {Application.get_env(
+              :conveyor,
+              :retention_spawn_days,
+              30
+            )}; never longer than builds)
+          </span>
+          <input
+            name="spawn_retention_days"
+            type="number"
+            min="1"
+            max="3650"
+            value={Projects.spawn_retention_days(@project)}
+            placeholder={Application.get_env(:conveyor, :retention_spawn_days, 30)}
+            class="w-32 rounded border border-base-300 bg-base-100 px-2 py-1 font-mono"
+          />
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-[11px] text-base-content/60">
             Blob key prefix (profiles, logs and cache uploads live under it; empty = slug)
           </span>
           <input
