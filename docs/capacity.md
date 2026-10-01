@@ -163,6 +163,22 @@ at 250 streams per task. Fixed since: the client gives a silent stream up after
 acknowledged event on a fresh connection (`Conveyor.Bep.Replay`, `--retries`); tasks run
 125 streams each. The rerun of levels 2 and 3 is below.
 
+### Rerun with the fixed generator (2026-10-01, same shape)
+
+Same fleet shape, image `363696a` (then `00ba4a3`/`a0780cd`, see below), one new key per
+task, 125 streams per task, builds paced at one event per 500 ms.
+
+| Run | Generators | Server side | Client side |
+|---|---|---|---|
+| smoke, 50 concurrent builds | 1 task, 2 min | — | 54/54 builds, 0 missing acks, ack p50 79 ms / p99 101 ms / max 320 ms |
+| **5,000 concurrent builds, rolling deploy at minute 2 — first attempt, server failure** | 40 tasks × 125, 15 min | the three replacement nodes were each **killed out of memory two to four times** (BEAM at 7.6 GB on an 8 GB `t4g.large`) while absorbing the drained nodes' resumed streams: one process, the `Phoenix.PubSub` forwarder that receives every other node's broadcasts, held 191k queued messages and 5.9 GB; the writers queued 130k batches behind it. Every acknowledged event was stored (0 missing acks) | 4,728/14,161 builds ok, 9,433 failed after 5 retries, ack p99 17 min: the generator kept a silent stream open as long as its paced sender was active (fixed in `a0780cd`, the deadline follows the oldest unacknowledged event) |
+
+The root cause is a cluster-wide broadcast per build per 250 ms (summary, detail and
+log chunks for every live stream) that no one was watching. Since `00ba4a3`, pages
+subscribe through `Conveyor.Watch` and a worker broadcasts a topic only while some
+process in the cluster watches it (a `:pg` group per topic), so an unwatched stream costs
+no cross-node traffic at all.
+
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 
 | Step | events/s | ack p50 / p99 ms | round trips | RSS per stream | app vCPU | notes |

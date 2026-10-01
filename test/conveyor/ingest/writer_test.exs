@@ -277,6 +277,55 @@ defmodule Conveyor.Ingest.WriterTest do
     end
   end
 
+  @tag :capture_log
+  test "a fenced invocation evicts only itself: the rest of the group commits in one more transaction",
+       %{project: project} do
+    ids = for _ <- 1..6, do: Conveyor.Bep.Replay.uuid()
+
+    for id <- ids,
+        do:
+          Repo.insert!(%Invocation{
+            id: id,
+            project_id: project.id,
+            started_at: DateTime.utc_now()
+          })
+
+    good = for id <- tl(ids), do: batch(id, project, 1, &Batch.add_event(&1, 1, "started", "x"))
+    # Expects last_event_seq 6 on a row that is at 0.
+    fenced = batch(hd(ids), project, 7, &Batch.add_event(&1, 7, "progress", "y"))
+
+    test_pid = self()
+
+    :telemetry.attach(
+      "writer-test-tx-#{hd(ids)}",
+      [:conveyor, :repo, :query],
+      fn _, _, %{query: q}, _ -> if q == "begin", do: send(test_pid, :begin) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("writer-test-tx-#{hd(ids)}") end)
+
+    writer = WriterPool.for_invocation(hd(ids))
+    # One submit per cast, so every batch is pending before the first flush fires.
+    Enum.each([fenced | good], &Writer.submit(writer, &1))
+
+    fenced_ref = fenced.ref
+    assert_receive {:batch_failed, ^fenced_ref, {:fenced, 6}}, 5_000
+
+    for b <- good do
+      ref = b.ref
+      assert_receive {:batch_committed, ^ref}, 5_000
+    end
+
+    # The failed group transaction plus one retry without the fenced invocation, not one
+    # transaction per remaining batch.
+    assert_receive :begin, 1_000
+    assert_receive :begin, 1_000
+    refute_receive :begin, 200
+    assert Repo.get!(Invocation, hd(ids)).last_event_seq == 0
+    for id <- tl(ids), do: assert(Repo.get!(Invocation, id).last_event_seq == 1)
+  end
+
   test "two units of one invocation in a flush are applied in order, in separate statements",
        %{id: id, project: project} do
     first = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))

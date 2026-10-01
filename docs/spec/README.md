@@ -116,6 +116,14 @@ fences, the fallback fails every batch, the clients re-synchronise through dedup
 is lost or duplicated, but the tag counts of that group are never added. Accepted:
 facet counts are approximate by design and `Invocations.rebuild_tag_keys!/1` restores them.
 
+Since 2026-10-01 the implementation's fallback is narrower than the model's: a fenced
+group fails only the fenced invocations' batches (from the fenced sequence on) and commits
+the rest again as one group, instead of redoing every batch alone. Every batch the model
+commits in `Fallback` is still committed or failed-and-resent by the client; the model's
+properties (rows land once and in order, counted tags equal committed batches) are
+unaffected because the change only removes commits from a round. Re-model if the fallback
+ever starts committing batches the group did not contain.
+
 ## Rollup staleness (`Rollup.tla`)
 
 One project-hour, builds changing while the hour is computed. Property `Fresh`: a row that

@@ -32,8 +32,12 @@ defmodule Conveyor.Ingest.Writer do
   alias Conveyor.Repo
 
   defmodule Fenced do
-    @moduledoc "Raised when the invocation row no longer matches the batch's expected sequence."
-    defexception [:invocation_id, :expected]
+    @moduledoc """
+    Raised when an invocation row no longer matches a batch's expected sequence. `units`
+    lists every `{invocation_id, first_seq}` the statement fenced, so a group can be retried
+    without them.
+    """
+    defexception [:invocation_id, :expected, units: []]
 
     def message(e),
       do: "invocation #{e.invocation_id} fenced: last_event_seq is not #{e.expected}"
@@ -90,14 +94,7 @@ defmodule Conveyor.Ingest.Writer do
     pending = Enum.reverse(state.pending)
     started = System.monotonic_time()
 
-    results =
-      case commit_group(pending) do
-        :ok ->
-          Enum.map(pending, fn {batch, from} -> {batch, from, :ok} end)
-
-        {:error, _} ->
-          Enum.map(pending, fn {batch, from} -> {batch, from, commit_single(batch)} end)
-      end
+    results = commit_pending(pending)
 
     Enum.each(results, fn
       {batch, from, :ok} -> send(from, {:batch_committed, batch.ref})
@@ -117,8 +114,41 @@ defmodule Conveyor.Ingest.Writer do
     %{state | pending: [], count: 0, timer: nil}
   end
 
-  # A failure anywhere in the group rolls everything back; the caller then retries batch by
-  # batch so one bad invocation (typically a fenced one) cannot hold up the others.
+  # A failure anywhere in the group rolls everything back. A fenced invocation (a stale
+  # worker: another node took the build over, routine while a balancer moves streams during
+  # a deploy) fails its own batches and the rest of the group is committed again without
+  # it, so a fence costs one extra transaction rather than one per batch: redoing a group of
+  # 256 batches one by one made the writer fall hundreds of thousands of batches behind
+  # during the fleet test's rolling deploy. Any other failure falls back to batch by batch.
+  defp commit_pending(pending) do
+    case commit_group(pending) do
+      :ok ->
+        Enum.map(pending, fn {batch, from} -> {batch, from, :ok} end)
+
+      {:error, %Fenced{units: units}} ->
+        # A fenced unit takes the batches of its invocation from that sequence on with it:
+        # they could not commit before it did, and the worker exits on the first fence.
+        {fenced, rest} =
+          Enum.split_with(pending, fn {b, _} ->
+            Enum.any?(units, fn {id, first} -> b.invocation_id == id and b.first_seq >= first end)
+          end)
+
+        failed =
+          Enum.map(fenced, fn {batch, from} ->
+            :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{
+              invocation_id: batch.invocation_id
+            })
+
+            {batch, from, {:error, {:fenced, batch.first_seq - 1}}}
+          end)
+
+        failed ++ if(rest == [], do: [], else: commit_pending(rest))
+
+      {:error, _} ->
+        Enum.map(pending, fn {batch, from} -> {batch, from, commit_single(batch)} end)
+    end
+  end
+
   # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
   defp commit_group(pending) do
     units = pending |> Enum.map(&elem(&1, 0)) |> Batch.coalesce()
@@ -143,8 +173,8 @@ defmodule Conveyor.Ingest.Writer do
     result
   rescue
     e ->
-      # The group is redone batch by batch; count it, a fenced batch in every flush would
-      # double the write cost silently otherwise.
+      # The group is redone (without the fenced invocations, or batch by batch); count it,
+      # a failure in every flush would raise the write cost silently otherwise.
       :telemetry.execute([:conveyor, :ingest, :writer, :group_failed], %{count: 1}, %{
         batches: length(pending),
         reason: Exception.message(e)
@@ -356,9 +386,15 @@ defmodule Conveyor.Ingest.Writer do
     %{rows: rows} = Repo.query!(sql, params, cache_statement: name)
     updated = MapSet.new(rows, fn [id] -> id end)
 
-    case Enum.find(batches, &(not MapSet.member?(updated, Ecto.UUID.dump!(&1.invocation_id)))) do
-      nil -> :ok
-      b -> raise Fenced, invocation_id: b.invocation_id, expected: b.first_seq - 1
+    case Enum.reject(batches, &MapSet.member?(updated, Ecto.UUID.dump!(&1.invocation_id))) do
+      [] ->
+        :ok
+
+      [b | _] = fenced ->
+        raise Fenced,
+          invocation_id: b.invocation_id,
+          expected: b.first_seq - 1,
+          units: Enum.map(fenced, &{&1.invocation_id, &1.first_seq})
     end
   end
 

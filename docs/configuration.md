@@ -31,7 +31,7 @@ shown.
 | `MAX_LOG_MB` | `256` | log bytes kept per build; the rest is dropped with a marker |
 | `INGEST_BATCH_MAX_EVENTS` | `500` | events per commit batch |
 | `INGEST_BATCH_FLUSH_MS` | `50` | batch age before commit |
-| `INGEST_WRITER_SHARDS` | schedulers | parallel group-commit writers |
+| `INGEST_WRITER_SHARDS` | schedulers | parallel group-commit writers; on a networked database (RDS over TLS) writers mostly wait on round trips, so set 3–4 per vCPU (the trial runs 8 on 2 vCPUs) |
 | `INGEST_WRITER_FLUSH_MS` | `20` | group commit interval |
 | `INGEST_WRITER_MAX_PENDING` | `256` | batches a writer shard commits early instead of waiting for the interval |
 | `INGEST_TAG_FLUSH_MS` | `1000` | tag facet count write interval |

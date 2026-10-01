@@ -62,6 +62,9 @@ variable "allow_cidrs" {
 variable "drain_seconds" { default = 45 }
 # Raw write-behind to the blob store (RAW_ARCHIVE_ENABLED): on in the trial since 2026-09-26.
 variable "raw_archive_enabled" { default = true }
+# Group-commit writers per node. They wait on the database most of the time (a networked
+# PostgreSQL over TLS), so more shards than vCPUs keep more transactions in flight.
+variable "writer_shards" { default = 8 }
 
 data "aws_caller_identity" "me" {}
 data "aws_vpc" "default" { default = true }

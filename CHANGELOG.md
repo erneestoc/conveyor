@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **A fenced batch no longer makes the writer commit its whole group one batch at a
+  time.** Fencing (a stale worker after another node took the build over) is routine while
+  a balancer moves thousands of streams during a deploy; redoing a group of 256 batches in
+  256 transactions each time left the writer hundreds of thousands of batches behind in the
+  fleet test's rolling deploy. The fenced invocation's batches now fail on their own and
+  the rest of the group is committed again in one transaction. The trial's nodes also run
+  eight writer shards (`INGEST_WRITER_SHARDS`): writers mostly wait on a networked
+  database, so more shards than vCPUs keep more transactions in flight.
 - **Live updates are published only for builds somebody is watching.** Every ingest worker
   broadcast its build's summary, detail and log chunks four times a second, and across a
   cluster `Phoenix.PubSub` forwards each message to one process per other node: at about

@@ -87,6 +87,7 @@ docker run -d --name conveyor --restart unless-stopped --network host \
   -e CAS_SINK_ENABLED=true -e POOL_SIZE=40 \
   -e CLUSTER_STRATEGY=ec2 -e CLUSTER_EC2_TAG=conveyor-cluster -e CLUSTER_EC2_TAG_VALUE='${name}' \
   -e SHUTDOWN_DRAIN_SECONDS='${drain_seconds}' -e RAW_ARCHIVE_ENABLED='${raw_archive}' \
+  -e INGEST_WRITER_SHARDS='${writer_shards}' \
   --stop-timeout $(( ${drain_seconds} + 15 )) \
   '${image}'
 
