@@ -10,17 +10,25 @@ key=$(aws ssm get-parameter --region $region --name /$name/api-key --with-decryp
 tf=$(cd "$(dirname "$0")/../deploy/trial" && terraform output -json)
 subnets=$(echo "$tf" | python3 -c "import json,sys; print(','.join(json.load(sys.stdin)['builder_subnets']['value']))")
 sg=$(echo "$tf" | python3 -c "import json,sys; print(json.load(sys.stdin)['builder_sg']['value'])")
-overrides=$(python3 -c "import json,sys; print(json.dumps({'containerOverrides':[{'name':'loadgen','environment':[{'name':'LOADGEN_ARGS','value':sys.argv[1]},{'name':'LOADGEN_API_KEY','value':sys.argv[2]}]}]}))" "$args" "$key")
+# One API key per task (KEYS file, one per line) models many teams: the per-key stream and
+# event-rate limits apply per node, so a single key would be throttled at fleet scale.
+keys=${KEYS:-}; arns=""
+for i in $(seq 1 "$tasks"); do
+  k=$key; [ -n "$keys" ] && k=$(sed -n "${i}p" "$keys")
+  overrides=$(python3 -c "import json,sys; print(json.dumps({'containerOverrides':[{'name':'loadgen','environment':[{'name':'LOADGEN_ARGS','value':sys.argv[1]},{'name':'LOADGEN_API_KEY','value':sys.argv[2]}]}]}))" "$args" "$k")
+  arn=$(aws ecs run-task --region $region --cluster $name-builders --task-definition $name-loadgen --launch-type FARGATE --count 1 \
+    --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$sg],assignPublicIp=ENABLED}" \
+    --overrides "$overrides" --query 'tasks[0].taskArn' --output text)
+  arns="$arns $arn"
+done
 start=$(date -u +%s)
-arns=$(aws ecs run-task --region $region --cluster $name-builders --task-definition $name-loadgen --launch-type FARGATE --count "$tasks" \
-  --network-configuration "awsvpcConfiguration={subnets=[$subnets],securityGroups=[$sg],assignPublicIp=ENABLED}" \
-  --overrides "$overrides" --query 'tasks[].taskArn' --output text)
 echo "$label: $tasks tasks started $(date -u +%T): $args"
-aws ecs wait tasks-stopped --region $region --cluster $name-builders --tasks $arns || true
-aws ecs wait tasks-stopped --region $region --cluster $name-builders --tasks $arns || true
+for group in $(echo $arns | xargs -n 50 | tr ' ' ','); do
+  for attempt in 1 2 3 4 5 6; do aws ecs wait tasks-stopped --region $region --cluster $name-builders --tasks ${group//,/ } && break; done
+done
 echo "stopped $(date -u +%T) after $(( $(date -u +%s) - start )) s"
 aws ecs describe-tasks --region $region --cluster $name-builders --tasks $arns --query 'tasks[].containers[0].[exitCode,reason]' --output text | sort | uniq -c
 for arn in $arns; do
   id=${arn##*/}
-  aws logs get-log-events --region $region --log-group-name /$name/builders --log-stream-name loadgen/loadgen/$id --start-from-head --query 'events[].message' --output text | grep -E "^(builds|events|ack|build) " | sed "s/^/$id: /"
+  aws logs get-log-events --region $region --log-group-name /$name/builders --log-stream-name loadgen/loadgen/$id --start-from-head --query 'events[].message' --output text | tr '\t' '\n' | grep -E "^(builds|events|ack|build) " | sed "s/^/$id: /"
 done

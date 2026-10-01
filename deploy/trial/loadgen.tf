@@ -22,6 +22,10 @@ resource "aws_ecs_task_definition" "loadgen" {
     environment = [
       { name = "LOADGEN_HOSTS", value = "${var.conveyor_host}:1985" },
       { name = "LOADGEN_ARGS", value = "--tls --streams 250 --duration-s 600 --delay-ms 500" },
+      # The release's runtime config insists on these even for `eval`; the generator opens no database.
+      { name = "DATABASE_URL", value = "ecto://none:none@localhost/none" },
+      { name = "SECRET_KEY_BASE", value = "loadgen-no-web-server-loadgen-no-web-server-loadgen-no-web-server-0000" },
+      { name = "PHX_HOST", value = "localhost" },
       { name = "SSM_PREFIX", value = "/${var.name}" },
       { name = "AWS_REGION", value = var.region }
     ]
