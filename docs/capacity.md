@@ -104,6 +104,34 @@ PostgreSQL per build is the row and its normalized tables (targets, tests, actio
 metrics), which `RETENTION_DAYS` governs; raw data now costs the blob store's price
 ($0.023/GB-month on S3) for as long as it is kept, plus two PUTs per build.
 
+**Execution-log storage** (2026-10-01; `bench/spawn_bench.exs`: three real logs
+from the trial, 1,706, 1,404 and 1,969 spawns, each stored as 30 builds of one project,
+native PostgreSQL 17 on the laptop):
+
+| | Lists copied per spawn (`ead53f5^`) | Lists once per project and digest (`ead53f5`) |
+|---|---|---|
+| 90 builds, 152,370 spawns | 10,524 MB, **117 MB per build** | 367 MB (spawns 143 MB + 3,653 lists 224 MB), **4.1 MB per build** |
+| store | 838 ms per build | 123 ms per build |
+| explain (1,706 rows) / one diff | 44 ms / 1 ms | 23 ms / 1 ms |
+| delete the spawns of 45 builds | 45 s | 26 ms |
+| prune 1,706 orphan lists | — | 416 ms |
+| migration over the baseline table (80,130 spawns, 10 GB) | — | 1.5 s (the sort touches only digests; blobs are detoasted for the 1,947 winners) |
+
+Concurrency (`bench/spawn_load.exs`, same logs): 8 writers storing builds as fast as
+they can for 120 s while one task expires two random builds' spawns every 200 ms and
+another prunes orphan lists with no grace period, the worst case `SpawnInputs.tla`
+models: **1,084 builds stored (9.0 per second, about 15,000 spawns/s), 1,074 expired,
+5,700 lists pruned, 0 dangling references, 0 orphans left.** The first run of this test
+deadlocked three writers: logs sharing lists in a different spawn order locked the same
+rows in a different order. Stores now upsert their lists sorted by digest, one global lock
+order (`ExecLog.input_rows/3`, pinned by a test).
+
+The trial's real data before the migration: 48,030 spawns, 10,109 distinct lists, 1,220 MB
+of a 1,518 MB database. What remains per spawn is about 900 bytes of row (label, output
+path, outputs JSON, timings, digests, indexes), so spawn retention (`RETENTION_SPAWN_DAYS`,
+30 by default) bounds the table at days × builds × spawns × 1 KB plus one copy of each
+distinct list in the window.
+
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 
 | Step | events/s | ack p50 / p99 ms | round trips | RSS per stream | app vCPU | notes |

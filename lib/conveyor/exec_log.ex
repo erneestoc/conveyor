@@ -299,17 +299,7 @@ defmodule Conveyor.ExecLog do
   def store!(%Invocation{id: id, project_id: project_id} = inv, %{spawns: spawns}) do
     now = DateTime.utc_now()
 
-    lists =
-      spawns
-      |> Enum.map(
-        &%{
-          project_id: project_id,
-          digest: &1.inputs_digest,
-          blob: &1.inputs_list,
-          touched_at: now
-        }
-      )
-      |> Enum.uniq_by(& &1.digest)
+    lists = input_rows(project_id, spawns, now)
 
     rows =
       Enum.map(spawns, fn s ->
@@ -345,6 +335,22 @@ defmodule Conveyor.ExecLog do
     )
 
     length(rows)
+  end
+
+  @doc """
+  The `spawn_inputs` rows a store upserts: one per distinct digest, **sorted by digest**.
+  Every store locks its lists in the same global order, so two builds sharing lists in a
+  different spawn order cannot deadlock (an 8-writer load test found exactly that before
+  the sort: three transactions each waiting for a row the next one held).
+  """
+  @spec input_rows(integer(), [spawn()], DateTime.t()) :: [map()]
+  def input_rows(project_id, spawns, now) do
+    spawns
+    |> Enum.map(
+      &%{project_id: project_id, digest: &1.inputs_digest, blob: &1.inputs_list, touched_at: now}
+    )
+    |> Enum.uniq_by(& &1.digest)
+    |> Enum.sort_by(& &1.digest)
   end
 
   # --- retention -------------------------------------------------------------------------------

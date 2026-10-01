@@ -157,6 +157,25 @@ defmodule Conveyor.ExecLog.SpawnInputsTest do
     assert Rollup.roll!(project.id, recent.started_at).spawns == 0
   end
 
+  # Two builds sharing lists in a different spawn order would lock them in a different
+  # order and deadlock (found by an 8-writer load test); every store sorts by digest.
+  test "a store upserts its lists once each, in digest order" do
+    spawns = [
+      %{inputs_digest: "b", inputs_list: "B"},
+      %{inputs_digest: "a", inputs_list: "A"},
+      %{inputs_digest: "b", inputs_list: "B"},
+      %{inputs_digest: "c", inputs_list: "C"}
+    ]
+
+    now = DateTime.utc_now()
+    rows = ExecLog.input_rows(7, spawns, now)
+    assert Enum.map(rows, & &1.digest) == ["a", "b", "c"]
+    assert Enum.map(rows, & &1.blob) == ["A", "B", "C"]
+    assert Enum.all?(rows, &(&1.project_id == 7 and &1.touched_at == now))
+    # The same lists in another order lock in the same order.
+    assert ExecLog.input_rows(7, Enum.reverse(spawns), now) == rows
+  end
+
   # docs/spec/SpawnInputs.tla, LockOnUpsert: a store's upsert must hold the list's row
   # lock until it commits, or pruning could delete the list between its re-check and its
   # delete while the store commits a reference. Pinned against Postgres itself with two
