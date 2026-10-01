@@ -86,6 +86,25 @@ checks the object under the lock); blob deletion as in the Blobs round two above
 the model: builds that never finish are never archived and their segments go with the
 partition after `RETENTION_RAW_DAYS`, as before the archive.
 
+## Deduplicated input lists (`SpawnInputs.tla`)
+
+Execution-log input lists are stored once per project and digest (`spawn_inputs`) and
+referenced by spawn rows. One list, two stores (upsert the list, insert the spawns, commit,
+or crash before the commit), retention deleting spawns at any moment, and orphan pruning
+(scan for old unreferenced lists, lock the row, re-check, delete). Property `Intact`: a
+committed spawn always references a list that exists.
+
+| Config | Knobs | Result |
+|---|---|---|
+| `SpawnInputs_fixed.cfg` | the upsert takes the row lock (`ON CONFLICT DO UPDATE`), pruning re-checks under the lock | holds |
+| `SpawnInputs_nolock.cfg` | `ON CONFLICT DO NOTHING` (no lock) | violated in 11 steps: the prune locks and re-checks an orphan, a store commits a new reference, the prune deletes the list |
+| `SpawnInputs_norecheck.cfg` | locked delete that trusts the candidate scan | violated: a reference committed between the scan and the lock is deleted from under |
+
+Implemented in `Conveyor.ExecLog.store!/2` (lists upserted with `DO UPDATE` in the same
+transaction as the spawns) and `prune_orphan_inputs/2` (`FOR UPDATE`, re-check, delete);
+`spawn_inputs_test.exs` pins the Postgres locking behaviour the fixed configuration relies
+on with two connections (`DO UPDATE` blocks a `FOR UPDATE NOWAIT`, `DO NOTHING` does not).
+
 ## Writer group commit (`Writer.tla`)
 
 One shard, two invocations, stale submissions, the group commit with its per-batch
