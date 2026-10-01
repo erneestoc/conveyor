@@ -29,7 +29,7 @@
   "nativelink": {
     "repo": "https://github.com/TraceMachina/nativelink.git",
     "targets": "//:nativelink",
-    "test_targets": "//nativelink-util:...",
+    "test_targets": "//nativelink-util/...",
     "notes": "Rust under remote execution fails on the trial worker image (rules_rust toolchain expects host tools not present on the worker); cache mode works."
   },
   "grpc": {
