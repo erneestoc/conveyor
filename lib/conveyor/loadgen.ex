@@ -49,11 +49,27 @@ defmodule Conveyor.Loadgen do
         fn {i, file} ->
           if jitter > 0, do: Process.sleep(:rand.uniform(jitter))
 
+          # Like Bazel after a failed upload, the client retries the same invocation (same
+          # ids, resumed from the last ack) against the next host, so a build whose node
+          # died mid-stream finishes on another node.
           replay_opts =
-            Keyword.take(opts, [:api_key, :delay_ms, :drop_after, :duplicate_every, :tls]) ++
-              [invocation_id: Replay.uuid(), build_id: Replay.uuid()]
+            Keyword.take(opts, [
+              :api_key,
+              :delay_ms,
+              :drop_after,
+              :duplicate_every,
+              :tls,
+              :ack_timeout_ms
+            ]) ++
+              [
+                hosts: hosts,
+                host_offset: i,
+                retries: retries,
+                invocation_id: Replay.uuid(),
+                build_id: Replay.uuid()
+              ]
 
-          result = run_with_retries(events_by_file[file], replay_opts, hosts, i, retries)
+          result = Replay.run(events_by_file[file], replay_opts)
           on_build.(result)
           {file, result}
         end,
@@ -65,25 +81,6 @@ defmodule Conveyor.Loadgen do
 
     elapsed_ms = max(System.monotonic_time(:millisecond) - started, 1)
     summarize(results, elapsed_ms, streams)
-  end
-
-  # Like Bazel after a failed upload: retry the same invocation (same ids, full resend, the
-  # server acks what it already has) against the next host, with a short backoff. A build
-  # whose node died mid-stream therefore finishes on another node.
-  defp run_with_retries(events, replay_opts, hosts, i, retries, attempt \\ 0) do
-    {host, port} = Enum.at(hosts, rem(i + attempt, length(hosts)))
-
-    case Replay.run(events, [host: host, port: port] ++ replay_opts) do
-      {:ok, result} ->
-        {:ok, Map.put(result, :attempts, attempt + 1)}
-
-      {:error, _reason} when attempt < retries ->
-        Process.sleep(200 * (attempt + 1))
-        run_with_retries(events, replay_opts, hosts, i, retries, attempt + 1)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
   end
 
   # Cycles through the fixtures; with a deadline the plan is lazy and stops when time is up.

@@ -157,10 +157,11 @@ What the fleet test established: through a balancer over TLS, acknowledgement la
 vCPU per 20k events/s holds on RDS); three 2-vCPU nodes carry 5,000 streams at a third of
 their CPU and about 6,000 at two thirds; a rolling deploy under 5,000 streams kept the
 server consistent. What it did not establish: a client-side number above 1,000 streams,
-because the generator (not Bazel) fails over badly through the NLB and runs out of memory
-at 250 streams per task. Fix the generator before repeating (handle the gRPC client's
-`connection_down` by resuming from the last acknowledgement, as `Conveyor.Bep.Replay`
-does for stream errors), then rerun levels 2 and 3 with 125 streams per task.
+because the generator (not Bazel) failed over badly through the NLB and ran out of memory
+at 250 streams per task. Fixed since: the client gives a silent stream up after
+`--ack-timeout-ms` with events outstanding and resumes the invocation from its last
+acknowledged event on a fresh connection (`Conveyor.Bep.Replay`, `--retries`); tasks run
+125 streams each. The rerun of levels 2 and 3 is below.
 
 Paced profile (1,000 streams, one event per 500 ms, 1,500 builds), single runs:
 

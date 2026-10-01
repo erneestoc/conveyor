@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The load generator survives a lost connection the way Bazel does.** Its BES client
+  (`Conveyor.Bep.Replay`, behind `mix conveyor.loadgen` and the fleet tasks) gives a stream
+  up when no acknowledgement arrives for `--ack-timeout-ms` (30 s) while events are
+  outstanding, then resumes the same invocation from the last acknowledged event on a fresh
+  connection to the next host, up to `--retries` times. Before, a connection that died
+  silently behind a balancer hung the build forever, and a retry resent it from the first
+  event. Found by the fleet test's rolling-deploy level.
 - **Execution-log storage: input lists deduplicated, spawns on their own retention.** A
   spawn's input list (every path and digest an action read) was copied into each spawn
   row: on the AWS trial 79 % of 48,030 lists were exact duplicates holding 96 % of the

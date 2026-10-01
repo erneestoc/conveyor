@@ -5,9 +5,13 @@ defmodule Conveyor.Loadgen.CLI do
       bes_loadgen --hosts localhost:1985,localhost:1986 --api-key KEY \\
         --fixtures 'test/fixtures/bep/*.bep' --streams 200 --builds 2000 \\
         [--duration-s 300] [--delay-ms 0] [--jitter-ms 100] [--drop-after 20] \\
-        [--duplicate-every 10] [--retries 3] [--report out.json] [--verify] [--tls]
+        [--duplicate-every 10] [--retries 3] [--ack-timeout-ms 30000] [--report out.json] \\
+        [--verify] [--tls]
 
   `--tls` dials `grpcs://` with the system CA store (a TLS balancer or Caddy in front).
+  `--retries` resumes a build from its last acknowledged event on a fresh connection to the
+  next host, as Bazel does; `--ack-timeout-ms` is how long a stream may stay silent with
+  events outstanding before the connection is given up.
 
   Exit status is non-zero when any build failed or any ack went missing.
   """
@@ -24,6 +28,7 @@ defmodule Conveyor.Loadgen.CLI do
     drop_after: :integer,
     duplicate_every: :integer,
     retries: :integer,
+    ack_timeout_ms: :integer,
     report: :string,
     verify: :boolean,
     tls: :boolean,
@@ -53,6 +58,7 @@ defmodule Conveyor.Loadgen.CLI do
       drop_after: opts[:drop_after],
       duplicate_every: opts[:duplicate_every],
       retries: opts[:retries] || 0,
+      ack_timeout_ms: opts[:ack_timeout_ms] || 30_000,
       api_key: opts[:api_key],
       tls: opts[:tls] || false
     ]

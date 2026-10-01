@@ -21,7 +21,8 @@ resource "aws_ecs_task_definition" "loadgen" {
     command   = ["bin/conveyor", "eval", "Conveyor.Loadgen.Fleet.main()"]
     environment = [
       { name = "LOADGEN_HOSTS", value = "${var.conveyor_host}:1985" },
-      { name = "LOADGEN_ARGS", value = "--tls --streams 250 --duration-s 600 --delay-ms 500" },
+      # 125 streams per 8 GB task: 250 ran out of memory (bench/fleet.sh overrides this).
+      { name = "LOADGEN_ARGS", value = "--tls --streams 125 --duration-s 600 --delay-ms 500 --retries 5" },
       # The release's runtime config insists on these even for `eval`; the generator opens no database.
       { name = "DATABASE_URL", value = "ecto://none:none@localhost/none" },
       { name = "SECRET_KEY_BASE", value = "loadgen-no-web-server-loadgen-no-web-server-loadgen-no-web-server-0000" },
