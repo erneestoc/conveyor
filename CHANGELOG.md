@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **A watched builds list no longer floods its viewer's node.** With live updates gated on
+  viewers, opening a project's builds list during the fleet test made every one of its
+  5,000 workers send the full build summary (tens of KB of options and workspace status)
+  four times a second to the node serving that page, which was killed out of memory within
+  a minute. List-level messages now carry only the row's columns, the list applies a burst
+  of updates in one pass (last message per build wins), and it keeps at most 500 rows in
+  the page.
 - **A fenced batch no longer makes the writer commit its whole group one batch at a
   time.** Fencing (a stale worker after another node took the build over) is routine while
   a balancer moves thousands of streams during a deploy; redoing a group of 256 batches in

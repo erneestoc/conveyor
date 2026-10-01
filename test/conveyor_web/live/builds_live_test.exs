@@ -98,6 +98,35 @@ defmodule ConveyorWeb.BuildsLiveTest do
     )
 
     assert has_element?(view, "#inv-#{new_id} [data-status=succeeded]")
+
+    # A burst of updates is coalesced into one pass: the last message per build wins and
+    # the page keeps serving; new builds beyond the row cap do not grow the DOM.
+    burst_ids = for _ <- 1..600, do: Conveyor.Bep.Replay.uuid()
+
+    for id <- burst_ids do
+      Phoenix.PubSub.broadcast(
+        Conveyor.PubSub,
+        Ingest.all_topic(),
+        {:invocation_updated, %{summary | id: id, status: "in_progress"}}
+      )
+    end
+
+    rows =
+      render(view) |> LazyHTML.from_fragment() |> LazyHTML.filter("[id^=inv-]") |> Enum.count()
+
+    assert rows <= 500
+
+    late = Conveyor.Bep.Replay.uuid()
+
+    for status <- ["in_progress", "failed", "succeeded"] do
+      Phoenix.PubSub.broadcast(
+        Conveyor.PubSub,
+        Ingest.all_topic(),
+        {:invocation_updated, %{summary | id: late, status: status}}
+      )
+    end
+
+    assert has_element?(view, "#inv-#{late} [data-status=succeeded]")
   end
 
   test "loads more pages", %{conn: conn, ctx: ctx} do

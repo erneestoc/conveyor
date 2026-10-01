@@ -142,8 +142,27 @@ defmodule ConveyorWeb.BuildsLive do
     {:noreply, assign(socket, show_facets: not socket.assigns.show_facets)}
   end
 
+  # Under thousands of live builds, updates arrive faster than a page can render them:
+  # everything queued is taken in one pass, the last message per build wins, one render.
   @impl true
   def handle_info({:invocation_updated, summary}, socket) do
+    updates = drain_updates(%{summary.id => summary})
+    {:noreply, Enum.reduce(Map.values(updates), socket, &apply_update/2)}
+  end
+
+  defp drain_updates(acc) do
+    receive do
+      {:invocation_updated, summary} -> drain_updates(Map.put(acc, summary.id, summary))
+    after
+      0 -> acc
+    end
+  end
+
+  # The DOM keeps at most @max_rows rows: a burst of new builds must not grow the page
+  # without bound (the first level of the fleet test did).
+  @max_rows @page_size * 10
+
+  defp apply_update(summary, socket) do
     inv = to_invocation(summary)
 
     matches? =
@@ -155,28 +174,26 @@ defmodule ConveyorWeb.BuildsLive do
 
     cond do
       matches? and known? ->
-        {:noreply, stream_insert(socket, :invocations, inv)}
+        stream_insert(socket, :invocations, inv)
 
       matches? ->
-        {:noreply,
-         socket
-         |> assign(
-           known: MapSet.put(socket.assigns.known, inv.id),
-           count: socket.assigns.count + 1
-         )
-         |> stream_insert(:invocations, inv, at: 0)}
+        socket
+        |> assign(
+          known: MapSet.put(socket.assigns.known, inv.id),
+          count: socket.assigns.count + 1
+        )
+        |> stream_insert(:invocations, inv, at: 0, limit: @max_rows)
 
       known? ->
-        {:noreply,
-         socket
-         |> assign(
-           known: MapSet.delete(socket.assigns.known, inv.id),
-           count: max(socket.assigns.count - 1, 0)
-         )
-         |> stream_delete(:invocations, inv)}
+        socket
+        |> assign(
+          known: MapSet.delete(socket.assigns.known, inv.id),
+          count: max(socket.assigns.count - 1, 0)
+        )
+        |> stream_delete(:invocations, inv)
 
       true ->
-        {:noreply, socket}
+        socket
     end
   end
 

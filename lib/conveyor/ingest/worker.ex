@@ -16,6 +16,9 @@ defmodule Conveyor.Ingest.Worker do
   alias Conveyor.Ingest
   alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, WriterPool}
   alias Conveyor.Watch
+
+  # Columns a worker holds only until the build is finalized and never puts on list topics.
+  @wide_columns [:options, :workspace_status, :configurations]
   alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -546,7 +549,11 @@ defmodule Conveyor.Ingest.Worker do
     project_id = state.ctx.project_id
 
     if dirty.summary do
-      summary = summary(state.norm, state)
+      # List pages render a row per build: the wide columns (options, workspace status,
+      # configurations) are tens of KB each and stay out of list-level messages. With a
+      # watched project of thousands of live builds, every worker's tick lands on the
+      # viewer's node (fleet test: a 16 GB node killed within a minute).
+      summary = state.norm |> summary(state) |> Map.drop(@wide_columns)
 
       Watch.broadcast(Ingest.project_topic(project_id), {:invocation_updated, summary})
       Watch.broadcast(Ingest.all_topic(), {:invocation_updated, summary})
@@ -573,8 +580,6 @@ defmodule Conveyor.Ingest.Worker do
 
     %{state | dirty: fresh_dirty()}
   end
-
-  @wide_columns [:options, :workspace_status, :configurations]
 
   defp slim(%{finalized: true} = state),
     do: update_in(state.norm.inv, &Map.drop(&1, @wide_columns))
