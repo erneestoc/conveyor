@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **Seeding is as fast as ingest.** `Conveyor.Seed` pushed every event and waited for its
+  commit, which took minutes per real build against a networked database and tripped a
+  two-minute limit per build; it now streams a build's events the way the gRPC handler
+  does and waits for the last acknowledgement, with no per-build limit.
 - **A watched builds list no longer floods its viewer's node.** With live updates gated on
   viewers, opening a project's builds list during the fleet test made every one of its
   5,000 workers send the full build summary (tens of KB of options and workspace status)
