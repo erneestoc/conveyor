@@ -88,7 +88,7 @@ defmodule Conveyor.Bep.ReplayTest do
           port: port,
           api_key: key,
           invocation_id: id,
-          delay_ms: 20,
+          delay_ms: 50,
           ack_timeout_ms: 300,
           retries: 2
         )
@@ -96,9 +96,11 @@ defmodule Conveyor.Bep.ReplayTest do
 
     suspend_worker_once_live(id)
 
+    # The sender keeps pacing events for seconds after the acks stop; the deadline must
+    # follow the oldest unacknowledged event, not the sender's activity.
     assert_receive {:reconnect, %{attempt: 1},
                     %{invocation_id: ^id, reason: {:stream_closed, :ack_timeout}, from_seq: from}},
-                   5_000
+                   2_000
 
     assert from > 1
 
@@ -121,13 +123,13 @@ defmodule Conveyor.Bep.ReplayTest do
           port: port,
           api_key: key,
           invocation_id: id,
-          delay_ms: 20,
+          delay_ms: 50,
           ack_timeout_ms: 200
         )
       end)
 
     worker = suspend_worker_once_live(id)
-    assert {:error, {:stream_closed, :ack_timeout}} = Task.await(task, 30_000)
+    assert {:error, {:stream_closed, :ack_timeout}} = Task.await(task, 2_000)
 
     :ok = :sys.resume(worker)
     ref = Process.monitor(worker)

@@ -265,7 +265,7 @@ defmodule Conveyor.Bep.Replay do
     receiver = spawn_link(fn -> receive_loop(stream, parent, ref) end)
 
     wait = %{timeout: conn.run.ack_timeout, last_seq: length(conn.run.events) + 1, ref: ref}
-    result = await_acks(st, %{}, false, wait)
+    result = await_acks(st, %{}, nil, wait)
 
     for pid <- [sender, receiver] do
       Process.unlink(pid)
@@ -330,18 +330,18 @@ defmodule Conveyor.Bep.Replay do
   end
 
   # Collects acks (in order, with the client-observed latency of each first ack) until the
-  # server ends the stream. The wait is unbounded only while nothing is outstanding and the
-  # sender is still pacing events; once an event is in flight, or everything was sent and
-  # the stream has not ended, silence for `timeout` means the connection is gone. Acks are
-  # contiguous, so `from_seq` after the last one is where a resume starts.
-  defp await_acks(st, pending, sender_done?, %{ref: ref} = wait) do
-    timeout = if map_size(pending) > 0 or sender_done?, do: wait.timeout, else: :infinity
-
+  # server ends the stream. The oldest unacknowledged event sets the deadline: once it has
+  # waited `timeout` the connection is treated as gone, however many events the paced
+  # sender keeps writing meanwhile (a stream whose acks stopped must not live on for as
+  # long as the build). With nothing outstanding the wait is unbounded while the sender is
+  # still pacing, and `timeout` from the moment it finished otherwise. Acks are contiguous,
+  # so `from_seq` after the last one is where a resume starts.
+  defp await_acks(st, pending, sender_done_at, %{ref: ref} = wait) do
     receive do
       {^ref, :sent, seq, t0} ->
         # The first send timestamp per sequence number wins (a duplicate resend must not
         # shorten the measured latency).
-        await_acks(st, Map.put_new(pending, seq, t0), sender_done?, wait)
+        await_acks(st, Map.put_new(pending, seq, t0), sender_done_at, wait)
 
       {^ref, :ack, seq, t} ->
         {latencies, pending} =
@@ -357,10 +357,10 @@ defmodule Conveyor.Bep.Replay do
             from_seq: max(st.from_seq, seq + 1)
         }
 
-        await_acks(st, pending, sender_done?, wait)
+        await_acks(st, pending, sender_done_at, wait)
 
       {^ref, :sender_done} ->
-        await_acks(st, pending, true, wait)
+        await_acks(st, pending, System.monotonic_time(:microsecond), wait)
 
       {^ref, :recv_done} ->
         {:ok, st}
@@ -368,12 +368,26 @@ defmodule Conveyor.Bep.Replay do
       {^ref, :recv_error, reason} ->
         {:error, reason, st}
     after
-      timeout ->
+      remaining_ms(pending, sender_done_at, wait.timeout) ->
         # Every event acknowledged but the server never ended the stream: the build is
         # stored, and resending only the finish marker would make no sense.
         if pending == %{} and st.from_seq > wait.last_seq,
           do: {:ok, st},
           else: {:error, {:stream_closed, :ack_timeout}, st}
+    end
+  end
+
+  defp remaining_ms(pending, sender_done_at, timeout) do
+    since =
+      cond do
+        map_size(pending) > 0 -> pending |> Map.values() |> Enum.min()
+        sender_done_at -> sender_done_at
+        true -> nil
+      end
+
+    case since do
+      nil -> :infinity
+      t0 -> max(div(t0 - System.monotonic_time(:microsecond), 1000) + timeout, 0)
     end
   end
 
