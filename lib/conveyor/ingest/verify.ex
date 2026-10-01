@@ -64,10 +64,12 @@ defmodule Conveyor.Ingest.Verify do
     |> check(not log_chain?(logs), {:log_offsets_broken, logs})
   end
 
+  # Segments are partitioned by the build's day: without it every partition is scanned
+  # (50 s per build on a 10 GB day during the fleet test).
   defp event_segments(inv) do
     Repo.all(
       from s in EventSegment,
-        where: s.invocation_id == ^inv.id,
+        where: s.invocation_id == ^inv.id and s.day == ^Invocations.day(inv),
         order_by: s.first_seq,
         select: {s.first_seq, s.last_seq, s.count}
     )
@@ -76,7 +78,7 @@ defmodule Conveyor.Ingest.Verify do
   defp log_segments(inv) do
     Repo.all(
       from s in LogSegment,
-        where: s.invocation_id == ^inv.id,
+        where: s.invocation_id == ^inv.id and s.day == ^Invocations.day(inv),
         order_by: s.first_seq,
         select: {s.byte_offset, s.byte_size, s.line_offset, s.line_count}
     )
