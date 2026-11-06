@@ -784,3 +784,51 @@ Order: 0, 1, 2, 6, 3, 5, 4, 7 — the first three are Postgres, the visible limi
 - **7 connection budget — deferred:** Postgrex does not pipeline; pool per shard has no
   measured motivation while Postgres sits under 1 vCPU.
 
+## 25. Keeping the database off the critical path (agreed 2026-11-05)
+
+Where the limit is today (fleet test, docs/capacity.md "Rerun"): a `db.m6g.xlarge` carried
+5,000 paced real builds (≈ 10k events/s) at 58 % CPU and 1,000 write IOPS while three
+4-vCPU nodes sat at 54 %. The cost per event on the database is dominated by raw bytes:
+≈ 730 WAL bytes and one `event_segments` row per flush, and on paced builds a flush was
+one event (50 ms hold). Three steps, each with a measured trigger:
+
+1. **Hold batches longer (now).** `batch_flush_ms` 50 → 2000: full batches and the end of a
+   stream commit at once, so build completion is unchanged; mid-build acks wait up to
+   two seconds, which Bazel does not wait on. Measured below: at one event per 500 ms the
+   hold sets events per batch (≈ hold / pacing), so 2 s halves the database's transactions
+   and round trips and 5 s halves them again; the 10× guess was wrong by the pacing. Also run the database on
+   a class without metered IOPS (Aurora I/O-Optimized or gp3 with provisioned IOPS).
+   Target after this step: 50k+ events/s sustained on one 8–16 vCPU instance.
+2. **Raw bytes out of the commit path (when the target is above ≈ 50k events/s sustained).**
+   Writer shards append many streams' batches into S3 objects every ≈ 1 s (zstd with the
+   BEP dictionary, 1–5 MB each) and acknowledge on PUT (cross-AZ durable, p50 ≈ 50–150 ms
+   expected). Postgres keeps the invocation row (fencing and dedup unchanged), the derived
+   rows and a byte-range index per flush. `ArchiveRaw` compacts shard objects into the
+   per-build objects the Events tab and log viewer already read. Cost scales with PUTs
+   (≈ 140/s at 1M events/s in 5 MB objects, ≈ $60/day) and storage (≈ $2.3k/month for 14
+   days compressed), not with events; Kinesis/MSK carry the same bytes for 10–20×, DynamoDB
+   for 1,000×. Deliverables: `Archive.tla` extended (every event is in the shard log or the
+   build object), `RAW_LOG=s3` behind a flag with Postgres segments as the default, bench of
+   ack latency under group commit, fleet level 2 on the new path, oracle byte-identical.
+3. **Shard metadata by project group (hundreds of thousands of events/s).** Every read is
+   project-scoped and blobs are prefixed per project, so a "project group → database"
+   router in front of `Conveyor.Repo` is contained; the few cross-project views merge over
+   shards. Aurora Limitless is the managed alternative.
+
+Invariants kept at every step: durable before ack, fencing as a compare-and-set on the
+invocation row, `Verify.check/2` byte-identical before and after.
+
+### Measurements (2026-11-05)
+
+Laptop (`bench/run.sh --profile paced`, 1,000 streams, one event per 500 ms, 1,500 fixture
+builds, native PostgreSQL 17), one run each, oracle green on all:
+
+| hold | WAL/event | storage/build | xact/s | round trips | events/flush | ack p50 / p99 |
+|---|---|---|---|---|---|---|
+| 50 ms | 2,331 B | 50.9 KB | 302 | 91,400 | 4.4 | 69 ms / 2.0 s |
+| 1 s | 1,596 B | 39.7 KB | 235 | 72,286 | 6.2 | 0.5 s / 1.0 s |
+| 2 s (default) | 1,419 B | 37.2 KB | 171 | 47,880 | 10.6 | 1.0 s / 2.1 s |
+| 5 s | 982 B | 33.6 KB | 125 | 28,401 | 21.4 | 2.5 s / 5.1 s |
+
+Trial (3 × `t4g.xlarge`, `db.m6g.xlarge`, 5,000 paced real builds, 10 min): _(below)_
+

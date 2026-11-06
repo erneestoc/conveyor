@@ -98,8 +98,10 @@ defmodule Conveyor.Metrics.RollupTest do
     assert Rollup.prune!(project.id, DateTime.add(@now, 1, :day)) > 0
     assert Rollup.prune!(project.id, DateTime.add(@now, 1, :day)) == 0
 
-    # The worker rolls the recent window.
-    assert {:ok, n} = perform_job(Conveyor.Workers.Rollup, %{"days" => 30})
+    # The worker rolls the recent window; the golden data sits at @now, so the window must
+    # reach back to it whatever today's date is.
+    days = DateTime.diff(DateTime.utc_now(), @now, :day) + 31
+    assert {:ok, n} = perform_job(Conveyor.Workers.Rollup, %{"days" => days})
     assert n > 0
   end
 

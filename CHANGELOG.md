@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Batches wait two seconds for more events (`INGEST_BATCH_FLUSH_MS` 50 → 2000).** A real
+  build sends an event every few hundred milliseconds, so a 50 ms hold committed one
+  segment row and one fenced invocation update per event: at 5,000 concurrent builds that
+  was 1,000 write IOPS and 10 GB of segments a day on the trial. Full batches and the end
+  of a stream still commit immediately; only mid-build acknowledgement latency is bounded
+  by the hold, which Bazel never waits on. Laptop, 1,000 paced streams: transactions/s 302 → 171, round trips −48 %, WAL per event −39 %; 5000 roughly halves that again (PLAN §25).
 - **Seeding is as fast as ingest.** `Conveyor.Seed` pushed every event and waited for its
   commit, which took minutes per real build against a networked database and tripped a
   two-minute limit per build; it now streams a build's events the way the gRPC handler

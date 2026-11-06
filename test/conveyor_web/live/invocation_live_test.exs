@@ -122,6 +122,11 @@ defmodule ConveyorWeb.InvocationLiveTest do
     |> Ecto.Changeset.change(started_at: DateTime.add(DateTime.utc_now(), -40, :day))
     |> Conveyor.Repo.update!()
 
+    # The fixtures carry their recording date; keep the newer build inside retention.
+    Conveyor.Invocations.get!(newer_id)
+    |> Ecto.Changeset.change(started_at: DateTime.utc_now())
+    |> Conveyor.Repo.update!()
+
     assert Conveyor.ExecLog.expire_before(
              Conveyor.Projects.get_project!(older.project_id),
              Conveyor.ExecLog.retention_cutoff(older.project_id)

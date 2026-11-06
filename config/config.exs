@@ -21,7 +21,10 @@ config :conveyor, Conveyor.Ingest,
   linger_ms: 30_000,
   batch_max_events: 500,
   batch_max_bytes: 256 * 1024,
-  batch_flush_ms: 50,
+  # A batch waits this long for more events before it is committed (large batches and the
+  # end of a stream commit at once): on paced real builds a short hold meant one segment
+  # row and one fenced update per event (PLAN §25).
+  batch_flush_ms: 2000,
   writer_shards: System.schedulers_online(),
   writer_flush_ms: 20,
   # a shard flushes early once this many batches wait; otherwise after writer_flush_ms
