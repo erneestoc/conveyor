@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **The raw log (`RAW_LOG=blob`, off by default): raw bytes leave the database's commit
+  path.** In blob mode a writer shard puts each group commit's compressed event and log
+  bytes into one object in the blob store (S3 or disk) and the segment rows keep a byte
+  range; acknowledgements follow the object write and the commit, readers fetch by range,
+  the archive compacts as before, and a daily sweep deletes objects older than the raw
+  retention plus a day (objects are registered before they are written, so no listing and
+  no orphans). Mid-build acks wait up to `RAW_LOG_FLUSH_MS` (1 s) more. PLAN §25 step 2.
 - **Batches wait two seconds for more events (`INGEST_BATCH_FLUSH_MS` 50 → 2000).** A real
   build sends an event every few hundred milliseconds, so a 50 ms hold committed one
   segment row and one fenced invocation update per event: at 5,000 concurrent builds that

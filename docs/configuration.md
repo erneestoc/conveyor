@@ -30,6 +30,8 @@ shown.
 | `MAX_EVENTS_PER_SECOND_PER_KEY` | `5000` | senders above it are slowed, never failed |
 | `MAX_LOG_MB` | `256` | log bytes kept per build; the rest is dropped with a marker |
 | `INGEST_BATCH_MAX_EVENTS` | `500` | events per commit batch |
+| `RAW_LOG` | `postgres` | `blob`: the writer puts each group commit's raw event and log bytes into one object in the blob store (`BLOB_STORE`) and the segment rows keep only a byte range, so the database carries metadata and small index rows; acks follow the object write and the commit (PLAN §25 step 2) |
+| `RAW_LOG_FLUSH_MS` | `1000` | in blob mode, how long a writer shard collects batches before writing one object: about `INGEST_WRITER_SHARDS` objects per second per node whatever the event rate; mid-build acks wait up to `INGEST_BATCH_FLUSH_MS` plus this |
 | `INGEST_BATCH_FLUSH_MS` | `2000` | how long a batch waits for more events before it is committed; full batches and the end of a stream commit at once, so this bounds mid-build acknowledgement latency, not build completion. Was 50 (one row and one update per event on paced builds); 5000 halves the database's work again on large fleets of paced builds (PLAN §25) |
 | `INGEST_WRITER_SHARDS` | schedulers | parallel group-commit writers; on a networked database (RDS over TLS) writers mostly wait on round trips, so set 3–4 per vCPU (the trial runs 8 on 2 vCPUs) |
 | `INGEST_WRITER_FLUSH_MS` | `20` | group commit interval |

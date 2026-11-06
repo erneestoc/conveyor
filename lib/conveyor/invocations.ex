@@ -208,10 +208,15 @@ defmodule Conveyor.Invocations do
     from(s in EventSegment,
       where: s.invocation_id == ^id and s.day == ^day(inv),
       order_by: s.first_seq,
-      select: s.payload
+      select: map(s, ^[:payload | Conveyor.RawLog.object_fields()])
     )
     |> Repo.all()
-    |> Enum.flat_map(&(&1 |> decompress() |> Fixture.frames()))
+    |> Enum.flat_map(
+      &(&1
+        |> Conveyor.RawLog.bytes!(:payload)
+        |> decompress()
+        |> Fixture.frames())
+    )
   end
 
   @doc "The full build log as one string (stdout and stderr interleaved as received)."
@@ -243,10 +248,10 @@ defmodule Conveyor.Invocations do
       from(s in LogSegment,
         where: s.invocation_id == ^id and s.day == ^day and s.first_seq in ^seqs,
         order_by: s.first_seq,
-        select: s.data
+        select: map(s, ^[:data | Conveyor.RawLog.object_fields()])
       )
       |> Repo.all()
-      |> Enum.map(&decompress/1)
+      |> Enum.map(&(&1 |> Conveyor.RawLog.bytes!(:data) |> decompress()))
     end)
   end
 

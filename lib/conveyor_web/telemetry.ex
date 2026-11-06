@@ -65,6 +65,14 @@ defmodule ConveyorWeb.Telemetry do
         description: "Live ingest workers (invocations in flight)"
       ),
       last_value("conveyor.ingest.streams.count", description: "Open BES streams"),
+      counter("conveyor.raw_log.put.count", description: "Raw-log objects written (blob mode)"),
+      sum("conveyor.raw_log.put.bytes", description: "Raw-log bytes written (blob mode)"),
+      counter("conveyor.raw_log.put_failed.count",
+        description: "Raw-log object writes that failed"
+      ),
+      counter("conveyor.raw_log.sweep_failed.count",
+        description: "Raw-log objects the sweep could not delete"
+      ),
       counter("conveyor.ingest.fenced.count",
         description: "Batch commits fenced by another node's write to the same invocation"
       ),

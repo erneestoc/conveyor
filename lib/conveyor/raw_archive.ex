@@ -216,9 +216,9 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(EventSegment, [:count, :payload])
-      |> Stream.map(fn %{count: count, payload: payload} ->
-        data = Invocations.decompress(payload)
+      |> segment_rows(EventSegment, [:count, :payload | Conveyor.RawLog.object_fields()])
+      |> Stream.map(fn %{count: count} = row ->
+        data = row |> Conveyor.RawLog.bytes!(:payload) |> Invocations.decompress()
         :counters.add(counts, 1, length(Fixture.frames(data)))
         :counters.add(counts, 2, count)
         data
@@ -247,9 +247,9 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(LogSegment, [:data])
-      |> Stream.map(fn %{data: data} ->
-        text = Invocations.decompress(data)
+      |> segment_rows(LogSegment, [:data | Conveyor.RawLog.object_fields()])
+      |> Stream.map(fn row ->
+        text = row |> Conveyor.RawLog.bytes!(:data) |> Invocations.decompress()
         :counters.add(counts, 1, byte_size(text))
         text
       end)

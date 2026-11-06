@@ -262,3 +262,10 @@ if config_env() == :prod do
   #
   # Check `Plug.SSL` for all available options in `force_ssl`.
 end
+
+# RAW_LOG=blob|postgres (PLAN §25 step 2), RAW_LOG_FLUSH_MS: the writer's hold in blob mode.
+if mode = System.get_env("RAW_LOG") do
+  config :conveyor, Conveyor.RawLog,
+    mode: if(mode == "blob", do: :blob, else: :postgres),
+    flush_ms: String.to_integer(System.get_env("RAW_LOG_FLUSH_MS", "1000"))
+end

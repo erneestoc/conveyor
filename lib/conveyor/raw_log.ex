@@ -24,6 +24,52 @@ defmodule Conveyor.RawLog do
   @spec flush_ms() :: pos_integer()
   def flush_ms, do: Application.get_env(:conveyor, __MODULE__, [])[:flush_ms] || 1000
 
+  @object_fields [:object_key, :object_offset, :object_length]
+
+  @doc "The columns a segment row carries in blob mode."
+  def object_fields, do: @object_fields
+
+  @doc """
+  Moves a writer plan's payloads into one object body: every event and log row gets the
+  byte range it will occupy and a nil payload. Returns the plan, the key and the body.
+  """
+  @spec objectify(map(), term()) :: {map(), String.t(), iodata()}
+  def objectify(plan, shard) do
+    key = new_key(shard)
+    {event_rows, acc} = Enum.map_reduce(plan.event_rows, {0, []}, &move(&1, :payload, key, &2))
+    {log_rows, {_, parts}} = Enum.map_reduce(plan.log_rows, acc, &move(&1, :data, key, &2))
+    {%{plan | event_rows: event_rows, log_rows: log_rows}, key, Enum.reverse(parts)}
+  end
+
+  defp move(row, col, key, {offset, parts}) do
+    bytes = Map.fetch!(row, col)
+
+    row =
+      row
+      |> Map.put(col, nil)
+      |> Map.merge(%{object_key: key, object_offset: offset, object_length: byte_size(bytes)})
+
+    {row, {offset + byte_size(bytes), [bytes | parts]}}
+  end
+
+  @doc "The compressed bytes of a segment row: inline, or fetched by range from its object."
+  @spec bytes!(map(), :payload | :data) :: binary()
+  def bytes!(row, col) do
+    case Map.get(row, col) do
+      bin when is_binary(bin) ->
+        bin
+
+      nil ->
+        case get_range(row.object_key, row.object_offset, row.object_length) do
+          {:ok, bin} ->
+            bin
+
+          {:error, reason} ->
+            raise "raw log #{row.object_key} range #{row.object_offset}+#{row.object_length}: #{inspect(reason)}"
+        end
+    end
+  end
+
   @doc "A fresh, time-ordered object key for a shard of this node."
   @spec new_key(term()) :: String.t()
   def new_key(shard) do

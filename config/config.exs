@@ -33,6 +33,10 @@ config :conveyor, Conveyor.Ingest,
   tag_flush_ms: 1000,
   broadcast_interval_ms: 250
 
+# PLAN §25 step 2: :blob puts raw bytes into raw-log objects (one per writer shard per
+# flush_ms); :postgres keeps them in the segment rows.
+config :conveyor, Conveyor.RawLog, mode: :postgres, flush_ms: 1000
+
 config :conveyor, Oban,
   repo: Conveyor.Repo,
   # Execution-log parses are CPU- and database-heavy: two at a time, on their own queue.
@@ -52,7 +56,8 @@ config :conveyor, Oban,
        {"*/5 * * * *", Conveyor.Workers.Rollup},
        {"20 1 * * *", Conveyor.Workers.Rollup, args: %{days: 90}},
        {"*/15 * * * *", Conveyor.Workers.ArchiveRaw},
-       {"*/10 * * * *", Conveyor.Workers.SweepStale}
+       {"*/10 * * * *", Conveyor.Workers.SweepStale},
+       {"30 4 * * *", Conveyor.Workers.RawLogSweep}
      ]}
   ]
 

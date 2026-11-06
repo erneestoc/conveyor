@@ -30,6 +30,7 @@ defmodule Conveyor.Ingest.Writer do
   }
 
   alias Conveyor.Repo
+  alias Conveyor.RawLog
 
   defmodule Fenced do
     @moduledoc """
@@ -63,7 +64,8 @@ defmodule Conveyor.Ingest.Writer do
        pending: [],
        count: 0,
        timer: nil,
-       flush_ms: config(:writer_flush_ms, 20),
+       flush_ms:
+         if(RawLog.blob_mode?(), do: RawLog.flush_ms(), else: config(:writer_flush_ms, 20)),
        max_pending: config(:writer_max_pending, 256)
      }}
   end
@@ -94,7 +96,7 @@ defmodule Conveyor.Ingest.Writer do
     pending = Enum.reverse(state.pending)
     started = System.monotonic_time()
 
-    results = commit_pending(pending)
+    results = commit_pending(pending, state.shard)
 
     Enum.each(results, fn
       {batch, from, :ok} -> send(from, {:batch_committed, batch.ref})
@@ -120,8 +122,8 @@ defmodule Conveyor.Ingest.Writer do
   # it, so a fence costs one extra transaction rather than one per batch: redoing a group of
   # 256 batches one by one made the writer fall hundreds of thousands of batches behind
   # during the fleet test's rolling deploy. Any other failure falls back to batch by batch.
-  defp commit_pending(pending) do
-    case commit_group(pending) do
+  defp commit_pending(pending, shard) do
+    case commit_group(pending, shard) do
       :ok ->
         Enum.map(pending, fn {batch, from} -> {batch, from, :ok} end)
 
@@ -142,17 +144,17 @@ defmodule Conveyor.Ingest.Writer do
             {batch, from, {:error, {:fenced, batch.first_seq - 1}}}
           end)
 
-        failed ++ if(rest == [], do: [], else: commit_pending(rest))
+        failed ++ if(rest == [], do: [], else: commit_pending(rest, shard))
 
       {:error, _} ->
-        Enum.map(pending, fn {batch, from} -> {batch, from, commit_single(batch)} end)
+        Enum.map(pending, fn {batch, from} -> {batch, from, commit_single(batch, shard)} end)
     end
   end
 
   # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
-  defp commit_group(pending) do
+  defp commit_group(pending, shard) do
     units = pending |> Enum.map(&elem(&1, 0)) |> Batch.coalesce()
-    plan = plan(units)
+    plan = units |> plan() |> store_object!(shard)
 
     result =
       Retry.with_backoff(
@@ -183,8 +185,8 @@ defmodule Conveyor.Ingest.Writer do
       {:error, e}
   end
 
-  defp commit_single(batch) do
-    plan = plan([batch])
+  defp commit_single(batch, shard) do
+    plan = [batch] |> plan() |> store_object!(shard)
 
     result =
       Retry.with_backoff(
@@ -213,6 +215,33 @@ defmodule Conveyor.Ingest.Writer do
       )
 
       {:error, Exception.message(e)}
+  end
+
+  # Blob mode (PLAN §25 step 2): the group's payloads go into one raw-log object before
+  # the transaction, and the rows carry the byte range. A failed put raises, so the group
+  # takes the usual fallback and a batch that cannot be stored fails its worker.
+  defp store_object!(%{event_rows: [], log_rows: []} = plan, _shard), do: plan
+
+  defp store_object!(plan, shard) do
+    if RawLog.blob_mode?() do
+      {plan, key, body} = RawLog.objectify(plan, shard)
+      bytes = IO.iodata_length(body)
+
+      case RawLog.put(key, body) do
+        :ok ->
+          :telemetry.execute([:conveyor, :raw_log, :put], %{count: 1, bytes: bytes}, %{
+            shard: shard
+          })
+
+          plan
+
+        {:error, reason} ->
+          :telemetry.execute([:conveyor, :raw_log, :put_failed], %{count: 1}, %{shard: shard})
+          raise "raw log put #{key} failed: #{inspect(reason)}"
+      end
+    else
+      plan
+    end
   end
 
   @doc """
