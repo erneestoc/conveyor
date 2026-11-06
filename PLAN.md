@@ -830,5 +830,35 @@ builds, native PostgreSQL 17), one run each, oracle green on all:
 | 2 s (default) | 1,419 B | 37.2 KB | 171 | 47,880 | 10.6 | 1.0 s / 2.1 s |
 | 5 s | 982 B | 33.6 KB | 125 | 28,401 | 21.4 | 2.5 s / 5.1 s |
 
-Trial (3 × `t4g.xlarge`, `db.m6g.xlarge`, 5,000 paced real builds, 10 min): _(below)_
+Trial (3 × `t4g.xlarge`, `db.m6g.xlarge`, 40 Fargate generators × 125 real builds paced at one
+event per 500 ms, 10 min of launches plus drain, 2026-11-06; oracle 100/100 both):
+
+| hold | builds | events/s | segment rows/event | RDS CPU avg / max | write IOPS avg / max | written | nodes CPU | ack p50 / p99 |
+|---|---|---|---|---|---|---|---|---|
+| 50 ms | 14,476/14,476 | 7,332 | 0.997 | 55 % / 77 % | 981 / 1,855 | 49 MB/s | 41 % | 105 ms / 731 ms |
+| 2 s | 14,494/14,494 | 7,350 | 0.25 | 42 % / 63 % | 795 / 1,446 | 25 MB/s | 34 % | 1.14 s / 2.09 s |
+
+Real builds are burstier than the fixtures, so 2 s gives four events per segment row on
+average; the database's bytes written halve and its CPU drops by a quarter at the same
+event rate. The write IOPS fall less (−19 %): the per-batch fenced update and the derived
+rows (targets, tests, actions) now dominate, which is what step 2 leaves in Postgres.
+
+Flat-out ramp (no pacing, 125 streams per generator task, 4 min per level, 2 s hold; the
+generators exited abnormally at the end of each level, so the client-side percentiles are
+missing and a few hundred builds per level were cut mid-stream; the server-side window and
+the oracle are valid):
+
+| tasks | events/s (window) | segment rows/event | RDS CPU avg / max | write IOPS avg / max | written | nodes avg / max |
+|---|---|---|---|---|---|---|
+| 2 | ≈ 7,000 | 0.008 | 15 % / 30 % | 442 / 710 | 21 MB/s | 34 % / 74 % |
+| 4 | ≈ 14,400 | 0.006 | 27 % / 46 % | 784 / 1,010 | 33 MB/s | 14 % / 36 % (partial window) |
+| 8 | ≈ 24,800 | 0.004 | 32 % / 56 % | 915 / 1,299 | 41 MB/s | 51 % / 96 % |
+
+Reading: flat out, the `db.m6g.xlarge` costs about 1.3 % CPU per 1,000 events/s, so it
+would saturate near 75k events/s; the three 4-vCPU nodes saturate first, at about 25k
+events/s (≈ 2,000 events/s per Graviton vCPU, matching the paced figure). Step 1's target
+("50k+ events/s on one 8–16 vCPU instance") holds with margin on the database side; the
+next ceiling before step 2 is node CPU, which scales out. Step 2 is due when a fleet needs
+more than ≈ 50–75k events/s sustained on one database, or when its storage growth
+(≈ 250 B/event compressed plus derived rows) becomes the operational cost.
 

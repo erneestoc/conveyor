@@ -179,6 +179,15 @@ task, 125 streams per task, builds paced at one event per 500 ms.
 
 | **5,000 concurrent builds, rolling deploy at minute 2 — fourth attempt, three `t4g.xlarge` (4 vCPU / 16 GB), image `be12ae2`, 8 writer shards** | 40 tasks × 125, 15 min | **clean**: 20,903 builds and 10.3 M events in the window, 0 unfinished, oracle 300/300 (day-aware); nodes avg 54 % CPU (max 85 %), 1.5–2.6 GB; RDS avg 58 % CPU (max 78 %), 1,000 write IOPS avg (1,554 max), 129 connections; **0 fenced commits and 0 rejects** on the replacement nodes after the deploy. One replacement node's BEAM was OOM-killed three times (15.7 GB) in the minutes after it joined, with no stream errors: it was the node serving a browser that had the load-test builds list open, so every one of the project's 5,000 workers sent it a full summary (options included, tens of KB) four times a second. List messages are slim and coalesced since `CHANGELOG` "watched builds list"; the ingest side was unaffected (0 failed builds) | **20,903/20,903 builds ok, 0 failed, 5,237 resumed across the deploy, 0 missing acks; ack p50 105 ms / p90 194 ms / p99 519 ms / max 3.2 s** |
 
+### Batch hold (2026-11-06, PLAN §25 step 1)
+
+Same fleet shape and the same 5,000 paced real builds for 10 minutes, before and after
+`INGEST_BATCH_FLUSH_MS` 50 → 2000 (the default since 0.2.4): segment rows per event
+0.997 → 0.25, RDS CPU 55 % → 42 % average (77 % → 63 % max), write IOPS 981 → 795, bytes
+written 49 → 25 MB/s, node CPU 41 % → 34 %; every build completed with 0 missing acks and
+the oracle green on both. Mid-build acknowledgement latency is now the hold (p50 1.1 s,
+p99 2.1 s); build completion is unchanged because the end of a stream commits at once.
+
 What the four attempts say: three 2-vCPU nodes do **not** carry 5,000 paced real builds
 through a rolling deploy. The earlier "a third of their CPU" figure came from a run in
 which most generator streams had silently died. At about 1,700 streams per node the two
