@@ -326,6 +326,34 @@ defmodule Conveyor.Ingest.WriterTest do
     for id <- tl(ids), do: assert(Repo.get!(Invocation, id).last_event_seq == 1)
   end
 
+  test "a batch that ends a stream is committed without waiting for the writer's hold", %{
+    id: id,
+    project: project
+  } do
+    previous = Application.get_env(:conveyor, Conveyor.RawLog)
+    on_exit(fn -> Application.put_env(:conveyor, Conveyor.RawLog, previous) end)
+    Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob, flush_ms: 30_000)
+    writer = start_supervised!({Writer, shard: 777})
+
+    plain = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))
+    Writer.submit(writer, plain)
+    plain_ref = plain.ref
+    refute_receive {:batch_committed, ^plain_ref}, 300
+
+    final =
+      batch(
+        id,
+        project,
+        2,
+        &(&1 |> Batch.add_event(2, "finished", "b") |> Map.put(:finalize, true))
+      )
+
+    Writer.submit(writer, final)
+    final_ref = final.ref
+    assert_receive {:batch_committed, ^plain_ref}, 2_000
+    assert_receive {:batch_committed, ^final_ref}, 2_000
+  end
+
   test "two units of one invocation in a flush are applied in order, in separate statements",
        %{id: id, project: project} do
     first = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))

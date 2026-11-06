@@ -946,3 +946,29 @@ almost two thirds and its bytes written by 60 % at the same event rate; the rema
 writes are the derived rows and the fenced update, which is what step 3 shards. The PUT
 cost scales with nodes × shards, not with events: ≈ $3/day per node at eight shards.
 
+### Step 3 design (agreed 2026-11-06, next): metadata sharded by project group
+
+**When.** One Aurora writer carries the remaining per-batch metadata work at ≈ 1.3 % CPU per
+1,000 events/s on 4 vCPUs after steps 1–2 (trial), so a 32–64 vCPU writer reaches the
+low hundreds of thousands of events/s. Step 3 is due when a fleet needs more than that on
+one database, or when a single writer's failover blast radius is the concern.
+
+**Shape.** A `Conveyor.Repo`-compatible router: `Conveyor.Shards` maps a project to a
+shard (`projects.shard` column, default 0; a shard is a `Conveyor.Repo` instance started
+per configured `DATABASE_URL_<n>`), and every project-scoped read and write goes through
+`Repo.for_project(project_id)`. Everything that is project-scoped already (all ingest
+writes, invocation pages, dashboards, rollups, retention, archive, blobs by prefix) moves
+unchanged; the cross-project surfaces (`/builds` all-projects list, the global dashboard,
+Settings, audit, Oban's own tables, `tag_keys` for the global facets) stay on shard 0 or
+fan out and merge (lists by cursor-merge, dashboards by summing rollups). `invocations`
+ids stay UUIDs; API keys and projects live on shard 0 and are cached (ApiKeyCache). Moving
+a project between shards reuses `Release.move_builds/4` (copy, then flip `projects.shard`).
+Aurora Limitless is the managed alternative: same `projects.shard` concept, one endpoint.
+
+**Order of work.** (1) `projects.shard` + `Conveyor.Shards` + repo-per-shard boot (one shard
+configured = today's behaviour, no code path change); (2) route ingest and invocation
+reads (the boundary test `project_boundary_test.exs` becomes the shard-boundary test);
+(3) cross-project merges; (4) Oban/retention/archive per shard; (5) two-shard ExUnit test
+(second repo on a second database) and the fleet level with two shards; (6) docs. Model:
+none needed for routing itself; `Blobs.tla`/`Archive.tla` are per project and unaffected.
+

@@ -78,6 +78,11 @@ defmodule Conveyor.Ingest.Writer do
       state.count >= state.max_pending ->
         {:noreply, flush(state)}
 
+      # The batch that ends a stream carries the build's final status and its last ack:
+      # Bazel is waiting on it, so it never waits for the hold (blob mode's is a second).
+      batch.finalize ->
+        {:noreply, flush(state)}
+
       state.timer == nil ->
         {:noreply, %{state | timer: Process.send_after(self(), :flush, state.flush_ms)}}
 
