@@ -52,21 +52,64 @@ defmodule Conveyor.RawLog do
     {row, {offset + byte_size(bytes), [bytes | parts]}}
   end
 
-  @doc "The compressed bytes of a segment row: inline, or fetched by range from its object."
-  @spec bytes!(map(), :payload | :data) :: binary()
-  def bytes!(row, col) do
-    case Map.get(row, col) do
-      bin when is_binary(bin) ->
-        bin
+  # Rows of one build in one object are read with one range when the gap between two
+  # consecutive ranges is at most this (another build's rows of the same group commit sit
+  # between them), and a coalesced range never exceeds this many bytes.
+  @coalesce_gap 256 * 1024
+  @coalesce_max 8 * 1024 * 1024
 
-      nil ->
-        case get_range(row.object_key, row.object_offset, row.object_length) do
-          {:ok, bin} ->
-            bin
+  @doc """
+  Fills `col` (`:payload` or `:data`) of segment rows, in order: rows that carry the bytes
+  are left alone; rows that carry a byte range are fetched, and consecutive rows of the
+  same object with contiguous or near-contiguous ranges are fetched with one `get_range/3`
+  and split by each row's offset and length (PLAN §25 step 2 "Reads").
+  """
+  @spec fetch_rows!([map()], :payload | :data) :: [map()]
+  def fetch_rows!(rows, col) do
+    rows
+    |> Enum.chunk_while([], &chunk_rows(&1, &2, col), fn
+      [] -> {:cont, []}
+      run -> {:cont, Enum.reverse(run), []}
+    end)
+    |> Enum.flat_map(&fetch_run!(&1, col))
+  end
 
-          {:error, reason} ->
-            raise "raw log #{row.object_key} range #{row.object_offset}+#{row.object_length}: #{inspect(reason)}"
-        end
+  # A run is a list (newest first) of rows that share an object and read as one range.
+  defp chunk_rows(row, [], _col), do: {:cont, [row]}
+
+  defp chunk_rows(row, [last | _] = run, col) do
+    if coalesce?(last, row, run, col),
+      do: {:cont, [row | run]},
+      else: {:cont, Enum.reverse(run), [row]}
+  end
+
+  defp coalesce?(last, row, run, col) do
+    is_nil(Map.get(row, col)) and is_nil(Map.get(last, col)) and
+      row.object_key == last.object_key and
+      row.object_offset >= last.object_offset + last.object_length and
+      row.object_offset - (last.object_offset + last.object_length) <= @coalesce_gap and
+      row.object_offset + row.object_length - List.last(run).object_offset <= @coalesce_max
+  end
+
+  defp fetch_run!([%{} = row] = run, col) do
+    if is_binary(Map.get(row, col)), do: run, else: fetch_range!(run, col)
+  end
+
+  defp fetch_run!(run, col), do: fetch_range!(run, col)
+
+  defp fetch_range!([first | _] = run, col) do
+    last = List.last(run)
+    offset = first.object_offset
+    length = last.object_offset + last.object_length - offset
+
+    case get_range(first.object_key, offset, length) do
+      {:ok, bin} ->
+        Enum.map(run, fn row ->
+          Map.put(row, col, binary_part(bin, row.object_offset - offset, row.object_length))
+        end)
+
+      {:error, reason} ->
+        raise "raw log #{first.object_key} range #{offset}+#{length}: #{inspect(reason)}"
     end
   end
 
@@ -107,6 +150,8 @@ defmodule Conveyor.RawLog do
   @spec get_range(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, binary()} | {:error, term()}
   def get_range(key, offset, length) do
+    :telemetry.execute([:conveyor, :raw_log, :get_range], %{count: 1, bytes: length}, %{key: key})
+
     case adapter() do
       {:disk, dir} ->
         with {:ok, io} <- File.open(Path.join(dir, key), [:read, :binary, :raw]) do

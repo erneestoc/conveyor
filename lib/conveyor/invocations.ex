@@ -211,12 +211,8 @@ defmodule Conveyor.Invocations do
       select: map(s, ^[:payload | Conveyor.RawLog.object_fields()])
     )
     |> Repo.all()
-    |> Enum.flat_map(
-      &(&1
-        |> Conveyor.RawLog.bytes!(:payload)
-        |> decompress()
-        |> Fixture.frames())
-    )
+    |> Conveyor.RawLog.fetch_rows!(:payload)
+    |> Enum.flat_map(&(&1.payload |> decompress() |> Fixture.frames()))
   end
 
   @doc "The full build log as one string (stdout and stderr interleaved as received)."
@@ -251,7 +247,8 @@ defmodule Conveyor.Invocations do
         select: map(s, ^[:data | Conveyor.RawLog.object_fields()])
       )
       |> Repo.all()
-      |> Enum.map(&(&1 |> Conveyor.RawLog.bytes!(:data) |> decompress()))
+      |> Conveyor.RawLog.fetch_rows!(:data)
+      |> Enum.map(&decompress(&1.data))
     end)
   end
 

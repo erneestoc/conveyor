@@ -216,9 +216,9 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(EventSegment, [:count, :payload | Conveyor.RawLog.object_fields()])
-      |> Stream.map(fn %{count: count} = row ->
-        data = row |> Conveyor.RawLog.bytes!(:payload) |> Invocations.decompress()
+      |> segment_rows(EventSegment, :payload, [:count])
+      |> Stream.map(fn %{count: count, payload: payload} ->
+        data = Invocations.decompress(payload)
         :counters.add(counts, 1, length(Fixture.frames(data)))
         :counters.add(counts, 2, count)
         data
@@ -247,9 +247,9 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(LogSegment, [:data | Conveyor.RawLog.object_fields()])
-      |> Stream.map(fn row ->
-        text = row |> Conveyor.RawLog.bytes!(:data) |> Invocations.decompress()
+      |> segment_rows(LogSegment, :data, [])
+      |> Stream.map(fn %{data: data} ->
+        text = Invocations.decompress(data)
         :counters.add(counts, 1, byte_size(text))
         text
       end)
@@ -271,9 +271,11 @@ defmodule Conveyor.RawArchive do
   end
 
   # A few segments per query, in sequence order (keyset on first_seq), each query retried
-  # on transient database errors; the partition day prunes the scan to one partition.
-  defp segment_rows(%Invocation{id: id} = inv, schema, fields) do
+  # on transient database errors; the partition day prunes the scan to one partition. The
+  # bytes column (`col`) is filled per query, coalescing ranged reads in blob mode.
+  defp segment_rows(%Invocation{id: id} = inv, schema, col, fields) do
     day = Invocations.day(inv)
+    fields = [col | fields] ++ Conveyor.RawLog.object_fields()
 
     Stream.resource(
       fn -> 0 end,
@@ -300,8 +302,8 @@ defmodule Conveyor.RawArchive do
 
           case rows do
             [] -> {:halt, :done}
-            rows when length(rows) < @chunk -> {rows, :done}
-            rows -> {rows, List.last(rows).first_seq}
+            rows when length(rows) < @chunk -> {Conveyor.RawLog.fetch_rows!(rows, col), :done}
+            rows -> {Conveyor.RawLog.fetch_rows!(rows, col), List.last(rows).first_seq}
           end
       end,
       fn _ -> :ok end
