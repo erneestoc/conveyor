@@ -192,9 +192,36 @@ Next: C4 non-hermetic report on the dashboard (spawns whose `inputs_digest` equa
 
 ### NEXT: PLAN §25 step 3 (sharding by project group), design in PLAN §25 "Step 3 design"; before it, the step 2 leftovers below
 
-### PLAN §25 step 2, the raw log (2026-11-06, landed with leftovers)
+### PLAN §25 step 2, the raw log (2026-11-06, landed; leftovers below)
 
-Design and order of work are in PLAN §25 "Step 2 design". **Landed (2026-11-06):** items 1–5 (migrations, `Conveyor.RawLog`, writer blob mode, readers/archive by range, `Workers.RawLogSweep`, counters, docs, CHANGELOG) plus a blob-mode end-to-end test (`raw_log_mode_test.exs`) and the sweep test; the trial stack has `raw_log` (Terraform var, template env `RAW_LOG`) and was switched to blob mode for the measurement. **Not done:** item 6's `:s3` MinIO contract test for `RawLog`/`S3.put_object`/`get_range` (the S3 path ran only on the trial), item 7 `RawLog.tla`, the operations doc. **Open finding:** blob mode's flat-out throughput is 4× lower on the laptop (PLAN §25 "Step 2 measurements"); root-cause before any default change. Also: coverage dipped to 94.7 % with the gate still green (check `coveralls.json`'s minimum). **Trial state (2026-11-06 03:15 UTC): scaled down to the demo shape** (plain `terraform apply`: one `t4g.medium`, `db.t3.micro`, Caddy, `RAW_LOG=postgres`; image `25c5b55`; health 200; `fleet*` keys revoked). Segment rows written in blob mode still reference S3 raw-log objects (readers resolve both forms); the sweep removes those objects after `RETENTION_RAW_DAYS + 1` days. Still to do for step 2: explain the 52 unaccounted builds of the flat-out laptop run, the MinIO contract test, `RawLog.tla`, operations doc; then the higher-load linearity run (bigger database class and six nodes, flat-out generators at 125 streams crash — use 60) before step 3.
+Design and order of work are in PLAN §25 "Step 2 design". **Landed (2026-11-06):** items
+1–6 (migrations, `Conveyor.RawLog`, writer blob mode, readers/archive by range,
+`Workers.RawLogSweep`, counters, docs, CHANGELOG, the blob-mode end-to-end and sweep tests,
+the `:s3` MinIO contract test `raw_log_s3_test.exs`), plus the same evening: readers
+coalesce ranged reads (`RawLog.fetch_rows!/2`, telemetry `[:conveyor, :raw_log,
+:get_range]`; note the writer merges a build's contiguous batches of one group into one
+row, so a build's rows are in distinct objects and the coalescing only pays for the
+fallback/synthetic case), an archive-over-blob-rows test, and the size-triggered writer
+flush `RAW_LOG_FLUSH_BYTES` (4 MB of received batch bytes, blob mode only). Ack latency
+per hold is measured in PLAN §25 "Ack latency in blob mode". **Defaults, exactly:**
+`RAW_LOG=postgres`, `RAW_LOG_FLUSH_MS=1000`, `RAW_LOG_FLUSH_BYTES=4194304`,
+`INGEST_BATCH_FLUSH_MS=2000`, `INGEST_WRITER_FLUSH_MS=20` (postgres mode only),
+`INGEST_WRITER_MAX_PENDING=256`; sub-second mid-build acks in blob mode are a
+configuration (`INGEST_BATCH_FLUSH_MS=1000 RAW_LOG_FLUSH_MS=250`), not the default.
+The flat-out gap was root-caused (`25c5b55`, PLAN §25 "Step 2 measurements"); the
+2026-11-06 evening flat-out runs verified 10,000/10,000 builds with 0 failed and 0 unfinished,
+so the "52 unaccounted builds" of the earlier run did not reproduce (likely the bench's
+drain window, not a loss). **Not done:** item 7 `RawLog.tla`, the operations doc
+(docs/operations: blob mode, sweep, what to check when `conveyor_rawlog_put_failed` fires).
+Coverage is 94.8 % with the gate green (`coveralls.json` minimum 95 is not enforced by the
+exit code; the uncovered lines are the S3 branches of `RawLog`, exercised only by `--only s3`).
+**Trial state (2026-11-06 03:15 UTC): scaled down to the demo shape** (plain `terraform
+apply`: one `t4g.medium`, `db.t3.micro`, Caddy, `RAW_LOG=postgres`; image `25c5b55`; health
+200; `fleet*` keys revoked). Segment rows written in blob mode still reference S3 raw-log
+objects (readers resolve both forms); the sweep removes those objects after
+`RETENTION_RAW_DAYS + 1` days. Still to do for step 2: `RawLog.tla`, operations doc; then
+the higher-load linearity run (bigger database class and six nodes, flat-out generators at
+125 streams crash — use 60) before step 3.
 
 ### PLAN §25 step 1 measured — 2026-11-06 (fleet shape still up from October)
 
