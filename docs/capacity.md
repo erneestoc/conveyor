@@ -188,6 +188,15 @@ written 49 → 25 MB/s, node CPU 41 % → 34 %; every build completed with 0 mis
 the oracle green on both. Mid-build acknowledgement latency is now the hold (p50 1.1 s,
 p99 2.1 s); build completion is unchanged because the end of a stream commits at once.
 
+### Raw log (2026-11-06, PLAN §25 step 2, `RAW_LOG=blob`)
+
+Same shape and load as the batch-hold A/B, raw bytes written to S3 objects by the writer
+and only byte-range index rows in Postgres: RDS CPU 42 % → 20 % average (63 % → 29 % max),
+write IOPS 795 → 474, bytes written 25 → 20 MB/s; 14,040 builds complete, 0 missing acks,
+oracle 100/100; about 20 S3 PUTs per second for three nodes at eight writer shards
+(≈ $9/day, independent of the event rate); mid-build acks p50 1.9 s / p99 3.7 s. Off by
+default: see PLAN §25 for the open flat-out throughput finding.
+
 What the four attempts say: three 2-vCPU nodes do **not** carry 5,000 paced real builds
 through a rolling deploy. The earlier "a third of their CPU" figure came from a run in
 which most generator streams had silently died. At about 1,700 streams per node the two

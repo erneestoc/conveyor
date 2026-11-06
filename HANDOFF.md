@@ -192,7 +192,7 @@ Next: C4 non-hermetic report on the dashboard (spawns whose `inputs_digest` equa
 
 ### NEXT: PLAN §25 step 2, the raw log (agreed 2026-11-06, in progress)
 
-Design and order of work are in PLAN §25 "Step 2 design"; implement in that order, one commit per numbered item with the gate green. Postgres mode stays the default; `RAW_LOG=blob` is the new mode. Check `git log` for which items landed before continuing.
+Design and order of work are in PLAN §25 "Step 2 design". **Landed (2026-11-06):** items 1–5 (migrations, `Conveyor.RawLog`, writer blob mode, readers/archive by range, `Workers.RawLogSweep`, counters, docs, CHANGELOG) plus a blob-mode end-to-end test (`raw_log_mode_test.exs`) and the sweep test; the trial stack has `raw_log` (Terraform var, template env `RAW_LOG`) and was switched to blob mode for the measurement. **Not done:** item 6's `:s3` MinIO contract test for `RawLog`/`S3.put_object`/`get_range` (the S3 path ran only on the trial), item 7 `RawLog.tla`, the operations doc. **Open finding:** blob mode's flat-out throughput is 4× lower on the laptop (PLAN §25 "Step 2 measurements"); root-cause before any default change. Also: coverage dipped to 94.7 % with the gate still green (check `coveralls.json`'s minimum). Switch the trial back to `-var raw_log=postgres` (apply + refresh) unless the blob-mode measurement is wanted longer.
 
 ### PLAN §25 step 1 measured — 2026-11-06 (fleet shape still up from October)
 

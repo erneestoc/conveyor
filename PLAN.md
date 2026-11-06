@@ -911,3 +911,38 @@ MinIO contract); (7) `RawLog.tla`; (8) laptop bench A/B (disk backend) and the t
 on S3; (9) docs (configuration, capacity, operations) and CHANGELOG. Postgres mode remains
 the default and the tests' default; blob mode is tested explicitly.
 
+### Step 2 measurements (2026-11-06)
+
+Laptop (`bench/run.sh`, disk backend for the raw log, native PostgreSQL 17), one run each,
+oracle green on all:
+
+| profile | mode | events/s | WAL/event | xact/s | round trips | storage/build | ack p50 / p99 |
+|---|---|---|---|---|---|---|---|
+| paced 1,000 streams | postgres (2 s hold) | 989 | 1,419 B | 171 | 47,880 | 37.2 KB | 1.0 / 2.1 s |
+| paced 1,000 streams | blob | 939 | 1,046 B | 97 | 16,482 | 29.0 KB | 2.0 / 3.1 s |
+| flat out 200 streams | postgres | 19,227 | 718 B | 1,648 | 103,744 | 30.2 KB | 52 / 264 ms |
+| flat out 200 streams | blob | **4,707** | 596 B | 369 | 61,064 | 21.4 KB | 0.9 / 1.3 s |
+
+On fixture builds (44 events, many target/test rows per event) the derived rows dominate
+the WAL, so moving the raw bytes out cuts it by only a quarter; transactions and round
+trips drop by half to two thirds. **Open before blob mode can be a default:** flat-out
+throughput falls 4× in blob mode. Suspect: the 1 s writer hold combined with the worker's
+`max_unacked_events` cap (a flat-out stream can have one batch in flight per hold); a
+shard should flush early when its pending bytes reach a size (say 4 MB) as it already
+does at 256 batches, and the unacked cap should count batches in flight, not events.
+Root-cause with the harness (`RAW_LOG=blob`, `--profile flat`, writer telemetry) first.
+
+Trial (3 × `t4g.xlarge`, `db.m6g.xlarge`, 40 generators × 125 real builds paced at one event
+per 500 ms, 10 min of launches plus drain; same load as the step 1 table):
+
+| mode | builds | events/s | RDS CPU avg / max | write IOPS avg / max | written | nodes CPU | objects | ack p50 / p99 |
+|---|---|---|---|---|---|---|---|---|
+| postgres, 2 s hold | 14,494 | 7,350 | 42 % / 63 % | 795 / 1,446 | 25 MB/s | 34 % | — | 1.1 / 2.1 s |
+| **blob (S3), 2 s + 1 s holds** | 14,040 | ≈ 7,000 | **20 % / 29 %** | 474 / 1,086 | 20 MB/s | 25 % | 20,328 in 17 min (≈ 20/s, ≈ $9/day) | 1.9 / 3.7 s |
+
+Oracle 100/100, 0 unfinished, 0 missing acks. Relative to the 50 ms baseline of the same
+morning (55 % CPU, 981 IOPS, 49 MB/s), steps 1 and 2 together cut the database's CPU by
+almost two thirds and its bytes written by 60 % at the same event rate; the remaining
+writes are the derived rows and the fenced update, which is what step 3 shards. The PUT
+cost scales with nodes × shards, not with events: ≈ $3/day per node at eight shards.
+

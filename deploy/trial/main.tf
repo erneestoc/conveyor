@@ -65,6 +65,8 @@ variable "raw_archive_enabled" { default = true }
 # Group-commit writers per node. They wait on the database most of the time (a networked
 # PostgreSQL over TLS), so more shards than vCPUs keep more transactions in flight.
 variable "writer_shards" { default = 8 }
+# PLAN §25 step 2: "blob" puts raw bytes into S3 objects from the writer; "postgres" keeps them in rows.
+variable "raw_log" { default = "postgres" }
 
 data "aws_caller_identity" "me" {}
 data "aws_vpc" "default" { default = true }

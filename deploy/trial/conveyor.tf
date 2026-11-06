@@ -312,6 +312,7 @@ resource "aws_launch_template" "conveyor" {
     caddy_certs     = aws_ssm_parameter.caddy_certs.name
     raw_archive     = var.raw_archive_enabled
     writer_shards   = var.writer_shards
+    raw_log         = var.raw_log
   }))
 }
 
