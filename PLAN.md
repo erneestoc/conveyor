@@ -862,3 +862,52 @@ next ceiling before step 2 is node CPU, which scales out. Step 2 is due when a f
 more than ≈ 50–75k events/s sustained on one database, or when its storage growth
 (≈ 250 B/event compressed plus derived rows) becomes the operational cost.
 
+### Step 2 design (agreed 2026-11-06): the raw log
+
+**Shape.** `RAW_LOG=blob` (default `postgres` until the trial proves it). In blob mode a
+writer shard's group commit first writes one object with the group's compressed payloads
+(the per-batch zstd frames exactly as `Batch.event_segment_row/1` and `log_segment_row/1`
+produce them, concatenated: events then logs) to the blob backend under a server-internal
+prefix `rawlog/<node>/<shard>/<ulid>` (S3 or the disk dir; objects span projects, are
+never served by URL, and are read only by byte range through the server), then runs the
+Postgres transaction as today except that `event_segments.payload` / `log_segments.data`
+are NULL and three new nullable columns carry the reference: `object_key`, `object_offset`,
+`object_length`. Everything else is unchanged: partitioning by day, PK, the fenced update,
+the derived rows, `holds_unarchived?`, retention drops, the archive job (it reads through
+`raw_frames/1`). Acks still follow the Postgres commit, which now follows the PUT, so
+durability is "object durable and index committed".
+
+**Reads.** `Invocations.raw_frames/1`, `events_page/2`, `log/1`, `stream_log/2`,
+`log_segments/1` and the download controller fetch a row's bytes from the row when the
+payload is present, otherwise by ranged GET (`Range: bytes=offset-offset+length-1`) from
+the object; rows of one build in one object are coalesced into one range request. The
+log download keeps streaming row by row.
+
+**Cost control.** PUTs are the cost (S3: $0.005 per 1,000). The writer's hold in blob mode
+is `RAW_LOG_FLUSH_MS` (default 1000; `writer_flush_ms` stays 20 in postgres mode), so a
+node issues about `shards / 1 s` PUTs: 8/s per node, ≈ $3.50/day per node at any event
+rate. Mid-build acks therefore wait up to batch hold + writer hold (≈ 3 s). Fewer shards
+are fine in blob mode (the Postgres work per group is small); 4 is the suggested value.
+
+**Garbage.** A PUT whose transaction then fails or fences leaves unreferenced ranges; the
+object is kept until the daily sweep. Objects are time-ordered by key (ULID), so
+`Workers.RawLogSweep` deletes objects older than `RETENTION_RAW_DAYS + 1` days (after
+the partition drop no row references them) and never anything younger: no reference
+counting, no listing at write time. The archive job still compacts finished builds into
+per-project objects after `RAW_ARCHIVE_AFTER_HOURS`; the raw log is the hot store only.
+
+**Model.** `docs/spec/RawLog.tla`: every acknowledged event is readable from (index row,
+object range) until its partition is dropped; a dropped partition never holds the last
+reference of an archived-but-unreferenced build (same guard as `Archive.tla`); the sweep
+deletes only objects older than every row that could reference them; a crash between PUT
+and commit loses nothing acknowledged and leaves at most one orphan object per shard.
+
+**Order of work.** (1) migration: nullable payload/data, three object columns; (2)
+`Conveyor.RawLog` store over the blob backends: `put/2`, `get_range/3`, `delete/1`,
+`list_older_than/1`; (3) writer blob mode (object write, index rows, hold); (4) readers;
+(5) sweep worker + config + metrics (`conveyor_rawlog_puts_count`, bytes, failures);
+(6) tests (disk backend: byte-identical reads, oracle, download streaming, sweep; `:s3`
+MinIO contract); (7) `RawLog.tla`; (8) laptop bench A/B (disk backend) and the trial A/B
+on S3; (9) docs (configuration, capacity, operations) and CHANGELOG. Postgres mode remains
+the default and the tests' default; blob mode is tested explicitly.
+
