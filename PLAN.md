@@ -930,7 +930,14 @@ throughput falls 4× in blob mode. Suspect: the 1 s writer hold combined with th
 `max_unacked_events` cap (a flat-out stream can have one batch in flight per hold); a
 shard should flush early when its pending bytes reach a size (say 4 MB) as it already
 does at 256 batches, and the unacked cap should count batches in flight, not events.
-Root-cause with the harness (`RAW_LOG=blob`, `--profile flat`, writer telemetry) first.
+Root-caused the same day: the fixture builds are one batch each, and in blob mode the
+batch that ends a stream waited for the writer's 1 s hold, so every build took a second
+(the end-of-build ack, not throughput). A stream-ending batch now flushes the shard at
+once (`25c5b55`); flat out, blob mode then does 15,015 events/s (ack p50 143 ms, p99 688 ms,
+WAL 585 B/event) against 19,227 in postgres mode: the remaining gap is the object write
+per flush. That run verified 9,948 of 10,000 builds with 0 failed and 0 missing acks and
+the bench exited non-zero; the 52 unaccounted builds are not explained yet (rerun with
+the loadgen report kept).
 
 Trial (3 × `t4g.xlarge`, `db.m6g.xlarge`, 40 generators × 125 real builds paced at one event
 per 500 ms, 10 min of launches plus drain; same load as the step 1 table):
