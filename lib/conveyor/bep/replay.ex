@@ -418,14 +418,33 @@ defmodule Conveyor.Bep.Replay do
       adapter: GRPC.Client.Adapters.Mint,
       cred:
         GRPC.Credential.new(
-          ssl: [
-            verify: :verify_peer,
-            cacerts: :public_key.cacerts_get(),
-            server_name_indication: String.to_charlist(host),
-            depth: 3
-          ]
+          ssl:
+            [
+              verify: :verify_peer,
+              server_name_indication: String.to_charlist(host),
+              depth: 3
+            ] ++ ca_opts()
         )
     ]
+  end
+
+  # The OS bundle by path when there is one. The gRPC client copies every channel, with
+  # its TLS options, into `:persistent_term`, so a CA list passed as a term (≈ 650 KB from
+  # `:public_key.cacerts_get/0`) is copied into the literal area once per connection; a
+  # generator opening a connection per build exhausted the 1 GB literal area in minutes
+  # (`literal_alloc: Cannot allocate ... "literal"`). A file name is a few bytes and the
+  # `ssl` application caches the parsed bundle itself.
+  @ca_bundles [
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem"
+  ]
+
+  defp ca_opts do
+    case System.get_env("SSL_CERT_FILE") || Enum.find(@ca_bundles, &File.regular?/1) do
+      nil -> [cacerts: :public_key.cacerts_get()]
+      file -> [cacertfile: file]
+    end
   end
 
   defp send_one(conn, stream, seq, event) do

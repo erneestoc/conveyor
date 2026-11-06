@@ -29,5 +29,10 @@ defmodule Conveyor.ReleaseTest do
     opts = Conveyor.Bep.Replay.connect_opts("bes.example.com", true)
     assert %GRPC.Credential{ssl: ssl} = opts[:cred]
     assert ssl[:server_name_indication] == ~c"bes.example.com" and ssl[:verify] == :verify_peer
+    # The CA store goes by file name where the OS has a bundle (the gRPC client keeps every
+    # channel's options in `:persistent_term`; a 650 KB `cacerts` term per connection
+    # exhausted the generator's literal area), as a term otherwise.
+    assert is_binary(ssl[:cacertfile]) or is_list(ssl[:cacerts])
+    refute is_binary(ssl[:cacertfile]) and Keyword.has_key?(ssl, :cacerts)
   end
 end
