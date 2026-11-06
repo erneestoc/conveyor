@@ -21,6 +21,7 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 | `conveyor_ingest_fenced_count` (counter) | any increase that repeats: two nodes wrote one invocation (balancer or lifecycle problem) |
 | `conveyor_oban_jobs_count{queue,state}`, `conveyor_oban_oldest_available_seconds{queue}` (gauges) | oldest waiting job older than 10 minutes: the queue is not draining |
 | `conveyor_blobs_errors_count{op}` (counter) | any increase: blob store credentials, bucket policy or disk |
+| `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count` (counters) | any increase: the blob store refuses raw-log writes or deletes (`RAW_LOG=blob`); see "Raw log (blob mode)" below |
 | `vm_memory_total`, `vm_system_counts_process_count` | memory growth without stream growth |
 
 Ready-made rules for these are in `deploy/prometheus/alerts.yml`.
@@ -127,6 +128,64 @@ delays the drop instead of losing events.
   then lower `RETENTION_RAW_DAYS` (at least `RAW_ARCHIVE_AFTER_HOURS/24 + 1`, so 2 with
   the default delay). Turning it off again is safe: archived builds keep reading from the
   store, new ones stay in the segments.
+
+### Raw log (blob mode)
+
+With `RAW_LOG=blob` the raw bytes leave the database's commit path. A writer shard's group
+commit (every `RAW_LOG_FLUSH_MS`, 1 s; sooner when `RAW_LOG_FLUSH_BYTES`, 4 MB, of batches
+wait, and at once when a stream ends) first writes one object holding the group's
+compressed event and log payloads to the blob store (`BLOB_STORE`: S3 or the disk
+directory) under `rawlog/<node>/<shard>/<ulid>`, then commits the segment rows with a byte
+range (`object_key`, `object_offset`, `object_length`) in place of the payload. The
+acknowledgement follows the commit, which follows the object write, so "stored" means the
+object is written and the index committed. Objects span projects, are never served by URL
+and are read only by range through the server. Readers (Events tab, log viewer, downloads,
+`Invocations.raw_frames/1`) resolve both forms row by row, with a build's ranges in one
+object fetched as one GET, and the raw archive compacts a build's rows into its
+per-project blobs as before whichever form they have, so rows written in either mode stay
+readable for their whole retention.
+
+- Sweep: every object is registered in `raw_log_objects` before it is written. Daily at
+  04:30 UTC `RawLogSweep` deletes the objects registered more than `RETENTION_RAW_DAYS + 1`
+  days ago (the bytes, then the row) and never one registered on or after the day of the
+  oldest segment partition that still exists: a day the hourly drop has not reached, or
+  that the archive's guard keeps, keeps its objects (`docs/spec/RawLog.tla`). Orphans of a
+  commit that failed after its put, or of a node that died in between (the client never
+  saw an ack and resends), go the same way; nothing is listed and nothing is
+  reference-counted. `conveyor_raw_log_sweep_failed_count` counts objects it could not
+  delete; they are retried the next day. The sweep runs in both modes, so objects left by
+  a blob-mode period are collected after a switch back.
+- Cost: the PUTs. A node issues at most `INGEST_WRITER_SHARDS × 1000 / RAW_LOG_FLUSH_MS`
+  per second whatever the event rate (8 shards at 1 s: 8/s, about $3.50/day on S3), plus
+  one per 4 MB received under flat-out load; an idle shard writes nothing. Reads are one
+  ranged GET per object a build touches. Mid-build acks wait up to `INGEST_BATCH_FLUSH_MS`
+  plus `RAW_LOG_FLUSH_MS` (measured p50 1.6 s, p99 3 s on paced builds; the end of a build
+  flushes at once), see PLAN §25 "Ack latency in blob mode".
+- Metrics: `conveyor_raw_log_put_count` and `conveyor_raw_log_put_bytes` (objects and
+  bytes written), `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count`.
+- When `conveyor_raw_log_put_failed_count` rises: a failed put raises in the writer, the
+  group takes the per-batch fallback (each batch tries its own object), and a batch that
+  still cannot be stored fails its worker, so Bazel resends it; nothing is acknowledged
+  that is not stored, but `conveyor_ingest_ack_latency_us` climbs and, if every put
+  fails, no batch commits and clients give up at their timeout. Check, in order: the
+  store itself (raw-log calls are not counted in `conveyor_blobs_errors_count{op}`, so
+  that series rising too means the whole store is down, the raw-log counter alone means
+  something specific to the `rawlog/` prefix: on S3 the credentials, the bucket's region
+  and the policy for `PutObject`, `GetObject` and `DeleteObject` under `rawlog/`, which
+  is outside the per-project prefixes; on the disk backend free space and permissions on
+  `BLOB_DIR`), the node's log (`raw log put rawlog/… failed: …` carries the store's
+  reason), then that `conveyor_raw_log_put_count` resumes. Failed puts leave rows in `raw_log_objects` with
+  no object behind them; the sweep removes them with the rest. The table's size is one
+  row per object: `SELECT count(*), min(inserted_at) FROM raw_log_objects` (at most
+  shards × 86,400 × 1000 / `RAW_LOG_FLUSH_MS` rows per node and day; `min` older than
+  `RETENTION_RAW_DAYS + 2` days means the sweep is not running or is failing).
+- Switching modes: `RAW_LOG` can change in either direction with a restart and nothing to
+  migrate, since rows keep their form and readers resolve both (a build streaming across
+  the switch has rows of both kinds). Objects written in blob mode stay, and keep being
+  read, until the sweep removes them after `RETENTION_RAW_DAYS + 1` days, so keep the
+  store's credentials and the `raw_log_objects` table until then. Going back to postgres
+  mode puts the segment bytes back into the database's WAL and IOPS (docs/capacity.md
+  "Raw log" has the difference).
 
 ## Runbooks
 

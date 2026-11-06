@@ -190,9 +190,9 @@ Next: C4 non-hermetic report on the dashboard (spawns whose `inputs_digest` equa
 
 **E. AWS trial — run 2026-09-20; results in docs/scale.md "AWS trial".** Stack in `deploy/trial` (README there): Terraform (state in S3 `conveyor-trial-tfstate-948761147826`), images built on the laptop into ECR, `bootstrap.sh` (API key + NativeLink cache endpoint via SSM `bin/conveyor rpc` on a spare dist port), `runner.py` (ECS Fargate waves), `projects.json`. **Current state:** Conveyor is still up at https://conveyor.algobien.com (admin token: `terraform output -raw admin_token`; 420 invocations, dashboard filters `wave:w1|w2|w3|w4`, `repo:grpc`, `mode:rbe`); NativeLink and the workers were torn down (`-var rbe_enabled=false -var nl_workers=0`), so cache endpoint fetches for new builds would fail and the private-zone records are gone. Nodes run the image built from commit a9aff36 (all fixes below, refreshed 2026-09-20 06:30 UTC); `terraform destroy` removes everything (RDS without snapshot). **Open on the live server:** 24 execution logs (big protobuf/abseil/buildtools ones) stay `available` — their `ParseExecLog` jobs were orphaned twice (an instance refresh, then a producer that lost them) and after my manual rescues (`update_all` to `available`, then `Oban.retry_all_jobs`) the queue still does not fetch them although it is unpaused, empty and notified; `docker logs` shows no Oban error. Next step: run one by hand (`Oban.Job` id → `Conveyor.Workers.ParseExecLog.perform/1` via rpc) to see whether the job itself dies, then check `oban_jobs` for `scheduled_at`/`priority` oddities; parsing a 2 MB log takes ~6 s locally. Costs while only Conveyor runs: about $0.55/h. Findings and fixes are listed in docs/scale.md; open follow-ups: (1) NativeLink Rust RBE "cross-device link" (worker `work_directory` and `TMPDIR` on the same filesystem, or `use_mount_namespace: false`); (2) parse throughput for big execution logs (the `expand` step builds every spawn's input list; intern paths and digests per log, or parse in a Task pool); (3) stray lifecycle workers still exist until idle timeout (they now resume or record directly; consider not starting a worker for attempt-started when the row exists); (4) the runner launched a wave twice once (`run` is not idempotent by wave — add a guard); (5) Playwright cannot log in to the trial UI without the token, so screenshots came from public pages.
 
-### NEXT: PLAN §25 step 3 (sharding by project group), design in PLAN §25 "Step 3 design"; before it, the step 2 leftovers below
+### NEXT: PLAN §25 step 3 (sharding by project group), design in PLAN §25 "Step 3 design"; before it, the higher-load linearity run (step 2 section below)
 
-### PLAN §25 step 2, the raw log (2026-11-06, landed; leftovers below)
+### PLAN §25 step 2, the raw log (2026-11-06, landed)
 
 Design and order of work are in PLAN §25 "Step 2 design". **Landed (2026-11-06):** items
 1–6 (migrations, `Conveyor.RawLog`, writer blob mode, readers/archive by range,
@@ -211,16 +211,19 @@ configuration (`INGEST_BATCH_FLUSH_MS=1000 RAW_LOG_FLUSH_MS=250`), not the defau
 The flat-out gap was root-caused (`25c5b55`, PLAN §25 "Step 2 measurements"); the
 2026-11-06 evening flat-out runs verified 10,000/10,000 builds with 0 failed and 0 unfinished,
 so the "52 unaccounted builds" of the earlier run did not reproduce (likely the bench's
-drain window, not a loss). **Not done:** item 7 `RawLog.tla`, the operations doc
-(docs/operations: blob mode, sweep, what to check when `conveyor_rawlog_put_failed` fires).
+drain window, not a loss). **Item 7 and the docs landed the same evening:**
+`docs/spec/RawLog.tla` (four configurations in `check.sh`, README section "The raw log in
+blob mode"; the `current` configuration showed the sweep's age-only cutoff racing a late
+partition drop, so `Workers.RawLogSweep` now bounds its cutoff by
+`Partitions.oldest_day/0`) and docs/operations.md "Raw log (blob mode)" (blob mode, the
+sweep, what to check when `conveyor_raw_log_put_failed_count` rises, switching modes).
 Coverage is 94.8 % with the gate green (`coveralls.json` minimum 95 is not enforced by the
 exit code; the uncovered lines are the S3 branches of `RawLog`, exercised only by `--only s3`).
 **Trial state (2026-11-06 03:15 UTC): scaled down to the demo shape** (plain `terraform
 apply`: one `t4g.medium`, `db.t3.micro`, Caddy, `RAW_LOG=postgres`; image `25c5b55`; health
 200; `fleet*` keys revoked). Segment rows written in blob mode still reference S3 raw-log
 objects (readers resolve both forms); the sweep removes those objects after
-`RETENTION_RAW_DAYS + 1` days. Still to do for step 2: `RawLog.tla`, operations doc; then
-the higher-load linearity run (bigger database class and six nodes, flat-out generators at
+`RETENTION_RAW_DAYS + 1` days. Still to do before step 3: the higher-load linearity run (bigger database class and six nodes, flat-out generators at
 125 streams crash — use 60) before step 3.
 
 ### PLAN §25 step 1 measured — 2026-11-06 (fleet shape still up from October)
