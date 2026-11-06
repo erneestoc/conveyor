@@ -140,6 +140,43 @@ defmodule Conveyor.Blobs.S3 do
     end
   end
 
+  @doc "Puts bytes under a key that is not a content digest (the raw log, PLAN §25 step 2)."
+  @spec put_object(String.t(), binary(), keyword()) :: :ok | {:error, term()}
+  def put_object(key, body, opts) when is_binary(body) do
+    hash = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+    headers = [{"content-type", "application/octet-stream"}]
+
+    case request(:put, key, opts, headers, body, hash) do
+      {:ok, status, _headers, _body} when status in 200..299 -> :ok
+      {:ok, status, _headers, body} -> {:error, {:http, status, body}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc "Reads `length` bytes at `offset` of an object (one ranged GET)."
+  @spec get_range(String.t(), non_neg_integer(), pos_integer(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def get_range(key, offset, length, opts) do
+    range = [{"range", "bytes=#{offset}-#{offset + length - 1}"}]
+
+    case request(:get, key, opts, range, nil, @empty_sha256) do
+      {:ok, status, _headers, body} when status in [200, 206] and byte_size(body) == length ->
+        {:ok, body}
+
+      {:ok, status, _headers, body} when status in [200, 206] ->
+        {:error, {:short_read, byte_size(body)}}
+
+      {:ok, 404, _headers, _body} ->
+        {:error, :not_found}
+
+      {:ok, status, _headers, body} ->
+        {:error, {:http, status, body}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   @doc "Object URL for a digest under the configured bucket, prefixes and addressing style."
   def url(digest, opts) do
     bucket = Keyword.fetch!(opts, :bucket)

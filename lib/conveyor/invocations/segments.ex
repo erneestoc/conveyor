@@ -12,6 +12,10 @@ defmodule Conveyor.Invocations.EventSegment do
     field :kinds, {:array, :string}, default: []
     field :byte_size, :integer
     field :payload, :binary
+    # Blob mode (PLAN §25 step 2): the bytes live in a raw-log object, not in the row.
+    field :object_key, :string
+    field :object_offset, :integer
+    field :object_length, :integer
     field :inserted_at, :utc_datetime_usec
   end
 end
@@ -31,6 +35,10 @@ defmodule Conveyor.Invocations.LogSegment do
     field :byte_size, :integer
     field :line_count, :integer
     field :data, :binary
+    # Blob mode (PLAN §25 step 2): the bytes live in a raw-log object, not in the row.
+    field :object_key, :string
+    field :object_offset, :integer
+    field :object_length, :integer
     field :inserted_at, :utc_datetime_usec
   end
 end
