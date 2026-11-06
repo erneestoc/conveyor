@@ -86,6 +86,36 @@ checks the object under the lock); blob deletion as in the Blobs round two above
 the model: builds that never finish are never archived and their segments go with the
 partition after `RETENTION_RAW_DAYS`, as before the archive.
 
+## The raw log in blob mode (`RawLog.tla`)
+
+`RAW_LOG=blob` (PLAN §25 step 2): a writer shard on each of two nodes takes the batches
+pending on it as one group, registers a fresh key in `raw_log_objects`, writes the group's
+bytes to that object and commits the byte-range index rows; the acknowledgement follows
+the commit. A batch's row lives in the daily partition of its build's creation day; the
+hourly job drops the days older than `RETENTION_RAW_DAYS`, the daily sweep deletes the
+registered objects older than that plus a day. Properties: `Readable` (an acknowledged
+batch's bytes are readable from its index row's object until the row's partition is
+dropped) and `Registered` (every object in the store has a row, so the sweep reaches it).
+Chaos: a node dies between any two writer steps (its batches are resent, nothing was
+acknowledged), a put fails, a commit fails after the put (an orphan the sweep collects),
+both nodes write at once, midnight falls while a batch waits in a writer, and the
+partition drop runs late or not at all (a stalled maintenance queue, or the archive's
+drop guard keeping the day). `R` = 1, two batches, two objects per writer.
+
+| Config | Knobs | Result |
+|---|---|---|
+| `RawLog_fixed.cfg` | row before bytes, ack after the commit, the sweep bounded by the oldest live partition | holds (7.4M distinct states, about 15 s) |
+| `RawLog_current.cfg` | the sweep as landed on 2026-11-06: age alone (`R + 1` days) | `Readable` violated in 10 steps: a batch of day 0 commits on day 2 into an object registered on day 1; the drop of partition 0 (due on day 2) has not run when, on day 3, the sweep deletes the object under the acknowledged batch's row. In real time the drop (the first hourly run after midnight) and the sweep (04:30) fall on the same day, so only hours of ordering separate them, and the archive's guard, which keeps a day on purpose, removes even that |
+| `RawLog_ackonput.cfg` | the ack once the bytes are durable, before the index commit | `Readable` violated in 6 steps: acknowledged with no row to find the bytes by; a failed commit or a crash then leaves them an orphan the sweep collects, and the client never resends |
+| `RawLog_rowafter.cfg` | the row registered after the bytes | `Registered` violated in 3 steps: the window in which a crash leaves an object no sweep will ever delete |
+
+The writer and `RawLog.put/2` already did the first two (`store_object!/2` runs before the
+transaction, the row goes in before the bytes); the third is the change the model asked
+for: `Workers.RawLogSweep` bounds its cutoff by `Partitions.oldest_day/0`, since an
+object is registered when its batches commit and so never before their build's creation
+day, a partition of day `d` only references objects registered on or after `d`
+(`raw_log_sweep_test.exs`).
+
 ## Deduplicated input lists (`SpawnInputs.tla`)
 
 Execution-log input lists are stored once per project and digest (`spawn_inputs`) and

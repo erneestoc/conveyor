@@ -18,6 +18,14 @@
   per hold is in PLAN §25 "Ack latency in blob mode": the defaults stay (writer hold 1 s,
   batch hold 2 s; sub-second mid-build acks are `INGEST_BATCH_FLUSH_MS=1000
   RAW_LOG_FLUSH_MS=250` at a third more WAL per event and four times the PUTs).
+- **Raw log: the sweep stops at the oldest segment partition.** `RawLogSweep` deleted
+  objects by age alone (`RETENTION_RAW_DAYS + 1` days), due on the same day as the
+  partition drop; a drop that ran late (a stalled maintenance queue, or the archive's
+  guard keeping a day) would have left acknowledged rows pointing at deleted bytes. The
+  cutoff now never passes the day of the oldest segment partition that exists. Found by
+  `docs/spec/RawLog.tla` (an acknowledged batch's bytes stay readable until its partition
+  is dropped, every object is registered; four configurations in `check.sh`); the
+  operations guide gained "Raw log (blob mode)".
 - **Batches wait two seconds for more events (`INGEST_BATCH_FLUSH_MS` 50 → 2000).** A real
   build sends an event every few hundred milliseconds, so a 50 ms hold committed one
   segment row and one fenced invocation update per event: at 5,000 concurrent builds that

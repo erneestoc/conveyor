@@ -74,6 +74,17 @@ defmodule Conveyor.Storage.Partitions do
     Enum.map(rows, fn [name] -> name end)
   end
 
+  @doc """
+  The day of the oldest daily segment partition of either table, or nil when there is
+  none. The raw-log sweep stops at it: a row in that partition can only reference an
+  object registered on or after that day.
+  """
+  @spec oldest_day() :: Date.t() | nil
+  def oldest_day do
+    for(table <- @tables, name <- partition_names(table), do: day_of(table, name))
+    |> Enum.min(Date, fn -> nil end)
+  end
+
   defp create(table, day) do
     name = partition_name(table, day)
     from = Date.to_iso8601(day)
