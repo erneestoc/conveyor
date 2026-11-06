@@ -469,12 +469,17 @@ defmodule Conveyor.Ingest.Writer do
 
   defp upsert_grouped(_schema, [], _conflict_target, _keep), do: :ok
 
+  # Rows go in conflict-key order: two nodes upserting the same build's rows (a resumed
+  # stream whose stale worker's batches are still in a writer's group) then lock them in
+  # the same order instead of deadlocking; the linearity run's resend storm retried 507
+  # deadlocked group commits on one node (PLAN §25).
   defp upsert_grouped(schema, rows, conflict_target, keep) do
     rows
     |> Enum.group_by(&(&1 |> Map.keys() |> Enum.sort()))
     |> Enum.each(fn {keys, group} ->
       replace = (keys -- conflict_target) -- keep
       on_conflict = if replace == [], do: :nothing, else: {:replace, replace}
+      group = Enum.sort_by(group, &Map.take(&1, conflict_target))
       Repo.insert_all(schema, group, on_conflict: on_conflict, conflict_target: conflict_target)
     end)
   end

@@ -161,12 +161,20 @@ defmodule Conveyor.Artifacts do
     case invocation do
       %Invocation{profile_status: "referenced", profile_uri: uri} = inv when is_binary(uri) ->
         case Resource.parse_uri(uri) do
-          {:ok, %Resource{hash: hash}} ->
-            with true <- Blobs.exists?(inv.project_id, hash),
-                 :ok <- profile_available(inv, Blobs.get(inv.project_id, hash)) do
-              :ok
-            else
-              _ -> enqueue_profile_fetch(inv)
+          {:ok, %Resource{hash: hash} = ref} ->
+            cond do
+              Blobs.exists?(inv.project_id, hash) and
+                  profile_available(inv, Blobs.get(inv.project_id, hash)) == :ok ->
+                :ok
+
+              # No endpoint for the URI's host: permanent, decided here rather than by a job
+              # that would be inserted, run and cancelled for every build of the project
+              # (three `oban_jobs` writes per build on the trial's load-test project).
+              endpoint_for(Projects.get_project!(inv.project_id), ref) == nil ->
+                set_profile_status(inv, "unavailable", :endpoint_not_configured)
+
+              true ->
+                enqueue_profile_fetch(inv)
             end
 
           {:error, reason} ->

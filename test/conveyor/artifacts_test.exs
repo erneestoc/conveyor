@@ -179,18 +179,23 @@ defmodule Conveyor.ArtifactsTest do
       uri = "bytestream://#{authority}/#{resource}"
       inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
 
+      # No endpoint configured: permanent, and no job is inserted for it.
       :ok = Artifacts.on_finalized(inv.id)
-      assert_enqueued(worker: FetchProfile, args: %{invocation_id: inv.id})
+      refute_enqueued(worker: FetchProfile)
+      assert Repo.get!(Invocation, inv.id).profile_status == "unavailable"
 
-      # No endpoint configured: permanent.
+      # The job itself reaches the same verdict when the endpoint vanishes in between.
+      inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
+
       assert {:cancel, :endpoint_not_configured} =
                perform_job(FetchProfile, %{invocation_id: inv.id})
-
-      assert Repo.get!(Invocation, inv.id).profile_status == "unavailable"
 
       {:ok, _} =
         Projects.put_cache_endpoint(project, authority, %{"headers" => %{}, "tls" => false})
 
+      inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
+      :ok = Artifacts.on_finalized(inv.id)
+      assert_enqueued(worker: FetchProfile, args: %{invocation_id: inv.id})
       assert :ok = perform_job(FetchProfile, %{invocation_id: inv.id})
       assert %{profile_status: "available", profile_blob: digest} = Repo.get!(Invocation, inv.id)
       assert {:ok, ^data} = Blobs.read(project.id, digest)
