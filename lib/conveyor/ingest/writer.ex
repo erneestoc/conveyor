@@ -66,16 +66,27 @@ defmodule Conveyor.Ingest.Writer do
        timer: nil,
        flush_ms:
          if(RawLog.blob_mode?(), do: RawLog.flush_ms(), else: config(:writer_flush_ms, 20)),
-       max_pending: config(:writer_max_pending, 256)
+       max_pending: config(:writer_max_pending, 256),
+       # Blob mode only: the hold is long, so a shard under load flushes by size instead.
+       bytes: 0,
+       max_bytes: if(RawLog.blob_mode?(), do: RawLog.flush_bytes(), else: nil)
      }}
   end
 
   @impl true
   def handle_cast({:submit, batch, from}, state) do
-    state = %{state | pending: [{batch, from} | state.pending], count: state.count + 1}
+    state = %{
+      state
+      | pending: [{batch, from} | state.pending],
+        count: state.count + 1,
+        bytes: state.bytes + batch.event_bytes + batch.log_bytes
+    }
 
     cond do
       state.count >= state.max_pending ->
+        {:noreply, flush(state)}
+
+      state.max_bytes != nil and state.bytes >= state.max_bytes ->
         {:noreply, flush(state)}
 
       # The batch that ends a stream carries the build's final status and its last ack:
@@ -118,7 +129,7 @@ defmodule Conveyor.Ingest.Writer do
       %{shard: state.shard}
     )
 
-    %{state | pending: [], count: 0, timer: nil}
+    %{state | pending: [], count: 0, bytes: 0, timer: nil}
   end
 
   # A failure anywhere in the group rolls everything back. A fenced invocation (a stale

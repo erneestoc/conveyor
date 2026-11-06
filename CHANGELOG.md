@@ -9,6 +9,15 @@
   the archive compacts as before, and a daily sweep deletes objects older than the raw
   retention plus a day (objects are registered before they are written, so no listing and
   no orphans). Mid-build acks wait up to `RAW_LOG_FLUSH_MS` (1 s) more. PLAN §25 step 2.
+- **Raw log: coalesced reads, a size-triggered flush, the S3 contract test.** Readers fetch
+  a build's byte ranges through `RawLog.fetch_rows!/2`, one ranged GET per object instead
+  of one per row (`[:conveyor, :raw_log, :get_range]` counts them); a writer shard in blob
+  mode writes its object as soon as `RAW_LOG_FLUSH_BYTES` (4 MB) of batches wait, so a
+  chatty build never fills a shard's memory for the whole hold; `mix test --only s3`
+  covers `put_object`, `get_range` and `delete` for raw-log keys. Measured ack latency
+  per hold is in PLAN §25 "Ack latency in blob mode": the defaults stay (writer hold 1 s,
+  batch hold 2 s; sub-second mid-build acks are `INGEST_BATCH_FLUSH_MS=1000
+  RAW_LOG_FLUSH_MS=250` at a third more WAL per event and four times the PUTs).
 - **Batches wait two seconds for more events (`INGEST_BATCH_FLUSH_MS` 50 → 2000).** A real
   build sends an event every few hundred milliseconds, so a 50 ms hold committed one
   segment row and one fenced invocation update per event: at 5,000 concurrent builds that

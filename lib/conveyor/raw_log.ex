@@ -24,6 +24,15 @@ defmodule Conveyor.RawLog do
   @spec flush_ms() :: pos_integer()
   def flush_ms, do: Application.get_env(:conveyor, __MODULE__, [])[:flush_ms] || 1000
 
+  @doc """
+  In blob mode a writer shard flushes before its hold once this many bytes of batches
+  (event and log bytes as received, before compression) wait, so flat-out load fills
+  objects instead of waiting out the hold.
+  """
+  @spec flush_bytes() :: pos_integer()
+  def flush_bytes,
+    do: Application.get_env(:conveyor, __MODULE__, [])[:flush_bytes] || 4 * 1024 * 1024
+
   @object_fields [:object_key, :object_offset, :object_length]
 
   @doc "The columns a segment row carries in blob mode."

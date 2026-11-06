@@ -953,6 +953,45 @@ almost two thirds and its bytes written by 60 % at the same event rate; the rema
 writes are the derived rows and the fenced update, which is what step 3 shards. The PUT
 cost scales with nodes × shards, not with events: ≈ $3/day per node at eight shards.
 
+### Ack latency in blob mode (2026-11-06)
+
+Laptop harness, disk backend, 16 writer shards, one run each, oracle green on all (paced:
+1,000 streams, one event per 500 ms, 1,500 builds; flat out: 200 streams, 10,000 builds).
+`b` is `INGEST_BATCH_FLUSH_MS`, `h` is `RAW_LOG_FLUSH_MS`; the size trigger
+(`RAW_LOG_FLUSH_BYTES`, 4 MB) is on unless noted. Writer flushes = objects written.
+
+| profile | b / h | events/s | WAL/event | xact/s | flushes (per s) | ack p50 / p99 |
+|---|---|---|---|---|---|---|
+| paced | 2000 / 1000 | 959 | 1,226 B | 140 | 2,147 (31) | 1.64 / 3.07 s |
+| paced | 2000 / 250 | 969 | 1,057 B | 165 | 2,997 (43) | 1.74 / 4.79 s |
+| paced | 2000 / 100 | 988 | 1,075 B | 200 | 4,117 (59) | 1.12 / 2.26 s |
+| paced | 1000 / 250 | 982 | 1,422 B | 196 | 3,898 (57) | **0.76 / 1.29 s** |
+| flat out | 2000 / 1000, size trigger off | 16,968 | 570 B | 1,968 | 10,026 | 54 / 316 ms |
+| flat out | 2000 / 1000 | 17,043 | 577 B | 1,991 | 10,027 | 54 / 355 ms |
+| flat out | 2000 / 250 | 17,908 | 570 B | 2,072 | 10,036 | 73 / 368 ms |
+| flat out | 2000 / 100 | 16,207 | 571 B | 1,893 | 10,461 | 58 / 505 ms |
+
+What the numbers say. (1) In paced mode the mid-build ack is dominated by the batch hold:
+an event waits on average half of `b` plus the writer hold, so shortening `h` from 1000 to
+250 ms changes nothing measurable (laptop noise is ± 20 %; the 250 ms run's p99 is a
+noisy outlier) and 100 ms buys ~0.5 s at twice the objects. Only lowering `b` gets p50
+under a second (1000 / 250: 0.76 s), and that costs 35 % more WAL per event and 18 % more
+transactions per second, the very savings step 1 bought: on the trial the 50 → 2000 hold
+was worth a quarter of the database's CPU, so the hold stays at 2000 and a deployment that
+wants sub-second mid-build acks sets `INGEST_BATCH_FLUSH_MS=1000 RAW_LOG_FLUSH_MS=250`.
+(2) Flat out, the size trigger is invisible on fixture builds: each is one batch and the
+stream-ending batch flushes the shard at once (`25c5b55`), so there is one object per two
+builds whatever `h`. It matters for long, chatty builds, where a shard would otherwise
+accumulate a hold's worth of log bytes in memory and write one large object: with the
+trigger an object is at most ~4 MB of received bytes (a few times less after zstd), and
+PUTs scale with throughput (one per 4 MB received) instead of with the hold. (3) Cost of
+the hold on a node with 8 shards at $0.005 per 1,000 PUTs: `h` 1000 → at most 8 PUTs/s,
+$3.46/day; 250 → 32/s, $13.8/day; 100 → 80/s, $34.6/day (the laptop's 16 shards wrote 31,
+43 and 59 objects/s). **Defaults chosen:** `RAW_LOG_FLUSH_MS` stays 1000,
+`RAW_LOG_FLUSH_BYTES` 4 MB (new), `INGEST_BATCH_FLUSH_MS` stays 2000. The mid-build ack
+budget in blob mode is therefore p50 ≈ 1.6 s, p99 ≈ 3 s, which Bazel never waits on
+(build completion flushes at once); a sub-second p50 is a configuration, not a default.
+
 ### Step 3 design (agreed 2026-11-06, next): metadata sharded by project group
 
 **When.** One Aurora writer carries the remaining per-batch metadata work at ≈ 1.3 % CPU per
