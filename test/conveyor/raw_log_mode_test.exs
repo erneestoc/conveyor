@@ -1,9 +1,10 @@
 defmodule Conveyor.RawLogModeTest do
   use Conveyor.IngestCase, async: false
 
-  alias Conveyor.{Invocations, Projects, RawLog}
+  alias Conveyor.{Invocations, Projects, RawArchive, RawLog}
   alias Conveyor.Bep.Replay
-  alias Conveyor.Invocations.{EventSegment, LogSegment}
+  alias Conveyor.Ingest.Verify
+  alias Conveyor.Invocations.{EventSegment, Invocation, LogSegment}
   import Ecto.Query
 
   setup %{project: project} do
@@ -102,6 +103,39 @@ defmodule Conveyor.RawLogModeTest do
 
     assert log_ranges <=
              Repo.aggregate(from(s in LogSegment, where: s.invocation_id == ^inv.id), :count)
+  end
+
+  test "the archive compacts a build whose rows are byte ranges", %{grpc_port: port, key: key} do
+    prev = Application.get_env(:conveyor, RawArchive)
+    on_exit(fn -> Application.put_env(:conveyor, RawArchive, prev) end)
+    Application.put_env(:conveyor, RawArchive, enabled: true, after_hours: 24)
+
+    Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 20)
+    inv = ingest!(port, key, "clean_build_and_test", delay_ms: 25)
+    sent = inv.last_event_seq - 1
+    # Fixture builds carry the recording's event times; make this one finish now.
+    Repo.update_all(from(i in Invocation, where: i.id == ^inv.id),
+      set: [finished_at: DateTime.utc_now()]
+    )
+
+    inv = Invocations.get!(inv.id)
+    assert inv.raw_status == "segments"
+    events = Invocations.events(inv)
+    log = Invocations.log(inv)
+    assert log != ""
+
+    later = DateTime.add(DateTime.utc_now(), 2, :day)
+    assert {:ok, :archived} = RawArchive.archive(inv.id, later)
+    archived = Invocations.get!(inv.id)
+    assert Invocations.archived?(archived)
+    assert :ok = Verify.check(inv.id, sent)
+    assert Invocations.events(archived) == events
+    assert Invocations.log(archived) == log
+
+    # The archived copy stands on its own: the raw-log objects can go.
+    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) >= 1
+    assert Invocations.events(archived) == events
+    assert Invocations.log(archived) == log
   end
 
   test "fetch_rows! splits coalesced ranges, breaks on gaps and keys, and keeps inline rows" do
