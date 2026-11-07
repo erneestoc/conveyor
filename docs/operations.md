@@ -187,6 +187,20 @@ readable for their whole retention.
   mode puts the segment bytes back into the database's WAL and IOPS (docs/capacity.md
   "Raw log" has the difference).
 
+### Database parameters
+
+Two PostgreSQL settings matter for the write path and both are dynamic (no restart):
+`max_wal_size` and `checkpoint_timeout`. A long build's rows are rewritten on every
+batch, and every checkpoint makes the next write of each touched page copy the whole page
+into the WAL and later flush it, so frequent checkpoints multiply the volume's work. The
+trial runs 16 GB and 15 min (`deploy/trial/conveyor.tf`); measured at 5,000 paced streams
+that cut write IOPS from 778 to 286 and bytes written from 20 to 13 MB/s at the same event
+rate (PLAN §25 "Linearity run"). Keep `max_wal_size` well under the volume's free space and
+raise it with the volume. The volume's own limits come first on RDS gp3 below 400 GB
+(3,000 IOPS, 125 MB/s): `WriteLatency` above 10 ms with `DiskQueueDepth` in the tens means
+the storage, not the instance, is the ceiling; provision throughput or move to Aurora.
+`wal_compression` is on by default on RDS PostgreSQL 17 (`zstd`).
+
 ## Runbooks
 
 Each alert in `deploy/prometheus/alerts.yml` maps to one of these.

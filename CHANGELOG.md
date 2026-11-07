@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Linearity run (PLAN §25):** six nodes and an 8-vCPU database in blob mode, flat out
+  to 66k events/s and paced at 5,000 streams: the database's CPU is linear at ≈ 0.6 % per
+  1,000 events/s on 8 vCPUs, the gp3 volume is the first ceiling, and `max_wal_size` 16 GB
+  with `checkpoint_timeout` 15 min cuts the paced load's write IOPS by 63 % (now the trial's
+  parameter-group defaults). Fixed on the way: the fleet generator died after two minutes
+  flat out (`cacerts` copied into the literal area per connection; it passes `cacertfile`
+  now), `FetchProfile` jobs were inserted and cancelled for every build of a project without
+  a cache endpoint (the endpoint is checked at finalize time), the writer's grouped upserts
+  insert rows in conflict-key order so two nodes writing one build cannot deadlock on them,
+  and `bench/fleet.sh` waits for a task's lagging log lines before reading its summary.
 - **The raw log (`RAW_LOG=blob`, off by default): raw bytes leave the database's commit
   path.** In blob mode a writer shard puts each group commit's compressed event and log
   bytes into one object in the blob store (S3 or disk) and the segment rows keep a byte

@@ -992,6 +992,81 @@ $3.46/day; 250 → 32/s, $13.8/day; 100 → 80/s, $34.6/day (the laptop's 16 sha
 budget in blob mode is therefore p50 ≈ 1.6 s, p99 ≈ 3 s, which Bazel never waits on
 (build completion flushes at once); a sub-second p50 is a configuration, not a default.
 
+### Linearity run (2026-11-06, blob mode, 6 × `t4g.xlarge`, `db.m6g.2xlarge`)
+
+The step 2 question before sharding: does the database's cost stay proportional to the
+event rate when the raw bytes are in S3, and what gives out first. Six 4-vCPU nodes behind
+the NLB, `RAW_LOG=blob` (8 writer shards, 1 s / 4 MB hold, 2 s batch hold), an 8-vCPU
+`db.m6g.2xlarge` on the trial's 100 GB gp3 volume (3,000 IOPS, 125 MB/s), the database
+holding 39 GB of history from the earlier runs (`targets` 13 GB, `named_sets` 12 GB,
+`invocations` 6 GB; `shared_buffers` 7.6 GB). Generators: Fargate tasks replaying the
+120-build corpus flat out at 60 streams each, 4 minutes per level; the server-side window
+spans launches and drain, so its average rate is below the generators' sum.
+
+| level | streams | events/s sent (sum of tasks) | events/s (window) | builds | retried | ack p50 / p99 | RDS CPU avg / max | write IOPS | written avg / max | read IOPS | disk queue | nodes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 8 tasks | 480 | — (generator crash, below) | 32,100 | 16,298 | — | — | 22.9 % / 39 % | 472 | 40 / 74 MB/s | 1,355 | 9.5 | 46 % |
+| 16 tasks | 960 | 73,100 | 56,600 | 38,849 | 2,171 (5.6 %) | 1.0 / 17.7 s | 33.3 % / 52 % | 1,736 | 88 / 112 MB/s | 1,278 | 27 | 66 % |
+| 19 tasks | 1,140 | 82,900 | 66,100 | 44,226 | 3,927 (8.9 %) | 1.1 / 24.7 s | 38.4 % / 53 % | 1,298 | 72 / 105 MB/s | 1,708 | 29 | 61 % |
+| 16 tasks, `max_wal_size` 16 GB / `checkpoint_timeout` 15 min (applied a minute in) | 960 | 81,200 | 54,600 | 41,915 | 2,278 (5.4 %) | 1.3 / 19.6 s | 34.2 % / 49 % | 1,065 | 77 / 117 MB/s | — | 17 | 57 % |
+| 16 tasks, same, clean window | 960 | 63,800 | 49,700 | 32,899 | 1,428 (4.3 %) | 2.3 / 15.0 s | 28.0 % / 40 % | 1,291 | 73 / 119 MB/s | — | 26 | 50 % |
+
+Paced profile (125 streams per task at one event per 500 ms, 10 min of sends), same shape,
+run after the flat-out levels on a database holding 240k builds from the day:
+
+| level | streams | builds | ok / failed | events/s (window) | ack p50 / p99 | RDS CPU | write IOPS avg / max | written avg / max | write latency | disk queue |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 96 tasks | 12,000 | 37,599 | 139 / 5,357 of the 5,496 that reported | 4,600 | 3.5 / 28.1 s | 47.6 % / 69 % | 1,724 / **3,034** | 99 / **123 MB/s** | 29 ms | 38 / 57 |
+| 60 tasks | 7,500 | 24,865 | 9,687 / 15,178 | 4,900 | 2.2 / 12.8 s | 41.5 % / 60 % | 1,443 / 2,596 | 80 / 104 MB/s | — | 25 / 49 |
+| 40 tasks (the October A/B load) | 5,000 | 13,200 | 13,200 / 0 (48 retried) | 5,900 (6,644 sent) | 1.85 / 3.15 s | **10.6 % / 19 %** | 778 / 1,862 | 20 / 48 MB/s | — | 6 / 20 |
+| 40 tasks, `max_wal_size` 16 GB / `checkpoint_timeout` 15 min | 5,000 | 13,200 | 13,200 / 0 (29 retried) | 5,900 (6,642 sent) | 1.82 / 3.10 s | 10.3 % / 21 % | **286 / 571** | **13 / 27 MB/s** | — | **0.7 / 2.6** |
+
+The two big paced levels are the documented spiral, not a throughput number: the volume
+was at its IOPS and throughput caps (write latency 29 ms, queue depth 57), group commits
+stretched past the clients' 30 s ack timeout, clients resent through the balancer, the
+resends fenced the stale workers' batches (19,575 `{:fenced, _}` commits on one node in
+25 minutes) and the group commits of two nodes writing the same builds deadlocked (507
+retried on one node), every failed build leaving an `in_progress` row (50,885 to clean up).
+Two amplifiers found in the writer: **a fenced group's retry and the batch-by-batch
+fallback write new raw-log objects** (the first object becomes an orphan for the sweep),
+so under the storm the PUT rate was 153/s against the 48/s the holds bound; and the
+derived-row upserts insert rows in hash order, so two nodes upserting the same build's
+targets lock them in different orders. The upsert order is fixed (`691c1a8`); the object reuse is a follow-up (HANDOFF). The same run found `FetchProfile` jobs inserted, run and cancelled for every build of a project without a cache endpoint (223,054 cancelled jobs, three `oban_jobs` writes per build): the endpoint is now checked at finalize time (`691c1a8`).
+
+Every flat-out level: 0 failed builds, 0 missing acks, oracle 100/100, 0 unfinished (the 124 of the
+first level are the builds the old generator cut when it died). Reading:
+
+- **The database is linear.** 0.71, 0.59, 0.58 and 0.63 % CPU per 1,000 events/s across
+  the levels on 8 vCPUs (≈ 0.6 %, or 5 % per 1,000 events/s per vCPU; the October
+  `db.m6g.xlarge` figure of 1.3 % on 4 vCPUs is the same number). A `db.m6g.2xlarge` would
+  reach 100 % at ≈ 150k events/s; a 16-vCPU writer at ≈ 300k. Transactions do not grow with
+  events either: 0.002 segment rows per event.
+- **The volume gives out first.** Bytes written are ≈ 1.4 KB/event (WAL plus data files; the
+  raw bytes are 252 B/event in S3 now) and peaked at 112–117 MB/s against the gp3 baseline
+  of 125 MB/s, with the queue depth at 27–47 and write latency up from 10 to 16 ms. On
+  RDS gp3 the throughput is fixed at 125 MB/s below 400 GB; a production database needs
+  provisioned throughput (gp3 ≥ 400 GB: up to 4,000 MB/s, io2) or Aurora, whose storage
+  takes only the log. Flat out, raising `max_wal_size` to 16 GB and `checkpoint_timeout` to 15 min (the two levels marked) changed nothing: 1.4–1.5 KB/event before and after, because flat-out builds touch each page once. **Paced, the same change is the biggest single saving of the day:** at 5,000 streams, write IOPS 778 → 286, bytes written 20 → 13 MB/s, queue depth 6.3 → 0.7, with `pg_stat_wal` showing full-page images down 75 % (1.19M → 0.30M per run) and WAL bytes down 13 % (1,042 → 908 B/event; images are zstd-compressed, so their count matters more for the dirty-page flushes that follow each checkpoint than for WAL bytes). A long build's rows are rewritten on every batch, so every checkpoint re-images the same pages; fewer checkpoints means fewer images and fewer flushes. The two parameters are now the trial's defaults (`deploy/trial/conveyor.tf`); on a bigger volume raise `max_wal_size` with it. What remains per event are the derived rows (`targets`, `named_sets`, `test_results`) and their indexes, which is what step 3 spreads over writers.
+- **Reads are the history, not the ingest.** 1,300–1,700 read IOPS (30 MB/s) at a 96.6 %
+  buffer hit ratio come from the `targets`/`named_sets`/`invocations` index lookups of the
+  per-build upserts over a 39 GB history that is four times the buffer pool. Retention
+  bounds the history; sizing rule: keep the hot indexes in memory or budget ≈ 25 read IOPS
+  per 1,000 events/s at this ratio.
+- **The nodes are the ceiling of this shape** at ≈ 80k events/s sent (≈ 3,300 per Graviton
+  vCPU flat out): the backlog shows as ack p99 near 20 s and 5–9 % of builds retried
+  after the client's 30 s ack timeout (every retry resumed, nothing lost). Scaling nodes
+  is horizontal; the database's share per node stays the same.
+- **Objects follow build completions flat out:** a stream-ending batch flushes its shard at
+  once, so flat out the PUT rate is ≈ builds finished per second (68–137/s here, 16–44k
+  builds in 4–5 min) rather than shards × 1/s per node. At a real fleet's completion rate
+  (1M builds/day ≈ 12/s) that is ≈ $5/day on top of the hold-bounded rate.
+- **Generator fix** (`1226571`): the fleet tasks died after ≈ 2 min flat out with
+  `literal_alloc: Cannot allocate … "literal"` (exit 133) at 60 and 125 streams, which is
+  also why the October ramp had no client percentiles: elixir-grpc keeps each channel with
+  its TLS options in `:persistent_term`, and `cacerts: :public_key.cacerts_get()` (650 KB)
+  was copied into the 1 GB literal area once per connection, one per build. The client now
+  passes `cacertfile`.
+
 ### Step 3 design (agreed 2026-11-06, next): metadata sharded by project group
 
 **When.** One Aurora writer carries the remaining per-batch metadata work at ≈ 1.3 % CPU per

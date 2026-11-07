@@ -162,6 +162,19 @@ resource "aws_db_parameter_group" "db" {
     name  = "rds.force_ssl"
     value = "1"
   }
+  # Fewer checkpoints under write load (PLAN §25 linearity run, 2026-11-06): at 5,000 paced
+  # streams the same load wrote 13 instead of 20 MB/s and 286 instead of 778 write IOPS
+  # (full-page images −75 %, WAL −13 %, dirty-page flushes with them), queue depth 6 → 0.7;
+  # flat-out ingest is unchanged. Both are dynamic (no reboot). The volume is 100 GB, so
+  # 16 GB of WAL leaves room; raise it with the volume.
+  parameter {
+    name  = "max_wal_size"
+    value = "16384"
+  }
+  parameter {
+    name  = "checkpoint_timeout"
+    value = "900"
+  }
 }
 
 # TLS certificate for the UI and the BES endpoint, validated through Route53.

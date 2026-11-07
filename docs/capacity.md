@@ -197,6 +197,27 @@ oracle 100/100; about 20 S3 PUTs per second for three nodes at eight writer shar
 (≈ $9/day, independent of the event rate); mid-build acks p50 1.9 s / p99 3.7 s. Off by
 default: see PLAN §25 for the open flat-out throughput finding.
 
+### Linearity run (2026-11-06, PLAN §25 step 2, blob mode at six nodes)
+
+Six `t4g.xlarge` behind the NLB, `db.m6g.2xlarge` (8 vCPU) on the 100 GB gp3 volume,
+`RAW_LOG=blob`, 39–43 GB of history in the database. Flat out (60 streams per generator
+task, 4 min per level) the database's CPU stayed at 0.6–0.7 % per 1,000 events/s from
+32k to 66k events/s (window average; the generators sent up to 83k/s), i.e. linear and
+about 5 % per 1,000 events/s per database vCPU; the six nodes gave out first at ≈ 80k
+events/s sent (ack p99 near 20 s, 5–9 % of builds retried after the 30 s client timeout,
+nothing lost, oracle 100/100 at every level), and the volume reached its 125 MB/s gp3
+throughput at ≈ 1.4 KB written per event with queue depth 27–47. Paced (5,000 streams,
+the October load): RDS CPU 10.6 %, 0 failed builds, ack p50 1.85 s / p99 3.15 s, objects
+at the hold-bounded 45/s; with `max_wal_size` 16 GB and `checkpoint_timeout` 15 min the
+same load wrote 13 instead of 20 MB/s and 286 instead of 778 write IOPS (now the trial's
+parameter-group defaults). 12,000 and 7,500 paced streams on this volume fell into the
+resend spiral (volume at its IOPS cap, write latency 29 ms, acks past 30 s, fencing and
+deadlocks), which is the shape's limit, not a throughput figure. Sizing from it: one
+8-vCPU writer carries ≈ 150k events/s of metadata work before CPU runs out; provision
+storage throughput (or Aurora) before that; ≈ 25 read IOPS per 1,000 events/s when the
+history is four times the buffer pool. Tables and the per-level details are in PLAN §25
+"Linearity run".
+
 What the four attempts say: three 2-vCPU nodes do **not** carry 5,000 paced real builds
 through a rolling deploy. The earlier "a third of their CPU" figure came from a run in
 which most generator streams had silently died. At about 1,700 streams per node the two

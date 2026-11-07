@@ -190,7 +190,7 @@ Next: C4 non-hermetic report on the dashboard (spawns whose `inputs_digest` equa
 
 **E. AWS trial — run 2026-09-20; results in docs/scale.md "AWS trial".** Stack in `deploy/trial` (README there): Terraform (state in S3 `conveyor-trial-tfstate-948761147826`), images built on the laptop into ECR, `bootstrap.sh` (API key + NativeLink cache endpoint via SSM `bin/conveyor rpc` on a spare dist port), `runner.py` (ECS Fargate waves), `projects.json`. **Current state:** Conveyor is still up at https://conveyor.algobien.com (admin token: `terraform output -raw admin_token`; 420 invocations, dashboard filters `wave:w1|w2|w3|w4`, `repo:grpc`, `mode:rbe`); NativeLink and the workers were torn down (`-var rbe_enabled=false -var nl_workers=0`), so cache endpoint fetches for new builds would fail and the private-zone records are gone. Nodes run the image built from commit a9aff36 (all fixes below, refreshed 2026-09-20 06:30 UTC); `terraform destroy` removes everything (RDS without snapshot). **Open on the live server:** 24 execution logs (big protobuf/abseil/buildtools ones) stay `available` — their `ParseExecLog` jobs were orphaned twice (an instance refresh, then a producer that lost them) and after my manual rescues (`update_all` to `available`, then `Oban.retry_all_jobs`) the queue still does not fetch them although it is unpaused, empty and notified; `docker logs` shows no Oban error. Next step: run one by hand (`Oban.Job` id → `Conveyor.Workers.ParseExecLog.perform/1` via rpc) to see whether the job itself dies, then check `oban_jobs` for `scheduled_at`/`priority` oddities; parsing a 2 MB log takes ~6 s locally. Costs while only Conveyor runs: about $0.55/h. Findings and fixes are listed in docs/scale.md; open follow-ups: (1) NativeLink Rust RBE "cross-device link" (worker `work_directory` and `TMPDIR` on the same filesystem, or `use_mount_namespace: false`); (2) parse throughput for big execution logs (the `expand` step builds every spawn's input list; intern paths and digests per log, or parse in a Task pool); (3) stray lifecycle workers still exist until idle timeout (they now resume or record directly; consider not starting a worker for attempt-started when the row exists); (4) the runner launched a wave twice once (`run` is not idempotent by wave — add a guard); (5) Playwright cannot log in to the trial UI without the token, so screenshots came from public pages.
 
-### NEXT: PLAN §25 step 3 (sharding by project group), design in PLAN §25 "Step 3 design"; before it, the higher-load linearity run (step 2 section below)
+### NEXT: PLAN §25 step 3 (sharding by project group), design in PLAN §25 "Step 3 design". The linearity run is done (section below); nothing blocks step 3.
 
 ### PLAN §25 step 2, the raw log (2026-11-06, landed)
 
@@ -223,8 +223,30 @@ exit code; the uncovered lines are the S3 branches of `RawLog`, exercised only b
 apply`: one `t4g.medium`, `db.t3.micro`, Caddy, `RAW_LOG=postgres`; image `25c5b55`; health
 200; `fleet*` keys revoked). Segment rows written in blob mode still reference S3 raw-log
 objects (readers resolve both forms); the sweep removes those objects after
-`RETENTION_RAW_DAYS + 1` days. Still to do before step 3: the higher-load linearity run (bigger database class and six nodes, flat-out generators at
-125 streams crash — use 60) before step 3.
+`RETENTION_RAW_DAYS + 1` days. **Linearity run done the same evening (PLAN §25 "Linearity run", docs/capacity.md):** six
+`t4g.xlarge` + `db.m6g.2xlarge`, blob mode; the database is linear (≈ 0.6 % CPU per 1,000
+events/s on 8 vCPUs, flat out to 66k/s), the 100 GB gp3 volume is the first ceiling
+(125 MB/s at ≈ 1.4 KB written per event), the nodes saturate at ≈ 80k events/s sent, and
+`max_wal_size` 16 GB / `checkpoint_timeout` 15 min cut the paced load's write IOPS 778 → 286
+(now defaults in `deploy/trial/conveyor.tf`). Fixes from it: generator `cacertfile`
+(`1226571`; flat-out tasks no longer die, 60 streams per task is the setting that ran, 125
+untested since), `FetchProfile` not enqueued without an endpoint and upsert rows in
+conflict-key order (`691c1a8`), `bench/fleet.sh` waits for lagging CloudWatch lines.
+**Follow-ups recorded, not done:** (1) a fenced group's retry and the batch-by-batch
+fallback re-objectify and PUT a new raw-log object (the first becomes an orphan for the
+sweep): under the resend storm the PUT rate was 153/s against the 48/s the holds bound;
+reuse the object (filter the objectified plan's rows instead of re-planning). (2) The
+paced spiral at 7,500+ streams on this volume: once group commits pass the client's 30 s
+ack timeout, resends fence, fences deadlock, every tier amplifies; the fix is storage
+headroom (or Aurora) plus the upsert ordering already landed; a server-side guard (shed
+new streams when the writer's group latency passes a threshold) is worth a design note.
+(3) `named_sets` is 12 GB and `targets` 13 GB for ≈ 300k load-test builds (≈ 40 KB per
+build each): the per-build storage item for the next cost pass. (4) ≈ 50k load-test invocations abandoned by the failed paced levels: `Workers.SweepStale`
+marks them `disconnected` within two idle windows and build retention removes them; they
+were left in place (a bulk delete on the demo-shape `db.t3.micro` is not worth it). Scratchpad scripts of the run (`ramp2.sh`, `run_level.sh`,
+`measure.sh` with object counts and disk metrics, `refetch.sh`, `pgwal.exs`, `pgio.exs`,
+`pgdiag.exs`, `nodes.sh`, `scaledown.sh`, `pipeline*.sh`) live only in the session
+scratchpad; recreate from PLAN's description if needed.
 
 ### PLAN §25 step 1 measured — 2026-11-06 (fleet shape still up from October)
 

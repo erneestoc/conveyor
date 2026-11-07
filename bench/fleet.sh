@@ -37,7 +37,15 @@ for group in $(echo $arns | xargs -n 50 | tr ' ' ','); do
 done
 echo "stopped $(date -u +%T) after $(( $(date -u +%s) - start )) s"
 aws ecs describe-tasks --region $region --cluster $name-builders --tasks $arns --query 'tasks[].containers[0].[exitCode,reason]' --output text | sort | uniq -c
+# The awslogs driver delivers a task's last lines up to a minute after the task stops, so
+# a stream without its summary yet is read again (the 2026-11-06 runs lost up to half the
+# summaries to this).
 for arn in $arns; do
   id=${arn##*/}
-  aws logs get-log-events --region $region --log-group-name /$name/builders --log-stream-name loadgen/loadgen/$id --start-from-head --query 'events[].message' --output text | tr '\t' '\n' | grep -E "^(builds|events|ack|build) " | sed "s/^/$id: /"
+  for attempt in $(seq 1 12); do
+    lines=$(aws logs get-log-events --region $region --log-group-name /$name/builders --log-stream-name loadgen/loadgen/$id --start-from-head --query 'events[].message' --output text 2>/dev/null | tr '\t' '\n' | grep -E "^(builds|events|ack|build) ")
+    echo "$lines" | grep -q "^events " && break
+    sleep 10
+  done
+  echo "$lines" | sed "s/^/$id: /"
 done
