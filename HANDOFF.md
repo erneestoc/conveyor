@@ -219,9 +219,16 @@ partition drop, so `Workers.RawLogSweep` now bounds its cutoff by
 sweep, what to check when `conveyor_raw_log_put_failed_count` rises, switching modes).
 Coverage is 94.8 % with the gate green (`coveralls.json` minimum 95 is not enforced by the
 exit code; the uncovered lines are the S3 branches of `RawLog`, exercised only by `--only s3`).
-**Trial state (2026-11-06 03:15 UTC): scaled down to the demo shape** (plain `terraform
-apply`: one `t4g.medium`, `db.t3.micro`, Caddy, `RAW_LOG=postgres`; image `25c5b55`; health
-200; `fleet*` keys revoked). Segment rows written in blob mode still reference S3 raw-log
+**Trial state (2026-11-07 17:10 UTC): demo shape again** (plain `terraform apply`: one
+`t4g.medium`, `db.t3.micro` with the new parameter group in-sync, Caddy, `RAW_LOG=postgres`;
+image `:trial` = `691c1a8`; health 200; `terraform plan` clean; the 100 `fleet4-*` keys
+revoked; no ECS tasks). The scale-down after the linearity run was interrupted: the laptop
+slept at ≈ 20:20 UTC on 2026-11-06 mid-apply (NLB already destroyed, RDS modify in flight),
+so the six `t4g.xlarge` nodes ran until 17:00 UTC the next day (≈ $17 extra) and Terraform
+left `errored.tfstate` plus a held S3 lock; recovery was `terraform force-unlock <id from
+the apply log>`, `terraform state push errored.tfstate`, then a plain apply and an instance
+refresh. Lesson: keep the machine awake (`caffeinate`) through a long apply, or run it
+from a node. Segment rows written in blob mode still reference S3 raw-log
 objects (readers resolve both forms); the sweep removes those objects after
 `RETENTION_RAW_DAYS + 1` days. **Linearity run done the same evening (PLAN §25 "Linearity run", docs/capacity.md):** six
 `t4g.xlarge` + `db.m6g.2xlarge`, blob mode; the database is linear (≈ 0.6 % CPU per 1,000
