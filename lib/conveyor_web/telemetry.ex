@@ -166,6 +166,14 @@ defmodule ConveyorWeb.Telemetry do
         description:
           "Commit pressure as a fraction of the writer deadline (1.0: batches expire); the levels are entered at 0.15, 0.25 and 0.75"
       ),
+      last_value("conveyor.admission.state.builds_refused",
+        description:
+          "Share of new builds the node refuses (0-100): rises with the pressure from the shedding threshold, falls slowly"
+      ),
+      last_value("conveyor.admission.state.events_refused",
+        description:
+          "Share of open streams whose events the node refuses (0-100): above 0 only at the critical level"
+      ),
       last_value("conveyor.admission.state.ready",
         description: "1 while /health/ready answers 200"
       ),

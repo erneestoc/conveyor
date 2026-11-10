@@ -6,7 +6,7 @@ defmodule Conveyor.Admission do
 
   | Door | Call | Refused with |
   |---|---|---|
-  | a new stream (gRPC, the HTTP upload, `Ingest.push_all/3`) | `open_stream/2`, then `build/2` once the first event names the build | UNAVAILABLE / 503 (draining, overloaded, key above its share), RESOURCE_EXHAUSTED / 429 (key at its stream limit) |
+  | a new stream (gRPC, the HTTP upload, `Ingest.push_all/3`) | `open_stream/2`, then `build/4` once the first event names the build | UNAVAILABLE / 503 (draining, overloaded, key above its share), RESOURCE_EXHAUSTED / 429 (key at its stream limit) |
   | the next event of an open stream | `event/1` | UNAVAILABLE / 503; a key above its event rate is slowed down, never refused |
   | readiness (`/health/ready`) | `ready/0` | |
 
@@ -34,6 +34,8 @@ defmodule Conveyor.Admission do
   @database 5
   @share 6
   @pressure 7
+  @builds_pct 8
+  @no_share 0xFFFFFFFF
 
   @typedoc "What an open stream holds: its key, the key's limits and its shedding bucket."
   @opaque ticket :: {term(), Limits.limits(), 0..99, :atomics.atomics_ref()}
@@ -60,6 +62,17 @@ defmodule Conveyor.Admission do
     end
   end
 
+  @doc """
+  Ties an open stream to its build, once the first event names it: the stream's events are
+  refused by the build's bucket from here on (the same bucket on every node and on every
+  reconnect, so a build that is shed stays shed and the others can finish).
+  """
+  @spec bind(ticket(), String.t()) :: ticket()
+  def bind({key_id, limits, _bucket, cell}, invocation_id),
+    do: {key_id, limits, bucket(invocation_id), cell}
+
+  defp bucket(invocation_id), do: :erlang.phash2(invocation_id, 100)
+
   @doc "Gives the stream's slot back."
   @spec close_stream(ticket()) :: :ok
   def close_stream({key_id, _limits, _bucket, _cell}), do: Limits.release_stream(key_id)
@@ -67,25 +80,41 @@ defmodule Conveyor.Admission do
   @doc """
   The build a stream (or a lifecycle notification) belongs to is known. `resumed?` says the
   build already has events here or elsewhere: under pressure a build in progress is kept
-  and a new one is refused first.
+  and a new one is refused first. `announced?` is a second, costlier way to know (the
+  build's row exists), called only when the node is under pressure and `resumed?` is false.
   """
-  @spec build(ticket() | term(), boolean()) :: :ok | refusal()
-  def build({key_id, _limits, _bucket, _cell}, resumed?), do: build(key_id, resumed?)
+  @spec build(ticket() | term(), String.t(), boolean(), (-> boolean())) :: :ok | refusal()
+  def build(ticket_or_key, invocation_id, resumed?, announced? \\ fn -> false end)
 
-  def build(key_id, resumed?) do
+  def build({key_id, _limits, _bucket, _cell}, invocation_id, resumed?, announced?),
+    do: build(key_id, invocation_id, resumed?, announced?)
+
+  def build(key_id, invocation_id, resumed?, announced?) do
     cell = cell()
 
-    case :atomics.get(cell, @level) do
-      0 ->
+    case {:atomics.get(cell, @level), :atomics.get(cell, @builds_pct)} do
+      # (The share of builds in progress refused is never above that of new builds.)
+      {0, 0} ->
         :ok
 
-      level ->
+      {level, builds_pct} ->
+        # `announced?` is asked only here, on a node under pressure, about a stream that
+        # looks new: a build whose notification was admitted (on any node) has a row and
+        # is in progress, and refusing its stream now would leave that row behind.
         request = %{
-          resumed?: resumed?,
-          over_share?: Limits.streams(key_id) > :atomics.get(cell, @share)
+          resumed?: resumed? or announced?.(),
+          over_share?: Limits.streams(key_id) > :atomics.get(cell, @share),
+          # The same on every node, and on every retry.
+          bucket: bucket(invocation_id)
         }
 
-        case Policy.decide(:build, %{level: level, events_pct: 0}, request) do
+        state = %{
+          level: level,
+          builds_pct: builds_pct,
+          events_pct: :atomics.get(cell, @events_pct)
+        }
+
+        case Policy.decide(:build, state, request) do
           :accept -> :ok
           {:refuse, reason} -> refused(:build, reason)
         end
@@ -157,6 +186,7 @@ defmodule Conveyor.Admission do
       state: Policy.name(level),
       pressure: :atomics.get(cell, @pressure) / 1000,
       events_refused_pct: :atomics.get(cell, @events_pct),
+      builds_refused_pct: :atomics.get(cell, @builds_pct),
       ready: :atomics.get(cell, @ready) == 1,
       database: :atomics.get(cell, @database) == 1,
       draining: :atomics.get(cell, @draining) == 1,
@@ -183,6 +213,8 @@ defmodule Conveyor.Admission do
       %{
         level: s.level,
         pressure: s.pressure,
+        builds_refused: s.builds_refused_pct,
+        events_refused: s.events_refused_pct,
         ready: if(s.ready and not s.draining, do: 1, else: 0)
       },
       %{}
@@ -195,10 +227,13 @@ defmodule Conveyor.Admission do
     cell = cell()
     {total, keys} = Limits.share()
     :atomics.put(cell, @level, policy.level)
-    :atomics.put(cell, @events_pct, policy.events_pct)
+    :atomics.put(cell, @events_pct, ceil(policy.events_pct))
+    :atomics.put(cell, @builds_pct, ceil(policy.builds_pct))
     :atomics.put(cell, @ready, if(policy.ready, do: 1, else: 0))
     :atomics.put(cell, @database, if(policy.db_seen and policy.db_failures == 0, do: 1, else: 0))
-    :atomics.put(cell, @share, ceil(total / max(keys, 1)))
+    # A key is above its share only when there is another key to share with (and the
+    # count is a sample: a lone key's own growth since must not read as "above").
+    :atomics.put(cell, @share, if(keys >= 2, do: ceil(total / keys), else: @no_share))
     :atomics.put(cell, @pressure, round(policy.pressure * 1000))
   end
 
@@ -211,7 +246,7 @@ defmodule Conveyor.Admission do
   defp cell do
     case :persistent_term.get(@cell, nil) do
       nil ->
-        cell = :atomics.new(7, signed: false)
+        cell = :atomics.new(8, signed: false)
         :atomics.put(cell, @ready, 1)
         :atomics.put(cell, @database, 1)
         :persistent_term.put(@cell, cell)

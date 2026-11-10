@@ -109,11 +109,12 @@ defmodule Conveyor.Ingest do
 
   defp push_stream(ctx, events, ticket, timeout) do
     pushed =
-      Enum.reduce_while(events, {:ok, 0}, fn obe, {:ok, last} ->
-        with :ok <- if(last == 0, do: Admission.build(ticket, resumed?(ctx, obe)), else: :ok),
+      Enum.reduce_while(events, {:ok, 0, ticket}, fn obe, {:ok, last, ticket} ->
+        with :ok <- if(last == 0, do: admit_build(ticket, ctx, obe), else: :ok),
+             ticket = if(last == 0, do: bind(ticket, obe), else: ticket),
              :ok <- Admission.event(ticket),
              :ok <- push(ctx, obe, self()) do
-          {:cont, {:ok, obe.sequence_number}}
+          {:cont, {:ok, obe.sequence_number, ticket}}
         else
           {:refuse, reason} -> {:halt, {:error, {obe.sequence_number, {:refused, reason}}}}
           {:error, reason} -> {:halt, {:error, {obe.sequence_number, reason}}}
@@ -121,11 +122,51 @@ defmodule Conveyor.Ingest do
       end)
 
     case pushed do
-      {:ok, 0} -> :ok
-      {:ok, last} -> await_acks(last, timeout)
+      {:ok, 0, _ticket} -> :ok
+      {:ok, last, _ticket} -> await_acks(last, timeout)
       {:error, _} = error -> error
     end
   end
+
+  @doc """
+  The stream door's second half, at the first event of a stream: the build is known. A
+  build in progress (`resumed?/2`), or one whose row exists because its lifecycle
+  notification was admitted (`announced?/2`, one primary-key read, only asked by a node
+  under pressure), is kept; a new one is refused first.
+  """
+  @spec admit_build(Admission.ticket(), Context.t(), V1.OrderedBuildEvent.t()) ::
+          :ok | {:refuse, Admission.Policy.reason()}
+  def admit_build(ticket, %Context{} = ctx, %V1.OrderedBuildEvent{} = obe),
+    do:
+      Admission.build(ticket, invocation_id(obe.stream_id), resumed?(ctx, obe), fn ->
+        announced?(ctx, obe.stream_id)
+      end)
+
+  @doc "The stream's ticket tied to the build its first event names (`Admission.bind/2`)."
+  @spec bind(Admission.ticket(), V1.OrderedBuildEvent.t()) :: Admission.ticket()
+  def bind(ticket, %V1.OrderedBuildEvent{stream_id: stream_id}),
+    do: Admission.bind(ticket, invocation_id(stream_id))
+
+  defp invocation_id(%V1.StreamId{invocation_id: id}), do: id
+  defp invocation_id(_), do: ""
+
+  @doc "Whether the build of a stream has a row in the context's project."
+  @spec announced?(Context.t(), V1.StreamId.t() | nil) :: boolean()
+  def announced?(%Context{project_id: project_id}, %V1.StreamId{invocation_id: id}) do
+    import Ecto.Query, only: [from: 2]
+
+    Conveyor.Repo.exists?(
+      from(i in Conveyor.Invocations.Invocation,
+        where: i.id == ^id and i.project_id == ^project_id
+      ),
+      timeout: 1_000
+    )
+  rescue
+    # No answer in time, or not an id: not known to be in progress.
+    _ -> false
+  end
+
+  def announced?(_ctx, _stream_id), do: false
 
   @doc """
   Whether the first event of a stream belongs to a build in progress: it does not start at
@@ -173,7 +214,9 @@ defmodule Conveyor.Ingest do
       nil ->
         # The notification that announces a build is the stream door for it: a node that
         # is shedding refuses the build here, before its row exists.
-        case Admission.build(ctx.api_key_id, false) do
+        case Admission.build(ctx.api_key_id, stream_id.invocation_id, false, fn ->
+               announced?(ctx, stream_id)
+             end) do
           :ok -> touch_row(ctx, stream_id)
           {:refuse, reason} -> {:error, {:refused, reason}}
         end

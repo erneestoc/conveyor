@@ -66,8 +66,12 @@ defmodule Conveyor.Ingest.Writer.Transaction do
   # work, is another transaction in the way, or is it this group's rows.
   defp error_class(%DBConnection.ConnectionError{}), do: :unavailable
 
+  # `query_canceled` is how a statement that ran into its timeout comes back (the client
+  # cancels it): the database is too slow for this group, which is not the fault of a row.
+  # As `:data` it had the group halved, twice as many transactions against a database
+  # that could not finish one (7,128 of them in the overload run of PLAN §26.4).
   defp error_class(%Postgrex.Error{postgres: %{code: code}})
-       when code in [:too_many_connections, :cannot_connect_now, :admin_shutdown],
+       when code in [:too_many_connections, :cannot_connect_now, :admin_shutdown, :query_canceled],
        do: :unavailable
 
   defp error_class(%Postgrex.Error{postgres: %{code: code}})

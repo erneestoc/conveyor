@@ -1,0 +1,26 @@
+== bench/results/overload-before-400
+  run                                                            label=before-400 server=078c6ce sleep_ms=400 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 load=1.40 2.02 2.72
+  builds started                                                 5601
+  builds completed                                               5563
+  builds failed                                                  38
+  failed, by answer                                              {'lifecycle grpc 4: Deadline expired': 15, 'lifecycle grpc 4: deadline exceeded': 23}
+  completed builds that reconnected                              2322
+  reconnects (resends) of completed builds                       6983
+  missing acks                                                   0
+  ack p50 / p99 / max s (completed builds)                       1.5 / 18.2 / 22.0
+  peak open streams (client)                                     2796
+  generator start lag ms                                         0
+  healthy phase ok/failed/worst ack s                            (376, 0, 2.1)
+  throttled phase ok/failed/worst ack s                          (1, 38, 2.4)
+  recovery phase ok/failed/worst ack s                           (5186, 0, 22.0)
+  fenced commits                                                 34806
+  expired batches                                                18009
+  group commit failures                                          {'{kind="data"}': 4598, '{kind="unavailable"}': 399, '{kind="fenced"}': 3804}
+  resent-event acks (server)                                     190
+  refused (door, reason)                                         {}
+  peak oldest batch age s                                        20.9
+  peak admission level                                           0
+  peak open streams (servers)                                    2535
+  s until oldest batch < 2 s after the throttle is lifted        6
+  s until the first clean 10 s window (no failure, acks < 5 s)   51
+  rows left                                                      {'failed': '2101', 'succeeded': '3500'}

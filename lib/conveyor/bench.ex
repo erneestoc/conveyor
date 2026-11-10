@@ -643,7 +643,12 @@ defmodule Conveyor.Bench do
       duration_ms: durations |> Enum.map(&(&1 / 1000)) |> percentiles(),
       fenced: fenced,
       group_failures: length(group_failures),
-      group_failure_reasons: group_failures |> Enum.frequencies() |> Enum.take(5)
+      # Maps, not tuples: the report is written as JSON.
+      group_failure_reasons:
+        group_failures
+        |> Enum.frequencies()
+        |> Enum.take(5)
+        |> Enum.map(fn {reason, count} -> %{reason: reason, count: count} end)
     }
   end
 
@@ -736,7 +741,9 @@ defmodule Conveyor.Bench do
     baseline_rss = samples.rss |> Enum.reverse() |> List.first() || 0
     peak_rss = Enum.max(samples.rss, fn -> 0 end)
     peak_streams = Enum.max(samples.streams, fn -> 0 end)
-    peak_streams = if peak_streams > 0, do: peak_streams, else: streams
+    # At least the generator's clients: flat out a stream lives for milliseconds, and the
+    # sampled count (which read 0 before keyless streams were counted) is a handful.
+    peak_streams = max(peak_streams, streams)
     peak_workers = Enum.max(samples.workers, fn -> 0 end)
 
     %{

@@ -72,19 +72,24 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
     # UNAVAILABLE error), wherever this process is: reading, pushing or awaiting.
     acker = Acker.start(stream)
 
-    last_seq =
-      Enum.reduce(requests, 0, fn %V1.PublishBuildToolEventStreamRequest{ordered_build_event: obe} =
-                                    req,
-                                  last ->
+    {last_seq, _ticket} =
+      Enum.reduce(requests, {0, ticket}, fn %V1.PublishBuildToolEventStreamRequest{
+                                              ordered_build_event: obe
+                                            } = req,
+                                            {last, ticket} ->
         ctx = context(stream, req.notification_keywords, req.project_id)
 
         # The first event names the build: the stream door's second half (a new build is
         # refused before a build in progress), then the stream id to echo. Bazel only
         # checks the sequence number, but echoing the stream id is what the API describes.
-        if last == 0 do
-          admit(Admission.build(ticket, Ingest.resumed?(ctx, obe)), ctx)
-          Acker.stream_id(acker, obe.stream_id)
-        end
+        ticket =
+          if last == 0 do
+            admit(Ingest.admit_build(ticket, ctx, obe), ctx)
+            Acker.stream_id(acker, obe.stream_id)
+            Ingest.bind(ticket, obe)
+          else
+            ticket
+          end
 
         if Event.bes_kind(obe.event) == :component_stream_finished,
           do: Acker.final(acker, obe.sequence_number)
@@ -96,7 +101,7 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
 
         case Ingest.push(ctx, obe, acker) do
           :ok ->
-            obe.sequence_number
+            {obe.sequence_number, ticket}
 
           {:error, :out_of_order} ->
             # FAILED_PRECONDITION makes Bazel give the upload up, so it must be a real gap:

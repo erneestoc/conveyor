@@ -77,20 +77,20 @@ defmodule Conveyor.AdmissionTest do
       assert Admission.drain_timeout_ms() == 30_000
     end
 
-    test "a critical node refuses every new stream" do
-      Sampler.inject(signals: %{oldest_ms: 16_000})
-      assert {:refuse, :overloaded} = Admission.open_stream(:k)
+    test "the build is not known when a stream opens: pressure is judged at its first event" do
+      Sampler.inject(signals: %{oldest_ms: 21_000})
+      assert {:ok, ticket} = Admission.open_stream(:k)
+      assert {:refuse, :overloaded} = Admission.build(ticket, "b", true)
+      assert :ok = Admission.close_stream(ticket)
       assert Admission.streams() == 0
-      Sampler.inject(signals: %{oldest_ms: 6_000})
-      assert {:ok, _} = Admission.open_stream(:k)
     end
   end
 
   describe "the build door" do
     test "normal: everything" do
-      assert :ok = Admission.build(:k, false)
+      assert :ok = Admission.build(:k, "b", false)
       {:ok, ticket} = Admission.open_stream(:k)
-      assert :ok = Admission.build(ticket, false)
+      assert :ok = Admission.build(ticket, "b", false)
     end
 
     test "elevated: the key above its share loses new builds, the others and resumed streams do not" do
@@ -100,45 +100,89 @@ defmodule Conveyor.AdmissionTest do
       assert %{state: :elevated} = Admission.state()
 
       # Six streams over two keys: a share of three.
-      assert {:refuse, :key_share} = Admission.build(:flood, false)
+      assert {:refuse, :key_share} = Admission.build(:flood, "b", false)
       assert_received {:refused, %{door: :build, reason: :key_share}}
-      assert :ok = Admission.build(:flood, true)
-      assert :ok = Admission.build(:quiet, false)
-      assert :ok = Admission.build(:newcomer, false)
+      assert :ok = Admission.build(:flood, "b", true)
+      assert :ok = Admission.build(:quiet, "b", false)
+      assert :ok = Admission.build(:newcomer, "b", false)
     end
 
-    test "shedding: new builds are refused, a build in progress is kept" do
-      Sampler.inject(signals: %{oldest_ms: 6_000})
-      assert {:ok, ticket} = Admission.open_stream(:k)
-      assert {:refuse, :overloaded} = Admission.build(ticket, false)
+    test "elevated: a key alone on the node is never above its share" do
+      hold(:only, 5)
+      Sampler.inject(signals: %{oldest_ms: 3_500})
+      # Its own growth since the last sample does not count against it either.
+      hold(:only, 3)
+      assert :ok = Admission.build(:only, "b", false)
+    end
+
+    test "a build that was announced counts as in progress; the question is only asked under pressure" do
+      assert :ok = Admission.build(:k, "b", false, fn -> flunk("asked on a normal node") end)
+      Sampler.inject(signals: %{oldest_ms: 10_000})
+      assert :ok = Admission.build(:k, "b", true, fn -> flunk("asked about a resumed stream") end)
+      assert :ok = Admission.build(:k, "b", false, fn -> true end)
+      assert {:refuse, :overloaded} = Admission.build(:k, "b", false, fn -> false end)
+    end
+
+    test "shedding: a share of the new builds that grows with the pressure, the same builds every time" do
+      ids = for i <- 1..400, do: "build-#{i}"
+      refused = fn -> Enum.filter(ids, &(Admission.build(:k, &1, false) != :ok)) end
+
+      # (The test node's writer hold is 2 ms; pressure counts the age beyond it.)
+      Sampler.inject(signals: %{oldest_ms: 5_002})
+      assert %{state: :shedding, builds_refused_pct: 0} = Admission.state()
+      assert refused.() == []
+
+      Sampler.inject(signals: %{oldest_ms: 7_502})
+      assert %{builds_refused_pct: 50} = Admission.state()
+      half = refused.()
+      assert length(half) in 150..250
       assert_received {:refused, %{door: :build, reason: :overloaded}}
-      assert :ok = Admission.build(ticket, true)
+      # A retry of a refused build is refused again; a build in progress is kept.
+      assert refused.() == half
+      assert :ok = Admission.build(:k, hd(half), true)
+
+      Sampler.inject(signals: %{oldest_ms: 10_000})
+      assert %{builds_refused_pct: 100} = Admission.state()
+      assert length(refused.()) == 400
+      {:ok, ticket} = Admission.open_stream(:k)
+      assert {:refuse, :overloaded} = Admission.build(ticket, "b", false)
+      assert :ok = Admission.build(ticket, "b", true)
       assert :ok = Admission.event(ticket)
     end
 
-    test "critical: resumed streams too" do
-      Sampler.inject(signals: %{oldest_ms: 16_000})
-      assert {:refuse, :overloaded} = Admission.build(:k, true)
+    test "critical: a share of the builds in progress too, the same ones at the stream and at the event" do
+      ids = for i <- 1..200, do: "build-#{i}"
+      {:ok, ticket} = Admission.open_stream(nil)
+
+      refused_streams = fn -> Enum.filter(ids, &(Admission.build(nil, &1, true) != :ok)) end
+
+      refused_events = fn ->
+        Enum.filter(ids, &(Admission.event(Admission.bind(ticket, &1)) != :ok))
+      end
+
+      Sampler.inject(signals: %{oldest_ms: 15_002})
+
+      assert %{state: :critical, events_refused_pct: 0, builds_refused_pct: 100} =
+               Admission.state()
+
+      assert refused_streams.() == []
+      assert {:refuse, :overloaded} = Admission.build(nil, "new", false)
+
+      Sampler.inject(signals: %{oldest_ms: 17_502})
+      half = refused_streams.()
+      assert length(half) in 60..140
+      # A build that is shed is shed at every door, on every reconnect.
+      assert refused_events.() == half
+      assert refused_streams.() == half
+      assert_received {:refused, %{door: :event, reason: :overloaded}}
+
+      Sampler.inject(signals: %{oldest_ms: 20_002})
+      assert length(refused_streams.()) == 200
+      assert length(refused_events.()) == 200
     end
   end
 
   describe "the event door" do
-    test "refuses the events of a growing share of streams as the deadline approaches" do
-      tickets = for _ <- 1..200, do: elem(Admission.open_stream(nil), 1)
-      refused = fn -> Enum.count(tickets, &(Admission.event(&1) == {:refuse, :overloaded})) end
-
-      Sampler.inject(signals: %{oldest_ms: 15_000})
-      assert refused.() == 0
-      Sampler.inject(signals: %{oldest_ms: 17_500})
-      half = refused.()
-      assert half in 60..140
-      assert_received {:refused, %{door: :event, reason: :overloaded}}
-      # The same streams are refused each time: a stream is shed or kept, not sampled.
-      assert refused.() == half
-      Sampler.inject(signals: %{oldest_ms: 20_000})
-      assert refused.() == 200
-    end
-
     test "a key above its event rate is slowed down, not refused" do
       {:ok, ticket} = Admission.open_stream(:r, limits(max_events_per_second: 10))
       {elapsed_us, _} = :timer.tc(fn -> for _ <- 1..15, do: :ok = Admission.event(ticket) end)

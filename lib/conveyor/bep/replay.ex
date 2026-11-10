@@ -44,6 +44,10 @@ defmodule Conveyor.Bep.Replay do
     * `:tls` — connect with TLS, verifying the server against the system CA store
     * `:retries` — reconnects allowed after a failed attempt (default 0); a retry resumes
       the same invocation from the last acknowledged event, as Bazel does
+    * `:retry_delay_ms` — retry like Bazel: wait this long before the first reconnect and
+      1.6 times longer before each next one (Bazel: 1,000 ms, 4 retries by default), and
+      count `:retries` anew after an attempt that was acknowledged something. Without it:
+      200 ms more per reconnect, and `:retries` in total
     * `:ack_timeout_ms` — give the connection up when events are outstanding and no
       acknowledgement arrived for this long (default #{@default_ack_timeout_ms})
     * `:drop_after` — simulate a connection loss: cancel the stream after this many events
@@ -67,6 +71,7 @@ defmodule Conveyor.Bep.Replay do
       host_offset: Keyword.get(opts, :host_offset, 0),
       tls: Keyword.get(opts, :tls, false),
       retries: Keyword.get(opts, :retries, 0),
+      retry_delay: Keyword.get(opts, :retry_delay_ms),
       ack_timeout: Keyword.get(opts, :ack_timeout_ms, @default_ack_timeout_ms),
       invocation_id: invocation_id,
       build_id: build_id,
@@ -88,7 +93,10 @@ defmodule Conveyor.Bep.Replay do
       acks: [],
       latencies: [],
       started?: false,
-      dropped?: false
+      dropped?: false,
+      # Failed attempts since the last one that made progress, and the acks seen then.
+      failures: 0,
+      acked_before: 0
     })
   end
 
@@ -128,19 +136,36 @@ defmodule Conveyor.Bep.Replay do
       {:error, :dropped, st} ->
         attempt(run, st)
 
-      {:error, reason, st} when st.attempt < run.retries ->
-        :telemetry.execute([:conveyor, :loadgen, :reconnect], %{attempt: st.attempt + 1}, %{
-          invocation_id: run.invocation_id,
-          reason: reason,
-          from_seq: st.from_seq
-        })
+      {:error, reason, st} ->
+        st = budget(run, st)
 
-        Process.sleep(200 * (st.attempt + 1))
-        attempt(run, %{st | attempt: st.attempt + 1})
+        if st.failures < run.retries do
+          :telemetry.execute([:conveyor, :loadgen, :reconnect], %{attempt: st.attempt + 1}, %{
+            invocation_id: run.invocation_id,
+            reason: reason,
+            from_seq: st.from_seq
+          })
 
-      {:error, reason, _st} ->
-        {:error, reason}
+          Process.sleep(backoff(run, st.failures))
+          attempt(run, %{st | attempt: st.attempt + 1, failures: st.failures + 1})
+        else
+          {:error, reason}
+        end
     end
+  end
+
+  # Without `:retry_delay_ms`: a quick linear backoff and a fixed number of reconnects.
+  # With it, Bazel's policy (BuildEventServiceUploader): the delay grows by 1.6 per failed
+  # attempt from the given minimum, and an attempt that was acknowledged anything gives
+  # the whole budget back.
+  defp backoff(%{retry_delay: nil}, failures), do: 200 * (failures + 1)
+  defp backoff(%{retry_delay: ms}, failures), do: round(ms * :math.pow(1.6, failures))
+
+  defp budget(%{retry_delay: nil}, st), do: st
+
+  defp budget(_run, st) do
+    acked = length(st.acks)
+    if acked > st.acked_before, do: %{st | failures: 0, acked_before: acked}, else: st
   end
 
   # Closing a connection whose peer went away can time out inside the client (5 s call);

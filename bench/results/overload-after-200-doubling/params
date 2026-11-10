@@ -1,0 +1,1 @@
+label=final-200 server=48b1738 sleep_ms=200 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 retry_delay_ms=1000 load=2.49 4.45 4.79

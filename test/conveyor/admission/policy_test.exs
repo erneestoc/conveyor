@@ -7,10 +7,10 @@ defmodule Conveyor.Admission.PolicyTest do
   # unless a row says otherwise.
   @config %Config{deadline_ms: 20_000, hold_ms: 0, window: 1, probe_ms: 0}
 
-  defp run(samples, config \\ @config, state \\ nil) do
+  defp run(samples, config \\ @config) do
     samples
     |> Enum.with_index()
-    |> Enum.map_reduce(state || Policy.new(config), fn {sample, i}, state ->
+    |> Enum.map_reduce(Policy.new(config), fn {sample, i}, state ->
       {signals, now} =
         case sample do
           {signals, now} -> {signals, now}
@@ -82,15 +82,63 @@ defmodule Conveyor.Admission.PolicyTest do
 
     test "disabled: the pressure is still measured, the level stays normal" do
       c = %{@config | enabled: false}
-      assert [%{level: 0, events_pct: 0, pressure: p}] = run([19_000], c)
+      assert [%{level: 0, events_pct: +0.0, pressure: p}] = run([19_000], c)
       assert_in_delta p, 0.95, 0.001
     end
 
     test "the share of streams whose events are refused grows from the critical threshold to the deadline" do
       pcts = [14_000, 15_000, 16_000, 17_500, 19_000, 20_000, 30_000, 12_000, 9_000]
-      assert Enum.map(run(pcts), & &1.events_pct) == [0, 0, 20, 50, 80, 100, 100, 0, 0]
+      states = run(pcts, %{@config | readmit_per_s: 1.0e9})
+      assert Enum.map(states, & &1.events_pct) == [0, 0, 20, 50, 80, 100, 100, 0, 0]
       # Still critical at 12 s (left at 10 s), with no event refused.
-      assert Enum.map(run(pcts), & &1.level) == [2, 3, 3, 3, 3, 3, 3, 3, 2]
+      assert Enum.map(states, & &1.level) == [2, 3, 3, 3, 3, 3, 3, 3, 2]
+    end
+
+    test "the share of new builds refused grows from the shedding threshold to shed_all, and is all at critical" do
+      ages = [4_000, 5_000, 6_000, 7_500, 9_000, 10_000, 14_000, 15_000, 4_000, 2_000]
+      # (Taken back at once here; the next test is about how slowly it really is.)
+      states = run(ages, %{@config | readmit_per_s: 1.0e9})
+      assert Enum.map(states, & &1.builds_pct) == [0, 0, 20, 50, 80, 100, 100, 100, 0, 0]
+      # Back under the threshold, still shedding (left at 2 s): no build is refused.
+      assert Enum.map(states, & &1.level) == [1, 2, 2, 2, 2, 2, 2, 3, 2, 1]
+    end
+
+    test "refused builds are taken back slowly: the share rises at once and falls 2 points a second, idle or not" do
+      c = %{@config | readmit_per_s: 2.0}
+      busy = %{oldest_ms: 1_500}
+
+      samples = [
+        {%{oldest_ms: 10_000}, 0},
+        {busy, 1_000},
+        {busy, 11_000},
+        # Pressure again: the larger of what it asks for and what is left.
+        {%{oldest_ms: 7_500}, 12_000},
+        {%{oldest_ms: 9_500}, 12_250},
+        {busy, 57_250},
+        {busy, 60_000}
+      ]
+
+      states = run(samples, c)
+      assert Enum.map(states, & &1.builds_pct) == [100, 98, 78, 76, 90, 0, 0]
+      # The level follows the pressure as before: out of shedding, with builds still
+      # coming back.
+      assert Enum.map(states, & &1.level) == [2, 1, 1, 2, 2, 1, 1]
+      assert [%{builds_pct: +0.0}, _] = run([10_000, 0], %{c | enabled: false})
+
+      # A node that has shed everything reads idle: no faster for that.
+      idle =
+        run([{%{oldest_ms: 20_000}, 0}, {%{oldest_ms: 0}, 5_000}, {%{oldest_ms: 0}, 10_000}], c)
+
+      assert Enum.map(idle, & &1.builds_pct) == [100, 90, 80]
+
+      # The share of builds in progress refused comes back at the same pace, and is never
+      # above the share of new builds.
+      shares = fn states -> Enum.map(states, &{&1.builds_pct, &1.events_pct}) end
+
+      assert shares.(
+               run([{%{oldest_ms: 20_000}, 0}, {busy, 5_000}, {%{oldest_ms: 6_000}, 10_000}], c)
+             ) ==
+               [{100, 100}, {90, 90}, {80, 80}]
     end
 
     test "names" do
@@ -188,43 +236,62 @@ defmodule Conveyor.Admission.PolicyTest do
 
   describe "decide" do
     @open %{draining?: false, key_streams: 0, max_streams: 200}
+    @new %{resumed?: false, over_share?: false, bucket: 50}
+    @resumed %{resumed?: true, over_share?: false, bucket: 50}
 
-    # {door, level, events_pct, request, decision}
-    for {door, level, pct, request, decision} <- [
-          # --- a stream is opened ---
-          {:stream, 0, 0, @open, :accept},
-          {:stream, 2, 0, @open, :accept},
-          {:stream, 3, 0, @open, {:refuse, :overloaded}},
-          {:stream, 0, 0, %{@open | draining?: true}, {:refuse, :draining}},
-          {:stream, 3, 0, %{@open | draining?: true}, {:refuse, :draining}},
-          {:stream, 0, 0, %{@open | key_streams: 200}, {:refuse, :key_streams}},
-          {:stream, 0, 0, %{@open | key_streams: 199}, :accept},
-          {:stream, 0, 0, %{@open | key_streams: 10_000, max_streams: :infinity}, :accept},
-          # --- the build is known ---
-          {:build, 0, 0, %{resumed?: false, over_share?: true}, :accept},
-          {:build, 1, 0, %{resumed?: false, over_share?: false}, :accept},
-          {:build, 1, 0, %{resumed?: false, over_share?: true}, {:refuse, :key_share}},
-          {:build, 1, 0, %{resumed?: true, over_share?: true}, :accept},
-          {:build, 2, 0, %{resumed?: false, over_share?: false}, {:refuse, :overloaded}},
-          {:build, 2, 0, %{resumed?: true, over_share?: false}, :accept},
-          {:build, 2, 0, %{resumed?: true, over_share?: true}, :accept},
-          {:build, 3, 0, %{resumed?: true, over_share?: false}, {:refuse, :overloaded}},
-          {:build, 3, 0, %{resumed?: false, over_share?: false}, {:refuse, :overloaded}},
+    # {door, level, share of new builds refused, share of builds in progress refused,
+    #  request, decision}
+    for {door, level, builds, events, request, decision} <- [
+          # --- a stream is opened: the build is not known yet ---
+          {:stream, 0, 0, 0, @open, :accept},
+          {:stream, 3, 100, 100, @open, :accept},
+          {:stream, 0, 0, 0, %{@open | draining?: true}, {:refuse, :draining}},
+          {:stream, 3, 100, 0, %{@open | draining?: true}, {:refuse, :draining}},
+          {:stream, 0, 0, 0, %{@open | key_streams: 200}, {:refuse, :key_streams}},
+          {:stream, 0, 0, 0, %{@open | key_streams: 199}, :accept},
+          {:stream, 0, 0, 0, %{@open | key_streams: 10_000, max_streams: :infinity}, :accept},
+          # --- the build is known: a new one ---
+          {:build, 0, 0, 0, %{@new | over_share?: true}, :accept},
+          {:build, 1, 0, 0, @new, :accept},
+          {:build, 1, 0, 0, %{@new | over_share?: true}, {:refuse, :key_share}},
+          {:build, 2, 0, 0, @new, :accept},
+          {:build, 2, 50, 0, @new, :accept},
+          {:build, 2, 51, 0, @new, {:refuse, :overloaded}},
+          {:build, 2, 100, 0, %{@new | bucket: 99}, {:refuse, :overloaded}},
+          # The key above its share loses every new build, whatever its bucket.
+          {:build, 2, 0, 0, %{@new | over_share?: true, bucket: 99}, {:refuse, :key_share}},
+          {:build, 3, 100, 0, %{@new | bucket: 99}, {:refuse, :overloaded}},
+          # Back to normal with builds still being taken back: the share applies.
+          {:build, 0, 51, 0, @new, {:refuse, :overloaded}},
+          # --- the build is known: one in progress ---
+          {:build, 1, 0, 0, %{@resumed | over_share?: true}, :accept},
+          {:build, 2, 100, 0, @resumed, :accept},
+          {:build, 2, 100, 0, %{@resumed | over_share?: true}, :accept},
+          {:build, 3, 100, 0, @resumed, :accept},
+          {:build, 3, 100, 50, @resumed, :accept},
+          {:build, 3, 100, 51, @resumed, {:refuse, :overloaded}},
+          {:build, 3, 100, 100, %{@resumed | bucket: 99}, {:refuse, :overloaded}},
+          # A build that was shed stays shed while its share comes back, whatever the level.
+          {:build, 0, 60, 51, @resumed, {:refuse, :overloaded}},
+          {:build, 0, 60, 50, @resumed, :accept},
           # --- the next event ---
-          {:event, 0, 0, %{bucket: 0, token?: true}, :accept},
-          {:event, 2, 0, %{bucket: 0, token?: true}, :accept},
-          {:event, 3, 0, %{bucket: 0, token?: true}, :accept},
-          {:event, 3, 20, %{bucket: 19, token?: true}, {:refuse, :overloaded}},
-          {:event, 3, 20, %{bucket: 20, token?: true}, :accept},
-          {:event, 3, 100, %{bucket: 99, token?: true}, {:refuse, :overloaded}},
-          {:event, 0, 0, %{bucket: 0, token?: false}, {:slow, 10}},
+          {:event, 0, 0, 0, %{bucket: 0, token?: true}, :accept},
+          {:event, 3, 100, 0, %{bucket: 0, token?: true}, :accept},
+          {:event, 3, 100, 20, %{bucket: 19, token?: true}, {:refuse, :overloaded}},
+          {:event, 3, 100, 20, %{bucket: 20, token?: true}, :accept},
+          {:event, 3, 100, 100, %{bucket: 99, token?: true}, {:refuse, :overloaded}},
+          {:event, 0, 0, 0, %{bucket: 0, token?: false}, {:slow, 10}},
           # Refused before slowed: a refused event must not wait for a token first.
-          {:event, 3, 100, %{bucket: 5, token?: false}, {:refuse, :overloaded}}
+          {:event, 3, 100, 100, %{bucket: 5, token?: false}, {:refuse, :overloaded}}
         ] do
-      test "#{door} at level #{level} (#{pct} %) #{inspect(request)} -> #{inspect(decision)}" do
+      test "#{door} at level #{level} (#{builds} % / #{events} %) #{inspect(request)} -> #{inspect(decision)}" do
         assert Policy.decide(
                  unquote(door),
-                 %{level: unquote(level), events_pct: unquote(pct)},
+                 %{
+                   level: unquote(level),
+                   builds_pct: unquote(builds),
+                   events_pct: unquote(events)
+                 },
                  unquote(Macro.escape(request))
                ) == unquote(Macro.escape(decision))
       end

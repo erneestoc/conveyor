@@ -1,0 +1,26 @@
+== bench/results/overload-after
+  run                                                            label=after server=48b1738 sleep_ms=400 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 retry_delay_ms=1000 load=4.05 5.41 4.68
+  builds started                                                 6401
+  builds completed                                               3239
+  builds failed                                                  3162
+  failed, by answer                                              {'grpc 14: event not persisted': 740, 'grpc 14: this node is overloaded': 1404, 'lifecycle grpc 14: this node is overloaded': 1018}
+  completed builds that reconnected                              748
+  reconnects (resends) of completed builds                       2582
+  missing acks                                                   0
+  ack p50 / p99 / max s (completed builds)                       1.0 / 12.6 / 22.0
+  peak open streams (client)                                     1062
+  generator start lag ms                                         0
+  healthy phase ok/failed/worst ack s                            (383, 0, 2.1)
+  throttled phase ok/failed/worst ack s                          (78, 3162, 22.0)
+  recovery phase ok/failed/worst ack s                           (2778, 0, 21.3)
+  fenced commits                                                 16470
+  expired batches                                                2985
+  group commit failures                                          {'{kind="data"}': 1517, '{kind="unavailable"}': 51, '{kind="fenced"}': 1460}
+  resent-event acks (server)                                     1395
+  refused (door, reason)                                         {'{door="event",reason="overloaded"}': 1590, '{door="build",reason="overloaded"}': 11632, '{door="stream",reason="overloaded"}': 8055}
+  peak oldest batch age s                                        21.6
+  peak admission level                                           3
+  peak open streams (servers)                                    874
+  s until oldest batch < 2 s after the throttle is lifted        1
+  s until the first clean 10 s window (no failure, acks < 5 s)   51
+  rows left                                                      {'disconnected': '870', 'failed': '1279', 'in_progress': '1259', 'succeeded': '1975'}

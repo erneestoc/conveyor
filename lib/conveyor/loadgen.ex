@@ -48,6 +48,8 @@ defmodule Conveyor.Loadgen do
     events_by_file = Map.new(fixtures, &{&1, &1 |> Fixture.read!() |> Replay.pre_encode()})
     deadline = duration_ms && System.monotonic_time(:millisecond) + duration_ms
     started = System.monotonic_time(:millisecond)
+    # Wall clock of the start, to line the report's timeline up with a server's.
+    started_at = System.system_time(:millisecond)
 
     replay = fn {i, file} ->
       if jitter > 0, do: Process.sleep(:rand.uniform(jitter))
@@ -62,7 +64,8 @@ defmodule Conveyor.Loadgen do
           :drop_after,
           :duplicate_every,
           :tls,
-          :ack_timeout_ms
+          :ack_timeout_ms,
+          :retry_delay_ms
         ]) ++
           [
             hosts: hosts,
@@ -86,7 +89,11 @@ defmodule Conveyor.Loadgen do
       end
 
     elapsed_ms = max(System.monotonic_time(:millisecond) - started, 1)
-    results |> summarize(elapsed_ms, streams) |> Map.merge(extra)
+
+    results
+    |> summarize(elapsed_ms, streams)
+    |> Map.merge(extra)
+    |> Map.put(:started_at_unix_ms, started_at)
   end
 
   # A fixed number of clients, each starting its next build when the last one ended. The

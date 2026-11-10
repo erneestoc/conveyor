@@ -4,8 +4,8 @@ defmodule Conveyor.Admission.Config do
   (`from_env/0`: `config :conveyor, Conveyor.Admission` plus the writer's hold and deadline).
 
   The thresholds are fractions of the writer's deadline, so they move with it. With the
-  default 20 s deadline: elevated at 3 s (back at 1 s), shedding at 5 s (back at 2 s),
-  critical at 15 s (back at 10 s). `PLAN.md` §26.4 has the reasoning.
+  default 20 s deadline: elevated at 3 s (back at 1 s), shedding at 5 s (back at 2 s; every
+  new build refused from 10 s), critical at 15 s (back at 10 s). `PLAN.md` §26.4 has the reasoning.
   """
 
   defstruct enabled: true,
@@ -21,6 +21,12 @@ defmodule Conveyor.Admission.Config do
             # {elevated, shedding, critical}
             enter: {0.15, 0.25, 0.75},
             exit: {0.05, 0.10, 0.50},
+            # Where every new build is refused; from the shedding threshold up to here the
+            # refused share grows linearly.
+            shed_all: 0.50,
+            # How fast refused builds are taken back once the pressure allows: points of the
+            # refused share per second (2: from all to none in 50 s).
+            readmit_per_s: 2.0,
             # Samples the pressure is the maximum of (the gauge reads 0 between a flush and
             # the next batch).
             window: 4,

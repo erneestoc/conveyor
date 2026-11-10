@@ -305,7 +305,7 @@ defmodule ConveyorWeb.UploadControllerTest do
     body = events |> Fixture.encode_all() |> IO.iodata_to_binary()
     path = ~p"/api/v1/invocations/#{uuid}/bep"
 
-    Conveyor.Admission.Sampler.inject(signals: %{oldest_ms: 6_000})
+    Conveyor.Admission.Sampler.inject(signals: %{oldest_ms: 10_000})
     refused = put_raw(conn, path, body, headers)
 
     assert %{"errors" => %{"detail" => "this node is overloaded" <> _}} =

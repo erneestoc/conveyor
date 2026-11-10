@@ -1,0 +1,26 @@
+== bench/results/overload-before-200
+  run                                                            label=before-200 server=078c6ce sleep_ms=200 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 retry_delay_ms=1000 load=3.23 4.45 4.29
+  builds started                                                 6401
+  builds completed                                               5517
+  builds failed                                                  884
+  failed, by answer                                              {'grpc 14: event not persisted': 884}
+  completed builds that reconnected                              2670
+  reconnects (resends) of completed builds                       9246
+  missing acks                                                   0
+  ack p50 / p99 / max s (completed builds)                       1.5 / 18.4 / 22.1
+  peak open streams (client)                                     3467
+  generator start lag ms                                         0
+  healthy phase ok/failed/worst ack s                            (382, 0, 2.1)
+  throttled phase ok/failed/worst ack s                          (4, 884, 3.7)
+  recovery phase ok/failed/worst ack s                           (5131, 0, 22.1)
+  fenced commits                                                 62297
+  expired batches                                                42390
+  group commit failures                                          {'{kind="unavailable"}': 984, '{kind="data"}': 8741, '{kind="fenced"}': 6777}
+  resent-event acks (server)                                     1161
+  refused (door, reason)                                         {}
+  peak oldest batch age s                                        21.0
+  peak admission level                                           0
+  peak open streams (servers)                                    3021
+  s until oldest batch < 2 s after the throttle is lifted        1
+  s until the first clean 10 s window (no failure, acks < 5 s)   61
+  rows left                                                      {'failed': '2110', 'in_progress': '883', 'succeeded': '3408'}

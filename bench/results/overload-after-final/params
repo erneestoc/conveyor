@@ -1,0 +1,1 @@
+label=after3 server=48b1738 sleep_ms=400 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 retry_delay_ms=1000 load=1.80 3.17 3.84

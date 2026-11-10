@@ -1,0 +1,1 @@
+label=before server=078c6ce sleep_ms=400 rate=20 nodes=2 shards=4 delay_ms=500 retries=5 retry_delay_ms=1000 load=3.49 3.93 3.85

@@ -17,7 +17,9 @@ defmodule Conveyor.Admission.SamplerTest do
     assert_in_delta p, 0.3, 0.01
     assert %{level: 2, state: :shedding, ready: true} = Admission.state()
 
-    assert %{level: 3, events_pct: 100} = Sampler.inject(signals: fn -> %{oldest_ms: 60_000} end)
+    assert %{level: 3, events_pct: 100.0} =
+             Sampler.inject(signals: fn -> %{oldest_ms: 60_000} end)
+
     assert %{state: :critical, events_refused_pct: 100} = Admission.state()
 
     # Back to the node's own signals: the level is a fresh state's.

@@ -151,7 +151,7 @@ defmodule Conveyor.Grpc.AdmissionEndToEndTest do
     send_event(s1, old, 1, Enum.at(events, 0))
     assert {:ack, 1} = answer(s1)
 
-    Sampler.inject(signals: %{oldest_ms: 6_000})
+    Sampler.inject(signals: %{oldest_ms: 10_000})
     assert %{state: :shedding} = Admission.state()
 
     # Its open stream is not touched.
@@ -192,10 +192,21 @@ defmodule Conveyor.Grpc.AdmissionEndToEndTest do
     # So is one that comes from another node (no session here, a sequence past the first).
     elsewhere = Replay.uuid()
     {:ok, _} = Ingest.Worker.load_or_create(ctx, elsewhere, stream_id(elsewhere))
-    Repo.update_all(Invocation, set: [last_event_seq: 2])
+    import Ecto.Query, only: [from: 2]
+    Repo.update_all(from(i in Invocation, where: i.id == ^elsewhere), set: [last_event_seq: 2])
     s4 = open_stream(port, plaintext)
     send_event(s4, elsewhere, 3, Enum.at(events, 2))
     assert {:ack, 3} = answer(s4)
+
+    # And one whose notification was admitted before the node began to shed: its row
+    # exists, its stream starts at the first event.
+    announced = Replay.uuid()
+    {:ok, _} = Ingest.Worker.load_or_create(ctx, announced, stream_id(announced))
+    s5 = open_stream(port, plaintext)
+    send_event(s5, announced, 1, Enum.at(events, 0))
+    assert {:ack, 1} = answer(s5)
+    refute Ingest.announced?(ctx, nil)
+    refute Ingest.announced?(ctx, stream_id("not-a-uuid"))
 
     # Pressure gone: new builds again.
     Sampler.inject([])
@@ -225,7 +236,7 @@ defmodule Conveyor.Grpc.AdmissionEndToEndTest do
     # The refused event was not handed to the session: the row holds what was acknowledged.
     assert Repo.get!(Invocation, id).last_event_seq == 1
 
-    # A reconnect is refused at the door while the node is critical.
+    # A reconnect is refused too, at its first event: the build stays shed.
     s2 = open_stream(port, plaintext)
     send_event(s2, id, 2, Enum.at(events, 1), end_stream: true)
     assert %GRPC.RPCError{status: @unavailable} = answer(s2)
@@ -239,6 +250,51 @@ defmodule Conveyor.Grpc.AdmissionEndToEndTest do
     assert List.last(acks) == length(events) + 1
     :ok = await_worker_exit(id)
     assert :ok = Ingest.Verify.check(id, length(events))
+  end
+
+  test "a client that retries like Bazel gets its retries back after progress", %{
+    grpc_port: port,
+    api_key: plaintext,
+    events: events
+  } do
+    # The node turns critical after the first and after the fourth acknowledgement, and
+    # recovers at each reconnect: two failed attempts with progress in between. One retry
+    # is enough when the budget is counted anew after progress, and is not otherwise.
+    acks = :counters.new(1, [])
+    test = self()
+
+    :telemetry.attach_many(
+      "bazel-retry",
+      [[:conveyor, :ingest, :ack], [:conveyor, :loadgen, :reconnect]],
+      fn
+        [_, :ingest, :ack], _, _, _ ->
+          :counters.add(acks, 1, 1)
+          if :counters.get(acks, 1) in [1, 4], do: Sampler.inject(signals: %{oldest_ms: 21_000})
+
+        [_, :loadgen, :reconnect], %{attempt: attempt}, _, _ ->
+          send(test, {:reconnect, attempt})
+          Sampler.inject([])
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("bazel-retry") end)
+
+    opts = [port: port, api_key: plaintext, delay_ms: 40, lifecycle: false]
+
+    assert {:ok, %{attempts: 3, acks: acked, invocation_id: id}} =
+             Replay.run(events, opts ++ [retries: 1, retry_delay_ms: 5])
+
+    assert Enum.uniq(acked) == Enum.to_list(1..(length(events) + 1))
+    assert_received {:reconnect, 1}
+    assert_received {:reconnect, 2}
+    :ok = await_worker_exit(id)
+
+    # The default policy counts every reconnect: the same two failures need two retries.
+    :counters.put(acks, 1, 0)
+
+    assert {:error, %GRPC.RPCError{status: @unavailable}} =
+             Replay.run(events, opts ++ [retries: 1])
   end
 
   test "refusals are answers, not faults: they are not logged as handler errors" do
@@ -268,18 +324,19 @@ defmodule Conveyor.Grpc.AdmissionEndToEndTest do
           do: Replay.ordered_event(stream_id(id), seq, e)
     end
 
-    Sampler.inject(signals: %{oldest_ms: 6_000})
+    Sampler.inject(signals: %{oldest_ms: 10_000})
     assert {:error, {1, {:refused, :overloaded}}} = Ingest.push_all(ctx, stream.(1))
     assert Repo.get(Invocation, id) == nil
     assert Admission.streams() == 0
 
     Sampler.inject(signals: %{oldest_ms: 16_000})
-    assert {:error, {0, {:refused, :overloaded}}} = Ingest.push_all(ctx, stream.(1))
+    assert {:error, {1, {:refused, :overloaded}}} = Ingest.push_all(ctx, stream.(1))
+    assert Admission.streams() == 0
 
     Sampler.inject([])
     assert :ok = Ingest.push_all(ctx, Enum.take(stream.(1), 2))
     # A resumed stream under shedding: taken.
-    Sampler.inject(signals: %{oldest_ms: 6_000})
+    Sampler.inject(signals: %{oldest_ms: 10_000})
     assert :ok = Ingest.push_all(ctx, stream.(3))
     assert Repo.get!(Invocation, id).last_event_seq == length(events)
 

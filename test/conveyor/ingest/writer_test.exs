@@ -333,7 +333,8 @@ defmodule Conveyor.Ingest.WriterTest do
 
   # Makes the database answer an `actions` row by its mnemonic, for the rest of the test's
   # transaction: "refuse" as if it had no connection to spare (SQLSTATE 53300), "deadlock"
-  # as the victim of a deadlock (40P01).
+  # as the victim of a deadlock (40P01), "cancel" as a statement that ran into its timeout
+  # (57014).
   defp refuse_work! do
     Repo.query!("""
     CREATE FUNCTION conveyor_test_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
@@ -342,6 +343,8 @@ defmodule Conveyor.Ingest.WriterTest do
         RAISE EXCEPTION 'injected' USING ERRCODE = '53300';
       ELSIF NEW.mnemonic = 'deadlock' THEN
         RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
+      ELSIF NEW.mnemonic = 'cancel' THEN
+        RAISE EXCEPTION 'injected' USING ERRCODE = '57014';
       END IF;
       RETURN NEW;
     END $$
@@ -425,6 +428,34 @@ defmodule Conveyor.Ingest.WriterTest do
 
     for id <- ids, do: assert(Repo.get!(Invocation, id).last_event_seq == 0)
     assert objects() == before + 1
+  end
+
+  @tag :capture_log
+  test "a statement that ran into its timeout is the database being slow, not a bad row: the group is not halved",
+       %{project: project} do
+    writer = shard!(blob?: true)
+    refuse_work!()
+    ids = for _ <- 1..4, do: invocation!(project)
+
+    batches =
+      for {id, i} <- Enum.with_index(ids) do
+        batch(id, project, 1, fn b ->
+          b
+          |> Batch.add_event(1, "started", "x")
+          |> Batch.add_action(%{seq: 1, mnemonic: if(i == 1, do: "cancel", else: "Genrule")})
+        end)
+      end
+
+    submit_together(writer, batches)
+
+    # Halved, the three other builds would have committed in transactions of their own.
+    for b <- batches do
+      ref = b.ref
+      assert_receive {:batch_failed, ^ref, reason}, 5_000
+      assert reason =~ "query_canceled"
+    end
+
+    for id <- ids, do: assert(Repo.get!(Invocation, id).last_event_seq == 0)
   end
 
   @tag :capture_log

@@ -6,7 +6,7 @@ defmodule Conveyor.Loadgen.CLI do
         --fixtures 'test/fixtures/bep/*.bep' --streams 200 --builds 2000 \\
         [--duration-s 300] [--delay-ms 0] [--jitter-ms 100] [--drop-after 20] \\
         [--duplicate-every 10] [--retries 3] [--ack-timeout-ms 30000] [--report out.json] \\
-        [--verify] [--tls] [--arrival-rate 12.5]
+        [--verify] [--tls] [--arrival-rate 12.5] [--retry-delay-ms 1000]
 
   `--arrival-rate N` starts N builds per second whatever the completions (an open loop;
   `--streams` is then ignored): the mode for overload experiments, where a closed loop
@@ -14,7 +14,10 @@ defmodule Conveyor.Loadgen.CLI do
   `--tls` dials `grpcs://` with the system CA store (a TLS balancer or Caddy in front).
   `--retries` resumes a build from its last acknowledged event on a fresh connection to the
   next host, as Bazel does; `--ack-timeout-ms` is how long a stream may stay silent with
-  events outstanding before the connection is given up.
+  events outstanding before the connection is given up. `--retry-delay-ms 1000` retries
+  the way Bazel does (1.6 times longer before each reconnect, the retries counted anew
+  after an attempt that was acknowledged something); without it reconnects follow each
+  other within a second.
 
   Exit status is non-zero when any build failed or any ack went missing.
   """
@@ -32,6 +35,7 @@ defmodule Conveyor.Loadgen.CLI do
     drop_after: :integer,
     duplicate_every: :integer,
     retries: :integer,
+    retry_delay_ms: :integer,
     ack_timeout_ms: :integer,
     report: :string,
     verify: :boolean,
@@ -63,6 +67,7 @@ defmodule Conveyor.Loadgen.CLI do
       drop_after: opts[:drop_after],
       duplicate_every: opts[:duplicate_every],
       retries: opts[:retries] || 0,
+      retry_delay_ms: opts[:retry_delay_ms],
       ack_timeout_ms: opts[:ack_timeout_ms] || 30_000,
       api_key: opts[:api_key],
       tls: opts[:tls] || false
