@@ -1,0 +1,6 @@
+segments mode=postgres events=60000 page=1/600 median_ms=31.5 reductions=1275586
+segments mode=postgres events=60000 page=300/600 median_ms=27.8 reductions=1277179
+segments mode=postgres events=60000 page=600/600 median_ms=28.7 reductions=1323870
+segments mode=blob events=60000 page=1/600 median_ms=42.9 reductions=1633676
+segments mode=blob events=60000 page=300/600 median_ms=42.4 reductions=1647482
+segments mode=blob events=60000 page=600/600 median_ms=44.5 reductions=1675109

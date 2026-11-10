@@ -194,19 +194,65 @@ defmodule Conveyor.RawStore do
   @doc """
   One page of a build's events by position (the first event is 1): the raw messages with
   their positions, and how many events the build holds.
+
+  Only the page is read. From segments: the rows' own counts say which rows hold the
+  positions asked for, and only those rows' bytes are fetched and decoded, whatever the
+  size of the build. From an archived blob, which is one compressed stream without an
+  index: it is decompressed from the start and dropped message by message up to the page,
+  then left; the cost grows with the page's position, memory does not (PLAN §26.5, H2).
   """
   @spec events_page(Invocation.t(), pos_integer(), pos_integer()) ::
           {[{pos_integer(), binary()}], non_neg_integer()}
   def events_page(%Invocation{} = inv, page, per_page) do
-    frames = frames(inv)
+    first = (page - 1) * per_page + 1
+
+    case form(inv) do
+      :archived ->
+        events =
+          inv
+          |> blob!(inv.raw_blob)
+          |> Codec.frame_stream()
+          |> Stream.drop(first - 1)
+          |> Enum.take(per_page)
+
+        # Compaction checked that the blob holds exactly the row's count.
+        {Enum.zip(first..(first + per_page), events), inv.event_count}
+
+      :segments ->
+        segment_page(inv, first, first + per_page - 1)
+    end
+  end
+
+  defp segment_page(inv, first, last) do
+    # Each row with the position of its first event.
+    {rows, total} =
+      inv
+      |> Segments.event_index()
+      |> Enum.map_reduce(0, fn {seq, _last_seq, count}, before ->
+        {{seq, before + 1, count}, before + count}
+      end)
+
+    wanted =
+      for {seq, from, count} <- rows,
+          from <= last and from + count > first,
+          into: %{},
+          do: {seq, from}
 
     events =
-      frames
-      |> Enum.with_index(1)
-      |> Enum.slice((page - 1) * per_page, per_page)
-      |> Enum.map(fn {frame, position} -> {position, frame} end)
+      case Map.keys(wanted) do
+        [] ->
+          []
 
-    {events, length(frames)}
+        seqs ->
+          inv
+          |> Segments.stream(:events, only: seqs)
+          |> Enum.flat_map(fn %{first_seq: seq} = row ->
+            Enum.zip(Stream.iterate(Map.fetch!(wanted, seq), &(&1 + 1)), segment_frames(row))
+          end)
+          |> Enum.filter(fn {position, _frame} -> position >= first and position <= last end)
+      end
+
+    {events, total}
   end
 
   @doc """

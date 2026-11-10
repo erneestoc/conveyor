@@ -1,0 +1,12 @@
+segments mode=postgres events=60000 page=1/600 median_ms=2.4 reductions=218375
+segments mode=postgres events=60000 page=300/600 median_ms=2.0 reductions=204687
+segments mode=postgres events=60000 page=600/600 median_ms=2.1 reductions=204662
+archived mode=postgres events=60000 page=1/600 median_ms=5.7 reductions=216371
+archived mode=postgres events=60000 page=300/600 median_ms=10.6 reductions=455615
+archived mode=postgres events=60000 page=600/600 median_ms=14.6 reductions=706219
+segments mode=blob events=60000 page=1/600 median_ms=2.4 reductions=219920
+segments mode=blob events=60000 page=300/600 median_ms=2.4 reductions=210080
+segments mode=blob events=60000 page=600/600 median_ms=2.1 reductions=206060
+archived mode=blob events=60000 page=1/600 median_ms=5.9 reductions=216457
+archived mode=blob events=60000 page=300/600 median_ms=12.5 reductions=456826
+archived mode=blob events=60000 page=600/600 median_ms=15.1 reductions=707955
