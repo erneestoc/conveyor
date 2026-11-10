@@ -32,6 +32,7 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 | `conveyor_oban_jobs_count{queue,state}`, `conveyor_oban_oldest_available_seconds{queue}` (gauges) | oldest waiting job older than 10 minutes: the queue is not draining |
 | `conveyor_blobs_errors_count{op}` (counter) | any increase: blob store credentials, bucket policy or disk |
 | `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count` (counters) | any increase: the blob store refuses raw-log writes or deletes (`RAW_LOG=blob`); see "Raw log (blob mode)" below |
+| `conveyor_raw_log_sweep_backlog_objects`, `conveyor_raw_log_sweep_backlog_overdue_seconds` (gauges) | above 0 for more than a few hours: the raw-log sweep is not keeping up or is failing; see "Raw log (blob mode)", "When the sweep falls behind" |
 | `vm_memory_total`, `vm_system_counts_process_count` | memory growth without stream growth |
 
 Ready-made rules for these are in `deploy/prometheus/alerts.yml`.
@@ -110,22 +111,31 @@ the audit log. Builds still streaming are skipped.
 
 ### Raw archive
 
-With `RAW_ARCHIVE_ENABLED=true`, every 15 minutes the `ArchiveRaw` job enqueues one job
-per build that finished more than `RAW_ARCHIVE_AFTER_HOURS` ago (and whose row has not
-changed for two idle windows) on the `archive` queue. Each copies the build's event
-segments into one blob (a zstd-compressed `--build_event_binary_file`) and its log into
-another, checks the counts against the row, and points the build at them
-(`invocations.raw_status = 'archived'`, `raw_blob`, `log_blob`). From then on the Events
-tab, the log viewer and the downloads read from the blob store (S3 in production): raw
-data lives there after a day, PostgreSQL keeps only the build's rows. The segment rows
-stay until their daily partition is dropped; the hourly partition job keeps a day that
-still holds a finished build the archive has not reached, so an outage of the store
-delays the drop instead of losing events.
+With `RAW_ARCHIVE_ENABLED=true`, every 15 minutes the `ArchiveRaw` job compacts the builds
+that finished more than `RAW_ARCHIVE_AFTER_HOURS` ago (and whose row has not changed for
+two idle windows), oldest first, on the `archive` queue. It works in batches of up to
+2,000 builds: the raw-log objects a batch points into are read once for all of its builds
+(at most 64 MB read ahead; a batch that points at more is cut), then each build's event
+segments become one blob (a zstd-compressed `--build_event_binary_file`) and its log
+another, the counts are checked against the row, and the build is pointed at them
+(`invocations.raw_status = 'archived'`, `raw_blob`, `log_blob`). A run lasts at most nine
+minutes and continues a second later when builds remain; it stays one job, so runs never
+overlap. From then on the Events tab, the log viewer and the downloads read from the blob
+store (S3 in production): raw data lives there after a day, PostgreSQL keeps only the
+build's rows. The segment rows stay until their daily partition is dropped; the hourly
+partition job keeps a day that still holds a finished build the archive has not reached,
+so an outage of the store delays the drop instead of losing events.
 
 - Storage: one object per build for events and one for the log, under the project's
   prefix, pinned; build retention makes them orphans and the nightly prune removes them.
   Requests: two PUTs per finished build (about $0.50/day of S3 PUTs at 100k builds/day)
-  plus a GET per Events-tab or log view of an archived build.
+  plus a GET per Events-tab or log view of an archived build. In blob mode the archive
+  also reads the raw log: about one ranged GET per raw-log object when the builds of a
+  batch ran together (measured 1.4 per build on 1,500 paced builds; it was one per segment
+  row, 15.7 per build, before batches: PLAN §26.5).
+- Reading an archived build: the events blob is one compressed stream. An Events-tab page
+  decompresses it from the start up to the page and stops (5 to 15 ms on a 60,000-event
+  build from disk; from S3 the object is downloaded first).
 - Metrics: `conveyor_raw_archived_count`, `conveyor_raw_archived_bytes`,
   `conveyor_raw_archive_failures_count{reason}` and `conveyor_raw_archive_overdue_seconds`
   (how long the oldest due build has waited past the delay). Alerts:
@@ -134,10 +144,18 @@ delays the drop instead of losing events.
   `ConveyorRawArchiveMismatch` (a build's segments did not match its row; it is marked
   `skipped` and keeps its segments until `RETENTION_RAW_DAYS` — run
   `Conveyor.Ingest.Verify.check/2` on it).
+- A build that fails to archive (a read or a put the store refused) is logged, counted
+  under `reason="error"`, left as it was and tried again by the next run; the others of
+  its batch are not affected. One build by hand:
+  `Conveyor.RawStore.compact(id)` from a remote shell.
 - Rollout: enable, watch the gauge fall to zero and the failures stay at zero for a day,
   then lower `RETENTION_RAW_DAYS` (at least `RAW_ARCHIVE_AFTER_HOURS/24 + 1`, so 2 with
   the default delay). Turning it off again is safe: archived builds keep reading from the
   store, new ones stay in the segments.
+- Upgrading from 0.2.3 with the archive on: archived builds with more than about 128 KB
+  of events or log could not be read back (the Events tab, the log and the downloads
+  failed) until the release that carries the fix in `Conveyor.RawStore.Codec`. Their
+  blobs are intact; nothing has to be re-archived.
 
 ### Raw log (blob mode)
 
@@ -149,53 +167,89 @@ directory) under `rawlog/<node>/<shard>/<ulid>`, then commits the segment rows w
 range (`object_key`, `object_offset`, `object_length`) in place of the payload. The
 acknowledgement follows the commit, which follows the object write, so "stored" means the
 object is written and the index committed. Objects span projects, are never served by URL
-and are read only by range through the server. Readers (Events tab, log viewer, downloads,
-`Invocations.raw_frames/1`) resolve both forms row by row, with a build's ranges in one
-object fetched as one GET, and the raw archive compacts a build's rows into its
-per-project blobs as before whichever form they have, so rows written in either mode stay
-readable for their whole retention.
+and are read only by range through the server. Every reader goes through
+`Conveyor.RawStore` (Events tab, log viewer, downloads, the oracle), which resolves both
+forms row by row, and the raw archive compacts a build's rows into its per-project blobs
+whichever form they have, so rows written in either mode stay readable for their whole
+retention. The raw log uses the same adapter as the blobs (`Conveyor.Blobs.Adapter`), so
+any backend that serves blobs serves it. `rawlog` is reserved: no project slug or blob
+prefix may be `rawlog`.
 
-- Sweep: every object is registered in `raw_log_objects` before it is written. Daily at
-  04:30 UTC `RawLogSweep` deletes the objects registered more than `RETENTION_RAW_DAYS + 1`
-  days ago (the bytes, then the row) and never one registered on or after the day of the
-  oldest segment partition that still exists: a day the hourly drop has not reached, or
-  that the archive's guard keeps, keeps its objects (`docs/spec/RawLog.tla`). Orphans of a
-  commit that failed after its put, or of a node that died in between (the client never
-  saw an ack and resends), go the same way, and so do the bytes of a batch that left its
-  group after the object was written (fenced, expired or failed: the rest of the group
-  commits against the same object, and those bytes stay in it with no row pointing at
-  them); nothing is listed and nothing is reference-counted. `conveyor_raw_log_sweep_failed_count` counts objects it could not
-  delete; they are retried the next day. The sweep runs in both modes, so objects left by
-  a blob-mode period are collected after a switch back.
+- Sweep: every object is registered in `raw_log_objects` before it is written. Hourly at
+  minute 30 `RawLogSweep` deletes the objects registered more than `RETENTION_RAW_DAYS + 1`
+  days ago and never one registered on or after the day of the oldest segment partition
+  that still exists: a day the hourly drop has not reached, or that the archive's guard
+  keeps, keeps its objects (`docs/spec/RawLog.tla`; the rules are in one module,
+  `Conveyor.RawStore.Expiry`). It works in pages of 1,000: the objects of a page are
+  deleted in bulk (one S3 DeleteObjects request; a loop of unlinks on disk), then the
+  rows of the keys the store reports deleted or already absent. A run lasts at most ten
+  minutes and enqueues its continuation when objects remain. Hourly, not daily, because
+  blob mode writes all day: at one object per shard per second a node registers up to
+  691,000 objects a day (and flat-out load has measured 150 a second), and the previous
+  daily run of at most 10,000 could never catch up. Measured: 2,500 objects in 0.17 s
+  against MinIO (about 15,000 a second) and 2,500 in under a second on disk, so one
+  ten-minute run covers days of one node's writes.
+  Orphans of a commit that failed after its put, or of a node that died in between (the
+  client never saw an ack and resends), go the same way, and so do the bytes of a batch
+  that left its group after the object was written (fenced, expired or failed: the rest
+  of the group commits against the same object, and those bytes stay in it with no row
+  pointing at them); nothing is listed and nothing is reference-counted. The sweep runs in
+  both modes, so objects left by a blob-mode period are collected after a switch back.
+- When the sweep falls behind: `conveyor_raw_log_sweep_backlog_objects` is the number of
+  objects past their date that are still registered (counted up to 100,000) and
+  `conveyor_raw_log_sweep_backlog_overdue_seconds` how long the oldest has been past it;
+  both are 0 when the sweep keeps up. Alert `ConveyorRawLogSweepBehind` fires when the
+  oldest is more than a day late. Check, in order: that the job runs
+  (`conveyor_oban_jobs_count{queue="maintenance"}`, the `oban_jobs` rows of
+  `Conveyor.Workers.RawLogSweep`: a run ends with `deleted`, `failed`, `remaining?`);
+  `conveyor_raw_log_sweep_failed_count` and `conveyor_blobs_errors_count{op="delete_objects"}`
+  (the store refuses deletes: on S3 the policy needs `s3:DeleteObject` on `rawlog/*`;
+  DeleteObjects is one POST on the bucket with a `Content-MD5` header, which some
+  S3-compatible stores and proxies reject); and whether the backlog is real work (a
+  retention just lowered, or a long partition hold by the archive's guard that ended: the
+  objects of all those days become due at once and drain at thousands a second). A
+  refused object keeps its row and is tried again by the next run. To run one now:
+  `Oban.insert(Conveyor.Workers.RawLogSweep.new(%{}))`; to see what a shorter retention
+  would delete at a given time, `Conveyor.RawStore.expiry_backlog(~U[…])`.
+  **Do not** put an S3 lifecycle expiration on `rawlog/` instead: it knows an object's age
+  and nothing else, and age alone deletes bytes under acknowledged rows when a partition
+  is kept past its date (`RawLog_current.cfg`).
 - Cost: the PUTs. A node issues at most `INGEST_WRITER_SHARDS × 1000 / RAW_LOG_FLUSH_MS`
   per second whatever the event rate (8 shards at 1 s: 8/s, about $3.50/day on S3), plus
   one per 4 MB received under flat-out load; an idle shard writes nothing. Reads are one
-  ranged GET per object a build touches. Mid-build acks wait up to `INGEST_BATCH_FLUSH_MS`
-  plus `RAW_LOG_FLUSH_MS` (measured p50 1.6 s, p99 3 s on paced builds; the end of a build
+  ranged GET per object a build touches (an Events-tab page reads only the rows that
+  cover it); the archive reads each object about once per batch (above); the sweep is one
+  request per 1,000 objects. Mid-build acks wait up to `INGEST_BATCH_FLUSH_MS` plus
+  `RAW_LOG_FLUSH_MS` (measured p50 1.6 s, p99 3 s on paced builds; the end of a build
   flushes at once), see PLAN §25 "Ack latency in blob mode".
 - Disk store: an object is written under a temporary name, synced, renamed into place
   and its directory synced before the batches in it are acknowledged (`RAW_LOG_FSYNC`,
   on by default; about 10 ms per object on the laptop).
 - Metrics: `conveyor_raw_log_put_count` and `conveyor_raw_log_put_bytes` (objects and
-  bytes written), `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count`.
+  bytes written), `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count`,
+  the two backlog gauges above, and `conveyor_blobs_errors_count{op}` with
+  `op="put_object"`, `"get_range"` or `"delete_objects"` for the raw log's calls.
 - When `conveyor_raw_log_put_failed_count` rises: a group's object is put once; a put
   that fails is tried again under the same key after 50, 200 and 800 ms, and if the store
   still refuses, the whole group fails (its streams end with UNAVAILABLE and Bazel
   resends). No batch tries an object of its own, so a store outage costs four puts per
   group, not one per batch. Nothing is acknowledged that is not stored, but
   `conveyor_ingest_ack_latency_us` climbs and, if every put fails, no batch commits and
-  clients give up at their timeout. Check, in order: the
-  store itself (raw-log calls are not counted in `conveyor_blobs_errors_count{op}`, so
-  that series rising too means the whole store is down, the raw-log counter alone means
-  something specific to the `rawlog/` prefix: on S3 the credentials, the bucket's region
-  and the policy for `PutObject`, `GetObject` and `DeleteObject` under `rawlog/`, which
-  is outside the per-project prefixes; on the disk backend free space and permissions on
-  `BLOB_DIR`), the node's log (`raw log put rawlog/… failed: …` carries the store's
-  reason), then that `conveyor_raw_log_put_count` resumes. Failed puts leave rows in `raw_log_objects` with
+  clients give up at their timeout. Check, in order: the store itself (raw-log calls are
+  counted in `conveyor_blobs_errors_count{op}` like every other call to the store:
+  `op="put_object"` alone rising means something specific to the `rawlog/` prefix, the
+  blob operations `put`, `stream`, `delete` rising too means the whole store is down; on
+  S3 the credentials, the bucket's region and the policy for `PutObject`, `GetObject`
+  and `DeleteObject` under `rawlog/`, which is outside the per-project prefixes; on the
+  disk backend free space and permissions on `BLOB_DIR`), the node's log
+  (`raw log put rawlog/… failed: …` carries the store's reason), then that
+  `conveyor_raw_log_put_count` resumes. Failed puts leave rows in `raw_log_objects` with
   no object behind them; the sweep removes them with the rest. The table's size is one
   row per object: `SELECT count(*), min(inserted_at) FROM raw_log_objects` (at most
-  shards × 86,400 × 1000 / `RAW_LOG_FLUSH_MS` rows per node and day; `min` older than
-  `RETENTION_RAW_DAYS + 2` days means the sweep is not running or is failing).
+  shards × 86,400 × 1000 / `RAW_LOG_FLUSH_MS` rows per node and day).
+- A ranged read that fails (the store is down, an object is gone) is an error for the
+  reader that asked: the page, the download or the archive of that build fails and says
+  which object and range (`raw log rawlog/… range …`); it never returns fewer bytes.
 - Switching modes: `RAW_LOG` can change in either direction with a restart and nothing to
   migrate, since rows keep their form and readers resolve both (a build streaming across
   the switch has rows of both kinds). Objects written in blob mode stay, and keep being
@@ -203,6 +257,21 @@ readable for their whole retention.
   store's credentials and the `raw_log_objects` table until then. Going back to postgres
   mode puts the segment bytes back into the database's WAL and IOPS (docs/capacity.md
   "Raw log" has the difference).
+
+### Blob prefixes
+
+A project's blobs live under its prefix (the slug, or the "blob prefix" in its storage
+settings). A project owns its prefix: one that another project uses, or still has blobs
+under, is refused, and so is `rawlog`, which is the server's. Installations from before
+this check may have two projects on one prefix; deleting a blob of one then keeps the
+object while the other holds a row for the same content, so nothing is lost, but give one
+of them its own prefix (new blobs go there, old ones stay readable where they are). To
+find such pairs:
+
+```sql
+SELECT prefix, array_agg(DISTINCT project_id) FROM blobs
+WHERE prefix IS NOT NULL GROUP BY prefix HAVING count(DISTINCT project_id) > 1;
+```
 
 ### Database parameters
 

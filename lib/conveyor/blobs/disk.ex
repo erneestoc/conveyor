@@ -154,13 +154,18 @@ defmodule Conveyor.Blobs.Disk do
     {Enum.reverse(deleted), Enum.reverse(failed)}
   end
 
-  @doc "Absolute path of a keyed object. The key is a relative path without `..`."
+  @doc "Absolute path of a keyed object. The key is a relative path without `.` or `..` segments."
   def object_path(key, opts) do
-    case Path.safe_relative(key) do
-      {:ok, relative} -> Path.join(Keyword.fetch!(opts, :dir), relative)
-      :error -> raise ArgumentError, "object key #{inspect(key)} leaves the store"
-    end
+    if safe_key?(key),
+      do: Path.join(Keyword.fetch!(opts, :dir), key),
+      else: raise(ArgumentError, "object key #{inspect(key)} leaves the store")
   end
+
+  # Checked on the string alone: `Path.safe_relative/2` asks the file server for the
+  # working directory and looks for symlinks on every call, which showed as 5 % more work
+  # per raw-log put (PLAN §26.5, bench).
+  defp safe_key?(key),
+    do: key |> String.split("/") |> Enum.all?(&(&1 not in ["", ".", ".."]))
 
   @doc "Absolute path of a blob under the configured directory."
   def path(digest, opts) do

@@ -79,7 +79,7 @@ lib/conveyor/
   ingest/session.ex     the stream protocol, pure: loaded/push/timer/committed/failed/writer_down/lifecycle → {session, effects} (order/dedup, batches, backpressure, takeover, idle → disconnected, linger, finalize); session/config.ex its knobs (PLAN §26.2)
   ingest/worker.ex      per-invocation GenServer, wiring only: interprets the session's effects; owns load_or_create/3 (the row + the tenancy check), the writer monitor, the named timers; registered as {project_id, invocation_id}
   ingest/normalizer.ex  pure BEP payload → State (inv map + dirty) + Batch rows; finalize/disconnect
-  ingest/batch.ex       rows for one commit; event/log segment rows (zstd via :zstd from OTP)
+  ingest/batch.ex       rows for one commit; its event/log segment rows are made by RawStore.event_segment/3 and log_segment/3
   ingest/writer.ex      the commit pipeline of one shard (PLAN §26.3): submit/2 a batch → exactly one outcome (committed | fenced | expired | failed; the pid's death = unknown); the process, the pressure gauge, the driver loop
   ingest/writer/        its stages: config.ex (struct, read once at start), flush.ex (pure: commit now or wait), plan.ex (units → rows, compression contexts), store.ex (one raw-log object per group, put once), transaction.ex (fence first, CAS on last_event_seq, the unnest SQL), policy.ex (pure: what follows a failed attempt, bounded)
   ingest/writer_pool.ex shards by phash2(invocation_id) (count in a persistent term); pressure/0 for admission control
@@ -93,20 +93,25 @@ lib/conveyor/
   ingest/tags.ex        merge order derived < workspace_status < keywords < api_key < build_metadata; ignores volatile keys
   ingest/status.ex      exit code → status, categories
   ingest/retry.ex       backoff for DBConnection/Postgrex transient errors (the worker's row load; the writer's retries are Writer.Policy's)
-  ingest/verify.ex      oracle: contiguous segments, counts, log offsets, final status
-  invocations.ex        read side: list(project_id/statuses/query/before), events/raw_frames/log/log_segments/targets/test_results/actions/metrics/facets/failed_targets/slowest_tests/events_page/day
+  ingest/verify.ex      the oracle, one path for every form: the row's status and counts against RawStore.audit/1
+  invocations.ex        read side: list(project_id/statuses/query/before), events/events_page/log (decoded, through RawStore), targets/test_results/actions/metrics/facets/failed_targets/slowest_tests/day
+  raw_store.ex          a build's raw bytes in every form (PLAN §26.5), the only module that knows the form: append (prepare/3, append/1, event_segment/3, log_segment/3, write_mode/0), read (frames/1, bep/1, events_page/3, log/1), compact (compact_due/2, compact/2), expire (expire_partitions/1, expire_objects/2, expiry_backlog/1), verify (audit/1)
+  raw_store/            its inside: codec.ex (zstd + BEP dictionary + framing, streaming), segments.ex (payload rows and byte-range rows read as one), expiry.ex (the three date rules, pure)
+  raw_log.ex            inside the store: raw-log objects (key, registration row, put/get_range through the blob adapter, coalesced and read-ahead ranges, the paged bulk sweep); config key `Conveyor.RawLog`
+  raw_archive.ex        inside the store: compaction per build (the Archive.tla protocol) and per batch (object-first reads); config key `Conveyor.RawArchive`
+  blobs.ex, blobs/      content-addressed blobs per project; blobs/adapter.ex is the object seam (blobs: put/stream/exists?/delete; keyed objects: put_object/get_range/delete_objects), disk.ex and s3.ex implement both (S3: SigV4 over :httpc, DeleteObjects)
   invocations/*.ex      schemas (Invocation, Target, TestResult, Action, Metrics, TagKey, EventSegment, LogSegment)
   projects.ex           projects + api keys (create/verify/rotate/revoke/touch/expiring); ApiKeyCache (ETS + PubSub invalidation); Segments defaults
   query.ex, query/parser.ex, query/values.ex   search language
   metrics/{scope,dashboard,tests}.ex           dashboard queries
-  storage.ex, storage/partitions.ex            boot-time partition creation, retention drops
-  workers/partition_maintenance.ex             Oban hourly cron
+  storage.ex, storage/partitions.ex            boot-time partition creation; drop_before/2 and oldest_day/0 are mechanisms, the rules are RawStore.Expiry
+  workers/partition_maintenance.ex, raw_log_sweep.ex, archive_raw.ex   hourly / hourly at :30 / every 15 min: they run RawStore.expire_partitions/1, expire_objects/2 (continuation job when objects remain), compact_due/2 (snoozes when builds remain)
 lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor; server_opts/2 is the one place the server's options are built), auth_interceptor.ex, publish_build_event_server.ex, acker.ex, flow_control.ex (cowboy stream handler in front of grpc_stream_h: window granted when the body is read)
 lib/conveyor_web/       live/{builds,invocation,dashboard,tests,settings}_live.ex, components/{build_components,charts,timeline,layouts,core_components}.ex, controllers/download_controller.ex, format.ex, not_found_error.ex
 assets/js/hooks/        live_time.js (ticking durations), log_viewer.js (virtualized view over the log worker), profile_timeline.js
 assets/js/              log_core.mjs (log engine: paged UTF-8 buffer + terminal emulation + filter; Node tests in assets/test), log_worker.js, profile_worker.js
 lib/mix/tasks/          conveyor.replay, conveyor.seed
-test/support/           data_case, conn_case, grpc_case (random port), ingest_case (shared sandbox + gRPC), live_case (ingest fixtures through the real pipeline)
+test/support/           data_case, conn_case, grpc_case (random port), ingest_case (shared sandbox + gRPC), live_case (ingest fixtures through the real pipeline), raw_store_contract.ex (the store's contract as scenarios: plays the pipeline at the store's interface, clocks as arguments), blob adapters for tests: flaky_blobs.ex (failures on switches, blobs and keyed objects), one_shot_blobs.ex, counting_blobs.ex (keyed-object calls counted at the seam), fake_s3.ex (in-process S3 with Range and DeleteObjects)
 priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (+ LICENSE files, VERSION, gen.sh)
 ```
 
@@ -131,7 +136,70 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
-### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1, 4 and 2 landed; next 3 (raw bytes store)
+### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1, 4, 2 and 3 landed
+
+- **NEXT, for the owner to decide (ask, do not assume):**
+  1. **Whether `ADMISSION` stays on by default.** It is on. PLAN §26.4's experiment says
+     it cuts the amplification by an order of magnitude, does not keep a node under the
+     deadline when capacity drops at once, and completes *fewer* builds than no admission
+     when the outage is shorter than the clients' patience. The fleet run that would
+     settle it (paced 7,500 streams) has not been run. Show the §26.4 table and ask.
+  2. **`deploy/helm/conveyor/files/alerts.yml` is stale** relative to
+     `deploy/prometheus/alerts.yml`: it lacks the admission rules of §26.4 and the two
+     raw-log sweep rules of §26.5 (`ConveyorRawLogSweepBehind`, `ConveyorRawLogSweepFailing`)
+     and the reworded `ConveyorBlobErrors`. Only the Prometheus file was in scope for the
+     last two steps; copy it over (and lint the chart: no helm binary on this machine).
+  3. **The trial demo runs with `RAW_ARCHIVE_ENABLED=true` on an image from before
+     `170829b`:** archived builds with more than about 128 KB of events or log cannot be
+     read there (Events tab, log, downloads fail with a MatchError in the zstd stream).
+     The blobs are intact; deploying an image with the fix makes them readable. Build,
+     push and refresh when the owner wants the demo touched (AGENTS.md, infrastructure
+     rules).
+- **Done 2026-11-10: the raw bytes store (candidate 3), PLAN §26.5.** `Conveyor.RawStore`
+  is the one module that knows where a build's raw bytes are (payload rows, byte ranges
+  of raw-log objects, archived blobs): append, read, compact, expire, verify. The object
+  store is one seam (`Conveyor.Blobs.Adapter` with keyed objects: `put_object/3`,
+  `get_range/4`, `delete_objects/2`); `RawLog` and `RawArchive` are the store's inside
+  (their names stay because they are configuration keys). Defects fixed on the way: the
+  sweep's 10,000-a-day cap (pages, S3 DeleteObjects, hourly, continuation), reserved and
+  duplicate blob prefixes, two definitions of "archived", and one nobody had listed: the
+  zstd stream crashed on any chunk past OTP's 128 KB buffer, so archived builds of real
+  size were unreadable (found by the 60,000-event build the events-page measurement
+  needed). Measured and changed: archive reads 15.7 → 1.4 ranged GETs per build (0.367 →
+  0.032 per event) by compacting in batches that read each object once; an events page
+  28–44 ms → 2 ms on a 60,000-event build; `event_segments.kinds` no longer written.
+- **Gotchas from the raw bytes store step.** (1) Tests never rewrite time: the store's
+  clock is an argument (`RawStore.compact/2`, `compact_due/2`, `expire_partitions/1`,
+  `expire_objects/2`, `Blobs.prune_orphans/2`), old builds are *constructed* old
+  (`RawStoreContract.build!(project, at)`), and the sweep job takes `as_of`. To make
+  objects expire in a test, drop the partition first with a future date, as production
+  does: the sweep never passes the oldest partition that exists. (2) The contract helpers
+  (`test/support/raw_store_contract.ex`) play the pipeline at the store's interface; use
+  them instead of ingesting a fixture when the test is about bytes, and `ingest_fixture!`
+  (one batch per event) when it is about the pipeline. (3) `raw_store_seam_test.exs`
+  greps `lib/` for the store's columns and internals outside the store: a failure there
+  is a design question, the allow-lists are in the test. (4) `:zstd.stream/2` returns
+  `{:continue, remainder, output}` when its buffer fills; anything that streams zstd must
+  feed the remainder (only `RawStore.Codec` does). (5) Objects written by tests stay in
+  `tmp/blobs_test` (the sandbox rolls the rows back, not the files): assert on a unique
+  shard directory, never on the whole store. (6) `Blobs.Counting.count/1` counts keyed
+  object calls at the seam; statements about read cost go through it, not through
+  telemetry of the inside. (7) A background-job continuation: the sweep inserts a new job
+  with a counter (its uniqueness is by arguments), the archive snoozes (its uniqueness is
+  by `id`, a continuation would be dropped as a duplicate). (8) The local MinIO's
+  credentials are the container's `MINIO_ROOT_USER`/`MINIO_ROOT_PASSWORD` environment
+  (`docker exec chumti-minio sh -c 'printf %s "$MINIO_ROOT_USER"'`; the `_FILE` variables
+  point at files that do not exist); `mix test --only s3` with `S3_TEST_BUCKET=conveyor-test
+  S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_PATH_STYLE=true` and
+  `env -u AWS_SESSION_TOKEN`.
+- **Open after the raw bytes store** (PLAN §26.5 "Follow-ups" has the detail and the
+  estimated savings): cheaper raw-log object registration (one synchronous transaction
+  per flush today; needs `RawLog.tla` re-modelled), slimmer blob-mode index rows (object
+  key as an integer reference, one row per batch for events and log), archive batches
+  beyond the 64 MB read-ahead (a disk spool) for fleets whose builds are long, ranged
+  reads of archived blobs on S3 (a page downloads the object first), background work
+  that yields to admission (`Conveyor.Admission.state().level`), a database constraint
+  for unique prefixes (the check is a query, two concurrent settings changes can race).
 
 - **Done:** §26.1 derived rows, §26.2 stream session, §26.3 commit pipeline (2026-11-10:
   `2cdc899` fence first, `e6ad538` durable disk puts, `d7d9f42` session hibernation,
@@ -182,13 +250,7 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
   RESOURCE_EXHAUSTED handler exceptions on purpose: look at
   `conveyor_admission_refused_count`, not at the log. (6) An overload run's node logs are
   10 MB each; `bench/results/overload-*/` keeps the summary, the phases and the rows only.
-- **Next: raw bytes store behind the blob adapter (candidate 3).** What admission means for it: a put is inside the commit, so a slow object store raises the pressure by itself (`oldest_ms`) and the node sheds; nothing to wire. Bytes waiting for the writer count against `ADMISSION_MAX_BACKLOG_MB`. Background work that competes with commits (the sweep, object-first archiving) can ask `Conveyor.Admission.state().level` and yield above 0; nothing does yet. `Conveyor.Grpc.FlowControl` sits in front of every gRPC service, the CAS sink and ByteStream included: a large upload now gets window as the handler reads it (65 KB initial window plus cowboy's margin). The bytestream and CAS tests pass; the throughput of large uploads through it was **not measured** (measure before raising `initial_stream_window_size` through `FlowControl.adapter_opts/0`). New histograms go in `ConveyorWeb.Telemetry.histograms/0` (no labels: a labelled series is a counter or a gauge). `Writer.Store` is the
-  pipeline's only contact with the object store (`new/4` fixes key and ranges, `put/1` is
-  idempotent and retried under the same key). Objects may hold unreferenced bytes (units
-  evicted after the put). `RawLog.put/2` on disk is now tmp + fsync + rename + directory
-  fsync (`RAW_LOG_FSYNC`); it still bypasses the adapter, so the store-failure test blocks
-  the directory instead of using `Blobs.Flaky`. The sweep's 10,000-per-day cap is still
-  open (review defect table).
+- **What admission means for the raw bytes store (now landed, §26.5).** A put is inside the commit, so a slow object store raises the pressure by itself (`oldest_ms`) and the node sheds; nothing to wire. Bytes waiting for the writer count against `ADMISSION_MAX_BACKLOG_MB`. Background work that competes with commits (the sweep, batch compaction) can ask `Conveyor.Admission.state().level` and yield above 0; nothing does yet (follow-up). `Conveyor.Grpc.FlowControl` sits in front of every gRPC service, the CAS sink and ByteStream included: a large upload now gets window as the handler reads it (65 KB initial window plus cowboy's margin). The bytestream and CAS tests pass; the throughput of large uploads through it was **not measured** (measure before raising `initial_stream_window_size` through `FlowControl.adapter_opts/0`). New histograms go in `ConveyorWeb.Telemetry.histograms/0` (no labels: a labelled series is a counter or a gauge). `Writer.Store` is the pipeline's only contact with `Conveyor.RawStore` (`new/4` prepares the append, which fixes key and ranges; `put/1` is idempotent and retried under the same key). Objects may hold unreferenced bytes (units evicted after the put).
 - **Gotchas from the commit-pipeline step.** (1) The laptop is shared with other projects' Bazel builds:
   load average went 2 → 260 during this session. Check `uptime` before trusting a bench;
   events per app vCPU by OS time and per-process reductions do not depend on the load. The

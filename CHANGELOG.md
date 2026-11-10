@@ -18,6 +18,47 @@
   commits a file in a few batches instead of one batch hold per event.
   `Invocations.get!/1` is removed (use `get/2` with `project_ids`).
 
+- **Raw bytes store (PLAN §26.5):** one module, `Conveyor.RawStore`, owns a build's raw
+  events and log in every form they take (segment rows with the bytes, segment rows with
+  a byte range of a raw-log object, archived blobs): append, read, compaction, expiry and
+  the oracle's audit. Readers, the commit pipeline, the workers and the downloads no
+  longer know the form. The blob adapter (`Conveyor.Blobs.Adapter`) is the one object
+  seam and gains keyed objects (`put_object/3`, `get_range/4`, `delete_objects/2`); the
+  raw log goes through it, so a custom adapter serves it too (it raised
+  `CaseClauseError`). **A custom adapter module must implement the three new callbacks.**
+  Fixed and changed with it:
+  - **Archived builds over about 128 KB could not be read back.** The zstd stream did
+    not feed back the input OTP's codec leaves when its buffer fills, so the Events tab,
+    the log and the downloads of an archived build of real size failed. The blobs are
+    intact; nothing has to be re-archived. (The archive is off by default.)
+  - **The raw-log sweep keeps pace.** It deleted at most 10,000 objects a day, one at a
+    time, while blob mode writes hundreds of thousands. It now runs hourly, deletes page
+    after page for up to ten minutes (S3 DeleteObjects, 1,000 keys a request) and
+    continues when objects remain; about 15,000 objects a second against MinIO. New
+    gauges `conveyor_raw_log_sweep_backlog_objects` and
+    `conveyor_raw_log_sweep_backlog_overdue_seconds`, alert rules
+    `ConveyorRawLogSweepBehind` and `ConveyorRawLogSweepFailing`. The S3 policy must
+    allow `s3:DeleteObject` on `rawlog/*` (as before) and the bucket must accept
+    DeleteObjects.
+  - **A project owns its blob prefix.** `rawlog` is reserved (a project named `rawlog`,
+    or with that blob prefix, stored among the raw log's objects), and a prefix another
+    project uses or still has blobs under is refused (deleting a blob of one project
+    removed the other's bytes). Existing projects keep what they have; deleting a blob
+    now keeps the object while a project sharing the prefix holds the same content.
+  - **The raw archive reads each raw-log object once per batch** instead of once per
+    segment row: 1.4 ranged reads per build instead of 15.7 on 1,500 paced builds in blob
+    mode (0.03 instead of 0.37 per event). The archive job compacts due builds in batches
+    of up to 2,000 and is one job that continues itself, not one job per build.
+  - **The Events tab reads only the page:** from segments, only the rows that hold the
+    events asked for (2 ms instead of 30 to 45 ms on a 60,000-event build); from an
+    archived blob, up to the page and no further.
+  - Raw-log calls are counted in `conveyor_blobs_errors_count{op}` (`put_object`,
+    `get_range`, `delete_objects`) like every other call to the store.
+  - `event_segments.kinds` is no longer written (nothing read it; about 20 bytes per
+    event in blob mode). The column stays.
+  - Removed: `Conveyor.Invocations.raw_frames/1`, `archived?/1`, `stream_raw/1`,
+    `stream_log/2`, `log_segments/1` (use `Conveyor.RawStore.frames/1`, `bep/1`, `log/1`).
+
 - **Admission and overload control (PLAN §26.4):** a node now measures how far its commits
   are behind (the age of the oldest uncommitted batch against `INGEST_WRITER_DEADLINE_MS`)
   and refuses what it could not acknowledge in time, new work first: new builds of a key

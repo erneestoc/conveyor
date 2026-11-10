@@ -300,19 +300,7 @@ defmodule ConveyorWeb.Telemetry do
   @doc false
   def measure_raw_archive(now \\ System.monotonic_time(:millisecond)) do
     if Conveyor.RawStore.compaction?() do
-      key = {__MODULE__, :raw_archive_overdue}
-
-      seconds =
-        case :persistent_term.get(key, nil) do
-          {at, value} when now - at < 60_000 ->
-            value
-
-          _ ->
-            value = Conveyor.RawStore.compaction_overdue_seconds()
-            :persistent_term.put(key, {now, value})
-            value
-        end
-
+      seconds = cached(:raw_archive_overdue, now, &Conveyor.RawStore.compaction_overdue_seconds/0)
       :telemetry.execute([:conveyor, :raw_archive, :overdue], %{seconds: seconds}, %{})
     end
 
@@ -324,23 +312,28 @@ defmodule ConveyorWeb.Telemetry do
   # What the raw-log sweep has not deleted yet; recomputed at most once a minute per node.
   @doc false
   def measure_raw_expiry(now \\ System.monotonic_time(:millisecond)) do
-    key = {__MODULE__, :raw_expiry_backlog}
-
-    backlog =
-      case :persistent_term.get(key, nil) do
-        {at, value} when now - at < 60_000 ->
-          value
-
-        _ ->
-          value = Conveyor.RawStore.expiry_backlog()
-          :persistent_term.put(key, {now, value})
-          value
-      end
-
+    backlog = cached(:raw_expiry_backlog, now, &Conveyor.RawStore.expiry_backlog/0)
     :telemetry.execute([:conveyor, :raw_log, :sweep_backlog], backlog, %{})
     :ok
   rescue
     _ -> :ok
+  end
+
+  # A value kept for a minute by the process that measures (the poller). Not a persistent
+  # term: replacing one makes every process on the node scan its heap for the old value,
+  # once a minute on a node with thousands of stream workers.
+  defp cached(name, now, fun) do
+    key = {__MODULE__, name}
+
+    case Process.get(key) do
+      {at, value} when now - at < 60_000 ->
+        value
+
+      _ ->
+        value = fun.()
+        Process.put(key, {now, value})
+        value
+    end
   end
 
   @oban_states ~w(available scheduled executing retryable)

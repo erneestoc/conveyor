@@ -122,6 +122,25 @@ Properties: `Stored` (every event is in the segments or in the referenced blob) 
 | `Archive_plainref.cfg` | the reference without pinning the row | `ReferencedIntact` violated in 13 steps: put, the node stalls past the pruning grace, prune deletes the orphan, the reference lands on nothing (a later partition drop then loses the events) |
 | `Archive_reput.cfg` | 0.2.2 blob deletion (object after commit) | `ReferencedIntact` violated in 16 steps: a crashed archiver's orphan is pruned, the next run re-puts the same digest between prune's commit and its object delete, pins the fresh row and references bytes that are then deleted |
 
+Code ↔ model since the raw bytes store (PLAN §26.5, 2026-11-10); the model is unchanged:
+
+| Action | Code |
+|---|---|
+| the archiver: read, put, reference | `RawStore.compact/2` → `RawArchive.archive/3`: `Segments.stream/3` through one zstd context into `Blobs.put/3`, the count check, then `Blobs.pin/2` and `UPDATE … WHERE raw_status = 'segments'` in one transaction |
+| the loser's checked delete | `Blobs.discard/2` |
+| `DropPartition` with its guard | `RawStore.expire_partitions/1`: `RawStore.Expiry.partition_cutoff/2`, kept days by `RawArchive.holds_unarchived?/1` |
+| the job not running for days | `RawStore.compact_due/2` is one job that snoozes itself; `conveyor_raw_archive_overdue_seconds` |
+
+`compact_due/2` archives builds in batches and reads the raw-log objects a batch points
+into once for all of its builds before any of them is archived. That is outside the
+model and safe by an argument, not a check: a raw-log object is written once and never
+changed, so bytes read ahead are the bytes a later read would return; every build then
+goes through the same steps as alone (its own puts, its own reference transaction), and a
+range that could not be read ahead is read by its build, which fails alone and is retried.
+`raw_store_contract_test.exs` runs the model's chaos against the store's interface: two
+archivers at once, a lost race, a build deleted meanwhile, a crash between the puts and
+the reference (a trigger kills the reference transaction), a store outage, a mismatch.
+
 Design changes before any code (`Conveyor.Workers.ArchiveRaw`, `Conveyor.Storage.Partitions`,
 `Conveyor.Blobs`): the partition drop skips a day that still holds a finished build with
 `raw_status = 'segments'` (the oldest-unarchived gauge alerts instead of data being lost);
@@ -155,10 +174,29 @@ drop guard keeping the day). `R` = 1, two batches, two objects per writer.
 
 The writer and `RawLog.put/2` already did the first two (`Writer.Store.put/1` runs before
 the transaction, the row goes in before the bytes); the third is the change the model asked
-for: `Workers.RawLogSweep` bounds its cutoff by `Partitions.oldest_day/0`, since an
+for: the sweep's cutoff is bounded by `Partitions.oldest_day/0`, since an
 object is registered when its batches commit and so never before their build's creation
-day, a partition of day `d` only references objects registered on or after `d`
-(`raw_log_sweep_test.exs`).
+day, a partition of day `d` only references objects registered on or after `d`.
+
+Code ↔ model since the raw bytes store (PLAN §26.5, 2026-11-10); the model is unchanged:
+
+| Action | Code |
+|---|---|
+| register the key, write the bytes | `RawStore.append/1` → `RawLog.put/2`: the row in its own transaction, then `c:Conveyor.Blobs.Adapter.put_object/3` (durable when it returns; the same key and bytes again on a retry) |
+| commit the index rows, acknowledge | `Writer.Transaction.run/3` with the rows `RawStore.append/1` returned, then the session's ack |
+| drop a partition | `RawStore.expire_partitions/1` (`RawStore.Expiry`, rule 1) |
+| sweep | `RawStore.expire_objects/2` → `RawLog.sweep/2` with `RawStore.Expiry.object_cutoff/3` (rule 2: age, and the oldest live partition) |
+
+The sweep now deletes in pages: the objects of a page in bulk
+(`c:Conveyor.Blobs.Adapter.delete_objects/2`), then the registration rows of exactly the
+keys the store reported deleted or absent. Per object the order is the model's (bytes,
+then row), a crash between the two leaves rows whose objects are gone, which the next run
+deletes as absent, and a key the store refuses keeps its row: `Registered` holds as
+before. That the rules are what the model checked is tested at three clocks without
+rewriting time in the database (`raw_store_contract_test.exs`: nothing goes on the last
+day of retention; a sweep that runs before the partition drop deletes nothing however
+late it is; the objects go only after the partition), and as a table of dates
+(`raw_store/expiry_test.exs`).
 
 Since 2026-11-09 (PLAN §26.3) a group's object is written once and every attempt of the
 group commits against it: the retry after a failed commit, the group without its fenced or

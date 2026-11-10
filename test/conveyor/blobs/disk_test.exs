@@ -115,6 +115,9 @@ defmodule Conveyor.Blobs.DiskTest do
     test "a key cannot leave the store", %{opts: opts} do
       assert_raise ArgumentError, fn -> Disk.put_object("../outside", "bytes", opts) end
       assert_raise ArgumentError, fn -> Disk.get_range("rawlog/../../outside", 0, 1, opts) end
+      assert_raise ArgumentError, fn -> Disk.put_object("/etc/outside", "bytes", opts) end
+      assert_raise ArgumentError, fn -> Disk.delete_objects(["rawlog/./x//y"], opts) end
+      assert_raise ArgumentError, fn -> Disk.put_object("", "bytes", opts) end
     end
   end
 end

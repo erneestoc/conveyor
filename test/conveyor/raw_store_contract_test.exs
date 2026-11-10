@@ -522,7 +522,7 @@ defmodule Conveyor.RawStoreContractTest do
       [a] = append!([{a, ["m"], ""}], :postgres)
       finish!(a, old)
       ref = :telemetry_test.attach_event_handlers(self(), [[:conveyor, :raw_archive, :overdue]])
-      :persistent_term.erase({ConveyorWeb.Telemetry, :raw_archive_overdue})
+      Process.delete({ConveyorWeb.Telemetry, :raw_archive_overdue})
       ConveyorWeb.Telemetry.measure_raw_archive()
       assert_receive {[:conveyor, :raw_archive, :overdue], ^ref, %{seconds: s}, _} when s > 86_400
       # Cached for a minute.
@@ -532,7 +532,7 @@ defmodule Conveyor.RawStoreContractTest do
       compaction!(false)
       ConveyorWeb.Telemetry.measure_raw_archive()
       refute_receive {[:conveyor, :raw_archive, :overdue], ^ref, _, _}
-      :persistent_term.erase({ConveyorWeb.Telemetry, :raw_archive_overdue})
+      Process.delete({ConveyorWeb.Telemetry, :raw_archive_overdue})
     end
   end
 
@@ -596,7 +596,7 @@ defmodule Conveyor.RawStoreContractTest do
     test "the backlog gauges are published", %{project: project} do
       expired_objects!(project, 2)
       ref = :telemetry_test.attach_event_handlers(self(), [[:conveyor, :raw_log, :sweep_backlog]])
-      :persistent_term.erase({ConveyorWeb.Telemetry, :raw_expiry_backlog})
+      Process.delete({ConveyorWeb.Telemetry, :raw_expiry_backlog})
       ConveyorWeb.Telemetry.measure_raw_expiry()
 
       assert_receive {[:conveyor, :raw_log, :sweep_backlog], ^ref,
@@ -605,7 +605,7 @@ defmodule Conveyor.RawStoreContractTest do
       # Cached for a minute.
       ConveyorWeb.Telemetry.measure_raw_expiry()
       assert_receive {[:conveyor, :raw_log, :sweep_backlog], ^ref, %{objects: 0}, _}
-      :persistent_term.erase({ConveyorWeb.Telemetry, :raw_expiry_backlog})
+      Process.delete({ConveyorWeb.Telemetry, :raw_expiry_backlog})
     end
   end
 

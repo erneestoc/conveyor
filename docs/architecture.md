@@ -54,15 +54,42 @@ Browser ──HTTPS / WebSocket──▶ node C ─────┘         S3 (p
 |---|---|
 | `invocations` | one row per build: status, timings, counters, tags, options, cache stats. Updated a few times per build (fenced). |
 | `targets`, `test_results`, `actions`, `invocation_metrics` | normalized rows keyed by invocation, upserted with partial column sets. The file-set graph (`NamedSetOfFiles`, `TargetComplete.output_group`) is not normalized: it stays in the raw BEP stream. The `named_sets` table and `targets.output_groups` column still exist, unwritten, until the release that drops them |
-| `event_segments` | the raw BEP stream, zstd-compressed batches, partitioned by day |
-| `log_segments` | the build log text, zstd-compressed batches with byte and line offsets, partitioned by day |
+| `event_segments` | the raw BEP stream, zstd-compressed batches, partitioned by day: the bytes themselves (`RAW_LOG=postgres`) or a byte range of a raw-log object (`RAW_LOG=blob`) |
+| `log_segments` | the build log text, zstd-compressed batches with byte and line offsets, partitioned by day, in the same two forms |
+| `raw_log_objects` | one row per raw-log object in the blob store (`rawlog/<node>/<shard>/<id>`), registered before the object is written so the sweep finds it |
 | `tag_keys` | tag facet counts per project, maintained by a per-node counter, rebuilt after deletes |
 | `spawns` | one row per spawn of an uploaded execution log: target, mnemonic, cache status, timings, input and output digests, the sorted input list as one compressed blob |
 | `blobs` | metadata per `(project_id, digest)`: size, type, origin, expiry, the key prefix the bytes live under |
 | `projects`, `api_keys`, `users`, `audit_log`, `blobs`, `artifacts` | control plane |
 
 Raw segments live in daily partitions so retention is a `DROP TABLE`, not a delete. Build
-rows are deleted in batches after a longer retention. Storage per build is about 27 KB
+rows are deleted in batches after a longer retention.
+
+### The raw bytes store
+
+A build's raw bytes (the BEP events as sent, the log text) take up to three forms over its
+life: segment rows that carry the bytes, segment rows that carry a byte range of a raw-log
+object, and, a day after the build finished when `RAW_ARCHIVE_ENABLED` is on, one archived
+blob for the events and one for the log. One module, `Conveyor.RawStore`, owns all three
+and is the only one that knows which a build is in:
+
+| The store's interface | Who calls it |
+|---|---|
+| append: `prepare/3`, `append/1` (a group commit's bytes to rows, or to one object and row ranges), `event_segment/3`, `log_segment/3`, `write_mode/0` | the commit pipeline's store step (`Ingest.Writer.Store`), `Ingest.Batch` |
+| read: `frames/1`, `bep/1`, `events_page/3` (only the rows that cover the page), `log/1` (size and stream) | `Invocations.events/1`, `events_page/3`, `log/1`, the download controller, the Events tab and log viewer through them |
+| compact: `compact_due/2`, `compact/2` (segments and ranges to archived blobs; `docs/spec/Archive.tla`) | `Workers.ArchiveRaw` |
+| expire: `expire_partitions/1`, `expire_objects/2`, `expiry_backlog/1`; the date rules are `RawStore.Expiry` | `Workers.PartitionMaintenance`, `Workers.RawLogSweep`, the gauges |
+| verify: `audit/1` | `Ingest.Verify`, the one oracle for every form |
+
+Underneath, the object store is one seam, `Conveyor.Blobs.Adapter`, with two kinds of
+object in the same backend: content-addressed blobs under a project's prefix, and keyed
+objects (the raw log) written whole and durably, read by byte range and deleted in bulk.
+`Blobs.Disk` and `Blobs.S3` implement both; the test doubles (`Flaky`, `OneShot`,
+`Counting`) wrap the disk adapter, so a store failure is injected at one place for blobs
+and raw log alike. `test/conveyor/raw_store_contract_test.exs` states the store's
+contract (the bytes appended are the bytes read, in every form and across every
+transition) and `raw_store_seam_test.exs` fails when another module starts to select the
+object columns or test `raw_status`. Storage per build is about 27 KB
 for a small build (row 9 KB, raw events 16 KB, log 1 KB) and grows with targets, actions
 and log volume.
 

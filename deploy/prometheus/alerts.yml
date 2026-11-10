@@ -58,12 +58,28 @@ groups:
           summary: "A build's raw segments did not match its row"
           description: "The raw archive skipped it (raw_status = skipped); its events stay in the segments until RETENTION_RAW_DAYS. Run Conveyor.Ingest.Verify.check on the invocation from the log line."
 
+      - alert: ConveyorRawLogSweepBehind
+        expr: max(conveyor_raw_log_sweep_backlog_overdue_seconds) > 86400
+        for: 1h
+        labels: {severity: warning}
+        annotations:
+          summary: "Raw-log sweep more than a day behind"
+          description: "Raw-log objects past RETENTION_RAW_DAYS + 1 are not being deleted (conveyor_raw_log_sweep_backlog_objects of them, counted up to 100,000): the hourly RawLogSweep job is not running, or the store refuses deletes (conveyor_raw_log_sweep_failed_count, conveyor_blobs_errors_count{op=\"delete_objects\"}). Nothing is lost; the bucket and the raw_log_objects table grow. docs/operations.md, Raw log (blob mode)."
+
+      - alert: ConveyorRawLogSweepFailing
+        expr: increase(conveyor_raw_log_sweep_failed_count[2h]) > 0
+        for: 2h
+        labels: {severity: warning}
+        annotations:
+          summary: "The raw-log sweep cannot delete objects"
+          description: "The store refused deletes in two consecutive hourly runs (on S3: s3:DeleteObject on rawlog/*, and DeleteObjects needs Content-MD5 to pass any proxy in front of the bucket). Refused objects keep their row and are retried."
+
       - alert: ConveyorBlobErrors
         expr: increase(conveyor_blobs_errors_count[10m]) > 0
         labels: {severity: warning}
         annotations:
           summary: "Blob store errors"
-          description: "Reads or writes against the disk or S3 store failed; check credentials, bucket policy and disk space."
+          description: "Reads or writes against the disk or S3 store failed; check credentials, bucket policy and disk space. The op label says which call: put, stream, delete for blobs; put_object, get_range, delete_objects for the raw log (RAW_LOG=blob)."
 
       - alert: ConveyorCommitPressure
         expr: max by (instance) (conveyor_ingest_writer_backlog_oldest_ms) > 5000
