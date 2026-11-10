@@ -17,6 +17,9 @@ defmodule Conveyor.RawStore do
 
   Callers say what they want, never where it is:
 
+    * **append** — `prepare/3` and `append/1` for a group commit's bytes (the commit
+      pipeline's store step, `Conveyor.Ingest.Writer.Store`), `event_segment/3` and
+      `log_segment/3` for the rows that describe them, `write_mode/0`;
     * **read** — `frames/1`, `bep/1`, `events_page/3`, `log/1`;
     * **verify** — `audit/1`, what the persistence oracle (`Conveyor.Ingest.Verify`)
       compares against what was sent.
@@ -33,7 +36,118 @@ defmodule Conveyor.RawStore do
 
   alias Conveyor.Blobs
   alias Conveyor.Invocations.Invocation
+  alias Conveyor.RawLog
   alias Conveyor.RawStore.{Codec, Segments}
+
+  # --- append -----------------------------------------------------------------------------
+
+  @typedoc "The segment rows of one unit of a group commit: its events and its log, either may be absent."
+  @type segments :: {event_row :: map() | nil, log_row :: map() | nil}
+
+  @typedoc "A group's bytes, laid out and ready to be made durable (`prepare/3`, `append/1`)."
+  @opaque append :: %{rows: [segments()], object: {String.t(), iodata()} | nil, shard: term()}
+
+  @doc """
+  How a node appends, read once when its writer shards start: `:postgres` (the bytes ride
+  in the commit) or `{:blob, hold}` (one object per shard per `hold_ms`, sooner once
+  `max_bytes` wait).
+  """
+  @spec write_mode() :: :postgres | {:blob, %{hold_ms: pos_integer(), max_bytes: pos_integer()}}
+  def write_mode do
+    if RawLog.blob_mode?(),
+      do: {:blob, %{hold_ms: RawLog.flush_ms(), max_bytes: RawLog.flush_bytes()}},
+      else: :postgres
+  end
+
+  @doc """
+  The segment row of a unit's events (`{seq, kind, message}` in sequence order; nil when
+  there are none), their messages framed and compressed by `compress` (a writer shard
+  passes its own compressor, `Codec.compressors/0`).
+  """
+  @spec event_segment(map(), [{pos_integer(), String.t(), binary()}], (iodata() -> binary())) ::
+          map() | nil
+  def event_segment(_unit, [], _compress), do: nil
+
+  def event_segment(%{invocation_id: id, day: day, bytes: bytes}, events, compress) do
+    {first, _, _} = hd(events)
+    {last, _, _} = List.last(events)
+
+    %{
+      invocation_id: id,
+      day: day,
+      first_seq: first,
+      last_seq: last,
+      count: length(events),
+      kinds: events |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
+      byte_size: bytes,
+      payload: compress.(Enum.map(events, fn {_seq, _kind, message} -> Codec.frame(message) end))
+    }
+  end
+
+  @doc """
+  The segment row of a unit's log text (`{seq, text}` chunks in order; nil when there is
+  none) at the unit's position in the build's log, compressed by `compress`.
+  """
+  @spec log_segment(map(), [{pos_integer(), binary()}], (iodata() -> binary())) :: map() | nil
+  def log_segment(_unit, [], _compress), do: nil
+
+  def log_segment(%{invocation_id: id, day: day} = unit, chunks, compress) do
+    {first, _} = hd(chunks)
+    {last, _} = List.last(chunks)
+
+    %{
+      invocation_id: id,
+      day: day,
+      first_seq: first,
+      last_seq: last,
+      byte_offset: unit.byte_offset,
+      line_offset: unit.line_offset,
+      byte_size: unit.bytes,
+      line_count: unit.lines,
+      data: compress.(Enum.map(chunks, &elem(&1, 1)))
+    }
+  end
+
+  @doc """
+  Lays out the segments of a group commit's units (in order) for a shard. In blob mode
+  this fixes the object's key and every row's byte range, so `append/1` can be retried
+  and every transaction of the group writes the same rows.
+  """
+  @spec prepare([segments()], term(), :postgres | :blob) :: append()
+  def prepare(rows, shard, mode) do
+    if mode == :blob and Enum.any?(rows, &(&1 != {nil, nil})) do
+      {rows, key, body} = RawLog.objectify(rows, shard)
+      %{rows: rows, object: {key, body}, shard: shard}
+    else
+      %{rows: rows, object: nil, shard: shard}
+    end
+  end
+
+  @doc """
+  Makes a prepared group's bytes durable and returns the rows the commit writes, in the
+  order given to `prepare/3`. An error leaves nothing a reader can see; the same append
+  may be tried again (same key, same bytes). The acknowledgement must follow the commit
+  of these rows, never this call alone (`docs/spec/RawLog.tla`).
+  """
+  @spec append(append()) :: {:ok, [segments()]} | {:error, String.t()}
+  def append(%{object: nil, rows: rows}), do: {:ok, rows}
+
+  def append(%{object: {key, body}, rows: rows, shard: shard}) do
+    case RawLog.put(key, body) do
+      :ok ->
+        :telemetry.execute(
+          [:conveyor, :raw_log, :put],
+          %{count: 1, bytes: IO.iodata_length(body)},
+          %{shard: shard}
+        )
+
+        {:ok, rows}
+
+      {:error, reason} ->
+        :telemetry.execute([:conveyor, :raw_log, :put_failed], %{count: 1}, %{shard: shard})
+        {:error, "raw log put #{key} failed: #{inspect(reason)}"}
+    end
+  end
 
   # --- read -------------------------------------------------------------------------------
 

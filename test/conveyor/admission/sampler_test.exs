@@ -29,10 +29,12 @@ defmodule Conveyor.Admission.SamplerTest do
   end
 
   test "the node's own signals: the writer pool's pressure and the mean pool queue time" do
-    # A pool target of 100 ms: a mean wait of 150 ms is 0.75 of a deadline.
+    # A pool target of 100 ms: a mean wait of 150 ms is 0.75 of a deadline, the critical
+    # threshold. 152 ms, so the mean's floating-point sum cannot land a hair under it (it
+    # read 0.7499999999999997 and level 2 in one gate run out of three).
     assert %{level: 0} = Sampler.inject(config: [queue_target_ms: 100, window: 1])
     ms = System.convert_time_unit(1, :millisecond, :native)
-    for _ <- 1..10, do: Conveyor.Histogram.observe("conveyor.repo.query.queue_time", 150 * ms)
+    for _ <- 1..10, do: Conveyor.Histogram.observe("conveyor.repo.query.queue_time", 152 * ms)
     assert %{level: 3, pressure: p} = Sampler.sample()
     assert_in_delta p, 0.75, 0.05
     # No query since: nothing waited.

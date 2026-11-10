@@ -5,8 +5,6 @@ defmodule Conveyor.Ingest.Writer.Config do
   starts a shard with its own.
   """
 
-  alias Conveyor.RawLog
-
   defstruct hold_ms: 20,
             max_pending: 256,
             max_bytes: nil,
@@ -39,16 +37,17 @@ defmodule Conveyor.Ingest.Writer.Config do
   def from_env do
     ingest = Application.get_env(:conveyor, Conveyor.Ingest, [])
     defaults = %__MODULE__{}
-    blob? = RawLog.blob_mode?()
+
+    {blob?, hold_ms, max_bytes} =
+      case Conveyor.RawStore.write_mode() do
+        :postgres -> {false, Keyword.get(ingest, :writer_flush_ms, defaults.hold_ms), nil}
+        {:blob, hold} -> {true, hold.hold_ms, hold.max_bytes}
+      end
 
     %__MODULE__{
-      hold_ms:
-        if(blob?,
-          do: RawLog.flush_ms(),
-          else: Keyword.get(ingest, :writer_flush_ms, defaults.hold_ms)
-        ),
+      hold_ms: hold_ms,
       max_pending: Keyword.get(ingest, :writer_max_pending, defaults.max_pending),
-      max_bytes: if(blob?, do: RawLog.flush_bytes()),
+      max_bytes: max_bytes,
       blob?: blob?,
       deadline_ms: Keyword.get(ingest, :writer_deadline_ms, defaults.deadline_ms),
       retry_delays: Keyword.get(ingest, :writer_retry_delays, defaults.retry_delays)

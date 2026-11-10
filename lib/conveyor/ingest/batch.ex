@@ -5,7 +5,7 @@ defmodule Conveyor.Ingest.Batch do
   writer inside a group transaction.
   """
 
-  alias Conveyor.Bep.Fixture
+  alias Conveyor.RawStore
 
   @type t :: %__MODULE__{}
 
@@ -211,52 +211,28 @@ defmodule Conveyor.Ingest.Batch do
   the frames into the stored payload (a writer shard passes its own compressor).
   """
   @spec event_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def event_segment_row(batch, compress \\ &Conveyor.RawStore.Codec.compress_bep/1)
-  def event_segment_row(%__MODULE__{events: []}, _compress), do: nil
-
-  def event_segment_row(%__MODULE__{} = b, compress) do
-    events = Enum.reverse(b.events)
-
-    frames =
-      Enum.map(events, fn {_seq, _kind, bytes} ->
-        [Fixture.encode_varint(byte_size(bytes)), bytes]
-      end)
-
-    {first, _, _} = hd(events)
-    {last, _, _} = List.last(events)
-
-    %{
-      invocation_id: b.invocation_id,
-      day: b.day,
-      first_seq: first,
-      last_seq: last,
-      count: length(events),
-      kinds: events |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
-      byte_size: b.event_bytes,
-      payload: compress.(frames)
-    }
+  def event_segment_row(%__MODULE__{} = b, compress \\ &RawStore.Codec.compress_bep/1) do
+    RawStore.event_segment(
+      %{invocation_id: b.invocation_id, day: b.day, bytes: b.event_bytes},
+      Enum.reverse(b.events),
+      compress
+    )
   end
 
   @doc "The `log_segments` row for this batch, or nil when it holds no log text."
   @spec log_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def log_segment_row(batch, compress \\ &Conveyor.RawStore.Codec.compress/1)
-  def log_segment_row(%__MODULE__{log: []}, _compress), do: nil
-
-  def log_segment_row(%__MODULE__{} = b, compress) do
-    chunks = Enum.reverse(b.log)
-    {first, _} = hd(chunks)
-    {last, _} = List.last(chunks)
-
-    %{
-      invocation_id: b.invocation_id,
-      day: b.day,
-      first_seq: first,
-      last_seq: last,
-      byte_offset: b.log_byte_offset,
-      line_offset: b.log_line_offset,
-      byte_size: b.log_bytes,
-      line_count: b.log_lines,
-      data: compress.(Enum.map(chunks, &elem(&1, 1)))
-    }
+  def log_segment_row(%__MODULE__{} = b, compress \\ &RawStore.Codec.compress/1) do
+    RawStore.log_segment(
+      %{
+        invocation_id: b.invocation_id,
+        day: b.day,
+        byte_offset: b.log_byte_offset,
+        line_offset: b.log_line_offset,
+        bytes: b.log_bytes,
+        lines: b.log_lines
+      },
+      Enum.reverse(b.log),
+      compress
+    )
   end
 end

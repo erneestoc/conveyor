@@ -42,16 +42,20 @@ defmodule Conveyor.RawLog do
   def object_fields, do: @object_fields
 
   @doc """
-  Moves a writer plan's payloads into one object body: every event and log row gets the
-  byte range it will occupy and a nil payload. Returns the plan, the key and the body.
+  Moves the bytes of a group's segment rows (`{event row | nil, log row | nil}` per unit,
+  in order) into one object body: every row gets the byte range it will occupy (events of
+  all units first, then logs) and a nil payload. Returns the rows, the key and the body.
   """
-  @spec objectify(map(), term()) :: {map(), String.t(), iodata()}
-  def objectify(plan, shard) do
+  @spec objectify([{map() | nil, map() | nil}], term()) ::
+          {[{map() | nil, map() | nil}], String.t(), iodata()}
+  def objectify(pairs, shard) do
     key = new_key(shard)
-    {event_rows, acc} = Enum.map_reduce(plan.event_rows, {0, []}, &move(&1, :payload, key, &2))
-    {log_rows, {_, parts}} = Enum.map_reduce(plan.log_rows, acc, &move(&1, :data, key, &2))
-    {%{plan | event_rows: event_rows, log_rows: log_rows}, key, Enum.reverse(parts)}
+    {events, acc} = Enum.map_reduce(pairs, {0, []}, &move(elem(&1, 0), :payload, key, &2))
+    {logs, {_, parts}} = Enum.map_reduce(pairs, acc, &move(elem(&1, 1), :data, key, &2))
+    {Enum.zip(events, logs), key, Enum.reverse(parts)}
   end
+
+  defp move(nil, _col, _key, acc), do: {nil, acc}
 
   defp move(row, col, key, {offset, parts}) do
     bytes = Map.fetch!(row, col)
