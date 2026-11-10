@@ -12,11 +12,11 @@ defmodule Conveyor.RawLogTest do
     assert {:error, :enoent} = RawLog.get_range("rawlog/none/0/x", 0, 1)
 
     # Not old enough: nothing swept; then everything registered before "now" goes.
-    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), -3600, :second)) == 0
+    assert %{deleted: 0} = RawLog.sweep(DateTime.add(DateTime.utc_now(), -3600, :second))
     assert {:ok, _} = RawLog.get_range(key, 0, 5)
-    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) == 1
+    assert %{deleted: 1} = RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second))
     assert {:error, :enoent} = RawLog.get_range(key, 0, 1)
-    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) == 0
+    assert %{deleted: 0} = RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second))
     refute RawLog.blob_mode?()
     assert RawLog.flush_ms() == 1000
   end

@@ -64,7 +64,7 @@ config :conveyor, Oban,
        {"20 1 * * *", Conveyor.Workers.Rollup, args: %{days: 90}},
        {"*/15 * * * *", Conveyor.Workers.ArchiveRaw},
        {"*/10 * * * *", Conveyor.Workers.SweepStale},
-       {"30 4 * * *", Conveyor.Workers.RawLogSweep}
+       {"30 * * * *", Conveyor.Workers.RawLogSweep}
      ]}
   ]
 

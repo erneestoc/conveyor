@@ -78,7 +78,10 @@ defmodule Conveyor.Blobs.S3 do
     )
   end
 
-  defp request(method, digest, opts, headers, body, payload_hash, httpc_opts \\ []) do
+  defp request(method, digest, opts, headers, body, payload_hash, httpc_opts \\ []),
+    do: request_url(method, url(digest, opts), opts, headers, body, payload_hash, httpc_opts)
+
+  defp request_url(method, url, opts, headers, body, payload_hash, httpc_opts) do
     case Conveyor.Aws.credentials(opts) do
       {:ok, creds} ->
         opts =
@@ -87,15 +90,14 @@ defmodule Conveyor.Blobs.S3 do
             Map.to_list(Map.take(creds, [:access_key_id, :secret_access_key, :session_token]))
           )
 
-        do_request(method, digest, opts, headers, body, payload_hash, httpc_opts)
+        do_request(method, url, opts, headers, body, payload_hash, httpc_opts)
 
       {:error, reason} ->
         {:error, {:credentials, reason}}
     end
   end
 
-  defp do_request(method, digest, opts, headers, body, payload_hash, httpc_opts) do
-    url = url(digest, opts)
+  defp do_request(method, url, opts, headers, body, payload_hash, httpc_opts) do
     uri = URI.parse(url)
     now = Keyword.get(opts, :now) || DateTime.utc_now()
 
@@ -177,29 +179,111 @@ defmodule Conveyor.Blobs.S3 do
     end
   end
 
+  @max_delete 1000
+
+  @doc """
+  Deletes keys that are not content digests (raw-log objects) with DeleteObjects, 1,000
+  per request. Returns the keys that are gone (deleted now, or absent already) and the
+  ones the store refused, each with its reason; a request that fails as a whole fails
+  every key in it.
+  """
+  @spec delete_objects([String.t()], keyword()) ::
+          {deleted :: [String.t()], failed :: [{String.t(), term()}]}
+  def delete_objects(keys, opts) do
+    keys
+    |> Enum.chunk_every(@max_delete)
+    |> Enum.reduce({[], []}, fn chunk, {deleted, failed} ->
+      {d, f} = delete_chunk(chunk, opts)
+      {deleted ++ d, failed ++ f}
+    end)
+  end
+
+  defp delete_chunk(keys, opts) do
+    by_object = Map.new(keys, &{object_key(&1, opts), &1})
+
+    body =
+      IO.iodata_to_binary([
+        ~s(<?xml version="1.0" encoding="UTF-8"?>),
+        ~s(<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet>),
+        Enum.map(Map.keys(by_object), &["<Object><Key>", xml_escape(&1), "</Key></Object>"]),
+        "</Delete>"
+      ])
+
+    hash = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
+    headers = [{"content-md5", Base.encode64(:crypto.hash(:md5, body))}]
+
+    case request_url(:post, bucket_query_url(opts, "delete"), opts, headers, body, hash, []) do
+      {:ok, 200, _headers, response} ->
+        refused = delete_errors(response, by_object)
+        {Enum.reject(keys, &Map.has_key?(refused, &1)), Map.to_list(refused)}
+
+      {:ok, status, _headers, response} ->
+        {[], Enum.map(keys, &{&1, {:http, status, response}})}
+
+      {:error, reason} ->
+        {[], Enum.map(keys, &{&1, reason})}
+    end
+  end
+
+  # In quiet mode the response lists only the keys that could not be deleted.
+  defp delete_errors(response, by_object) do
+    ~r|<Error>(.*?)</Error>|s
+    |> Regex.scan(response, capture: :all_but_first)
+    |> Map.new(fn [error] ->
+      {Map.get(by_object, xml_unescape(xml_field(error, "Key")), :unknown),
+       {:s3, xml_field(error, "Code"), xml_unescape(xml_field(error, "Message"))}}
+    end)
+  end
+
+  defp xml_field(xml, name) do
+    case Regex.run(~r|<#{name}>(.*?)</#{name}>|s, xml, capture: :all_but_first) do
+      [value] -> value
+      nil -> ""
+    end
+  end
+
+  @xml_entities [{"&", "&amp;"}, {"<", "&lt;"}, {">", "&gt;"}, {"\"", "&quot;"}, {"'", "&apos;"}]
+
+  defp xml_escape(text),
+    do:
+      Enum.reduce(@xml_entities, text, fn {char, entity}, acc ->
+        String.replace(acc, char, entity)
+      end)
+
+  defp xml_unescape(text) do
+    @xml_entities
+    |> Enum.reverse()
+    |> Enum.reduce(text, fn {char, entity}, acc -> String.replace(acc, entity, char) end)
+  end
+
   @doc "Object URL for a digest under the configured bucket, prefixes and addressing style."
-  def url(digest, opts) do
+  def url(digest, opts), do: bucket_url(opts) <> "/" <> object_key(digest, opts)
+
+  # The key inside the bucket: the store's prefix, the project's (when given), the name.
+  defp object_key(name, opts) do
+    case Keyword.get(opts, :project_prefix) do
+      nil -> Path.join(Keyword.get(opts, :prefix, "blobs"), name)
+      project -> Path.join([Keyword.get(opts, :prefix, "blobs"), project, name])
+    end
+  end
+
+  defp bucket_url(opts) do
     bucket = Keyword.fetch!(opts, :bucket)
     region = Keyword.get(opts, :region, "us-east-1")
 
-    key =
-      case Keyword.get(opts, :project_prefix) do
-        nil -> Path.join(Keyword.get(opts, :prefix, "blobs"), digest)
-        project -> Path.join([Keyword.get(opts, :prefix, "blobs"), project, digest])
-      end
-
     case {Keyword.get(opts, :endpoint), Keyword.get(opts, :path_style, false)} do
-      {nil, false} ->
-        "https://#{bucket}.s3.#{region}.amazonaws.com/#{key}"
+      {nil, false} -> "https://#{bucket}.s3.#{region}.amazonaws.com"
+      {nil, true} -> "https://s3.#{region}.amazonaws.com/#{bucket}"
+      {endpoint, false} -> endpoint |> String.trim_trailing("/") |> host_prefixed(bucket)
+      {endpoint, true} -> "#{String.trim_trailing(endpoint, "/")}/#{bucket}"
+    end
+  end
 
-      {nil, true} ->
-        "https://s3.#{region}.amazonaws.com/#{bucket}/#{key}"
-
-      {endpoint, false} ->
-        "#{String.trim_trailing(endpoint, "/")}/#{key}" |> host_prefixed(bucket)
-
-      {endpoint, true} ->
-        "#{String.trim_trailing(endpoint, "/")}/#{bucket}/#{key}"
+  # A request on the bucket itself (`?delete`): virtual-host addressing has an empty path.
+  defp bucket_query_url(opts, query) do
+    case URI.parse(bucket_url(opts)) do
+      %URI{path: nil} = uri -> URI.to_string(%{uri | path: "/", query: query})
+      uri -> URI.to_string(%{uri | query: query})
     end
   end
 

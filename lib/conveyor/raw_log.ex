@@ -246,42 +246,110 @@ defmodule Conveyor.RawLog do
     end
   end
 
-  @doc "Deletes the objects registered before `cutoff` and their rows; returns the count."
-  @spec sweep(DateTime.t()) :: non_neg_integer()
-  def sweep(%DateTime{} = cutoff) do
-    keys =
-      Repo.all(
-        from(o in "raw_log_objects", where: o.inserted_at < ^cutoff, select: o.key, limit: 10_000)
-      )
+  @sweep_page 1000
 
-    Enum.reduce(keys, 0, fn key, n ->
-      case delete(key) do
-        :ok ->
-          Repo.delete_all(from(o in "raw_log_objects", where: o.key == ^key))
-          n + 1
+  @doc """
+  Deletes the objects registered before `cutoff`, then their rows, page by page until none
+  is left or the deadline passes (`:deadline_ms`, default ten minutes; `:page`, default
+  1,000 keys, the most one S3 DeleteObjects takes).
 
-        {:error, reason} ->
+  A page's objects go first, in bulk; the rows go only for the keys the store reports
+  deleted or absent (`docs/spec/RawLog.tla`: bytes, then row, so an object without a row
+  never exists). A key the store refuses keeps its row, is counted
+  (`[:conveyor, :raw_log, :sweep_failed]`) and is passed over for the rest of this run: the
+  next run tries it again. `remaining?` is true when the deadline ended the run.
+  """
+  @spec sweep(DateTime.t(), keyword()) ::
+          %{deleted: non_neg_integer(), failed: non_neg_integer(), remaining?: boolean()}
+  def sweep(%DateTime{} = cutoff, opts \\ []) do
+    page = Keyword.get(opts, :page, @sweep_page)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :deadline_ms, 600_000)
+    sweep_pages(cutoff, nil, page, deadline, %{deleted: 0, failed: 0, remaining?: false})
+  end
+
+  defp sweep_pages(cutoff, cursor, page, deadline, acc) do
+    case due_page(cutoff, cursor, page) do
+      [] ->
+        acc
+
+      rows ->
+        keys = Enum.map(rows, &elem(&1, 1))
+        {deleted, failed} = delete_many(keys)
+        Repo.delete_all(from(o in "raw_log_objects", where: o.key in ^deleted))
+
+        Enum.each(failed, fn {key, reason} ->
           :telemetry.execute([:conveyor, :raw_log, :sweep_failed], %{count: 1}, %{
             key: key,
             reason: reason
           })
+        end)
 
-          n
-      end
-    end)
+        acc = %{acc | deleted: acc.deleted + length(deleted), failed: acc.failed + length(failed)}
+
+        cond do
+          length(rows) < page -> acc
+          System.monotonic_time(:millisecond) >= deadline -> %{acc | remaining?: true}
+          true -> sweep_pages(cutoff, List.last(rows), page, deadline, acc)
+        end
+    end
   end
 
-  defp delete(key) do
+  # Oldest first, by the index on `inserted_at`; the cursor steps over keys whose delete
+  # failed, so one refused object never stalls the run.
+  defp due_page(cutoff, cursor, page) do
+    from(o in "raw_log_objects",
+      where: o.inserted_at < ^cutoff,
+      order_by: [o.inserted_at, o.key],
+      limit: ^page,
+      select: {o.inserted_at, o.key}
+    )
+    |> after_cursor(cursor)
+    |> Repo.all()
+  end
+
+  defp after_cursor(query, nil), do: query
+
+  defp after_cursor(query, {at, key}),
+    do: where(query, [o], o.inserted_at > ^at or (o.inserted_at == ^at and o.key > ^key))
+
+  @doc """
+  What the sweep has not done yet: how many objects are registered before `cutoff`
+  (counted up to `limit`) and how many seconds the oldest of them is past it.
+  """
+  @spec sweep_backlog(DateTime.t(), pos_integer()) ::
+          %{objects: non_neg_integer(), overdue_seconds: non_neg_integer()}
+  def sweep_backlog(%DateTime{} = cutoff, limit \\ 100_000) do
+    due = from(o in "raw_log_objects", where: o.inserted_at < ^cutoff)
+
+    case Repo.one(from(o in due, select: min(o.inserted_at))) do
+      nil ->
+        %{objects: 0, overdue_seconds: 0}
+
+      oldest ->
+        counted = from(o in due, select: o.key, limit: ^limit)
+
+        %{
+          objects: Repo.aggregate(subquery(counted), :count),
+          overdue_seconds:
+            max(DateTime.diff(cutoff, DateTime.from_naive!(oldest, "Etc/UTC"), :second), 0)
+        }
+    end
+  end
+
+  # Objects that are gone (deleted now or absent already) and the ones that are not.
+  defp delete_many(keys) do
     case adapter() do
       {:disk, dir} ->
-        case File.rm(Path.join(dir, key)) do
-          :ok -> :ok
-          {:error, :enoent} -> :ok
-          other -> other
-        end
+        Enum.reduce(keys, {[], []}, fn key, {deleted, failed} ->
+          case File.rm(Path.join(dir, key)) do
+            :ok -> {[key | deleted], failed}
+            {:error, :enoent} -> {[key | deleted], failed}
+            {:error, reason} -> {deleted, [{key, reason} | failed]}
+          end
+        end)
 
       {:s3, opts} ->
-        Conveyor.Blobs.S3.delete(key, Keyword.put(opts, :project_prefix, nil))
+        Conveyor.Blobs.S3.delete_objects(keys, Keyword.put(opts, :project_prefix, nil))
     end
   end
 

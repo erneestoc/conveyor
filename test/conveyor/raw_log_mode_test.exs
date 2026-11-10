@@ -50,7 +50,7 @@ defmodule Conveyor.RawLogModeTest do
     assert length(Invocations.raw_frames(inv)) == length(Invocations.raw_frames(reference))
 
     # The object is the only copy: once swept, the build's raw data is gone.
-    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) >= 1
+    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)).deleted >= 1
     assert_raise RuntimeError, ~r/raw log/, fn -> Invocations.log(inv) end
   end
 
@@ -131,7 +131,7 @@ defmodule Conveyor.RawLogModeTest do
     assert Invocations.log(archived) == log
 
     # The archived copy stands on its own: the raw-log objects can go.
-    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) >= 1
+    assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)).deleted >= 1
     assert Invocations.events(archived) == events
     assert Invocations.log(archived) == log
   end

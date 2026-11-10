@@ -107,6 +107,44 @@ defmodule Conveyor.Blobs.S3Test do
       refute S3.exists?(@digest, bad)
     end
 
+    test "delete_objects removes keys in bulk and names the ones the store refused", %{
+      opts: opts,
+      store: store
+    } do
+      keys = for i <- 1..3, do: "rawlog/n/0/k#{i}"
+      Enum.each(keys, &(:ok = S3.put_object(&1, "bytes", opts)))
+      :ok = S3.put_object("rawlog/n/0/refuse&it", "bytes", opts)
+      assert map_size(Agent.get(store, & &1)) == 4
+
+      # Absent keys count as deleted; the refused one comes back with the store's reason.
+      assert {deleted, [{"rawlog/n/0/refuse&it", {:s3, "AccessDenied", "Access & Denied"}}]} =
+               S3.delete_objects(keys ++ ["rawlog/n/0/absent", "rawlog/n/0/refuse&it"], opts)
+
+      assert Enum.sort(deleted) == Enum.sort(keys ++ ["rawlog/n/0/absent"])
+      assert Map.keys(Agent.get(store, & &1)) == ["/conveyor/blobs/rawlog/n/0/refuse&it"]
+
+      # More than one request's worth of keys.
+      many = for i <- 1..1_001, do: "rawlog/n/1/#{i}"
+      assert {gone, []} = S3.delete_objects(many, opts)
+      assert length(gone) == 1_001
+
+      # A request that fails as a whole fails every key in it.
+      bad = Keyword.put(opts, :secret_access_key, "nope")
+      assert {[], [{"a", {:http, 403, _}}, {"b", _}]} = S3.delete_objects(["a", "b"], bad)
+      down = Keyword.put(opts, :endpoint, "http://127.0.0.1:1")
+      assert {[], [{"a", _}]} = S3.delete_objects(["a"], down)
+    end
+
+    test "get_range reads a byte range and reports short reads and missing objects", %{
+      opts: opts
+    } do
+      :ok = S3.put_object("rawlog/n/0/ranged", "0123456789", opts)
+      assert {:ok, "345"} = S3.get_range("rawlog/n/0/ranged", 3, 3, opts)
+      assert {:error, {:short_read, 2}} = S3.get_range("rawlog/n/0/ranged", 8, 5, opts)
+      assert {:error, :not_found} = S3.get_range("rawlog/n/0/none", 0, 1, opts)
+      assert {:error, {:http, 416, _}} = S3.get_range("rawlog/n/0/ranged", 20, 1, opts)
+    end
+
     test "connection failures are returned, not raised", %{opts: opts} do
       down = Keyword.put(opts, :endpoint, "http://127.0.0.1:1")
       assert {:error, _} = S3.put(@digest, ["x"], down)
