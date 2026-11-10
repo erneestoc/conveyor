@@ -191,7 +191,18 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
   (`docker exec chumti-minio sh -c 'printf %s "$MINIO_ROOT_USER"'`; the `_FILE` variables
   point at files that do not exist); `mix test --only s3` with `S3_TEST_BUCKET=conveyor-test
   S3_TEST_ENDPOINT=http://localhost:9000 S3_TEST_PATH_STYLE=true` and
-  `env -u AWS_SESSION_TOKEN`.
+  `env -u AWS_SESSION_TOKEN`. (9) **Where a bench runs from changes blob-mode numbers:**
+  the same commit measured 3 % fewer events a second flat out in blob mode from
+  `~/workspace/bes` than from a worktree under `/private/tmp` (the repository directory
+  is watched and indexed, and blob mode creates a thousand files a second under
+  `tmp/blobs_bench`). An A/B must run both sides from the same kind of place: two
+  `git worktree`s with `deps` symlinked and `_build/prod` copied, `BENCH_PG_DATA`
+  pointing at the one bench cluster (`tmp/bench_pg/data`), runs alternated. Postgres mode
+  and the paced profile do not show it. (10) The bench report's reductions by process
+  kind found what the wall clock could not: 5 % more work in the writer and the file
+  server among the busiest processes, which was `Path.safe_relative/2` (it calls the file
+  server for the working directory on every call). (11) Never cache a value that changes
+  in a persistent term: replacing one makes every process scan its heap.
 - **Open after the raw bytes store** (PLAN §26.5 "Follow-ups" has the detail and the
   estimated savings): cheaper raw-log object registration (one synchronous transaction
   per flush today; needs `RawLog.tla` re-modelled), slimmer blob-mode index rows (object

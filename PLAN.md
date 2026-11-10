@@ -1804,3 +1804,259 @@ with real peers (the outlier rule is table-tested and tested through the sampler
 injected peer reports, never on two machines); large CAS/ByteStream uploads through the
 flow-control handler (tests pass, throughput not measured); the per-key share with more
 than a handful of keys.
+
+### 26.5 Raw bytes store (candidate 3)
+
+**The problem.** "Where are a build's raw bytes" had three answers (segment rows that
+carry the payload; segment rows that carry a byte range of a raw-log object; one archived
+blob per build) and about eleven call sites that each asked: five readers in
+`Invocations`, `RawLog`, `RawArchive`, two oracles in `Verify`, the writer's store step,
+the download controller. Three date rules in three modules kept the forms alive
+(`Partitions`, `Workers.RawLogSweep`, `RawArchive.holds_unarchived?/1`). The raw log
+reimplemented the object store with its own disk and S3 branches beside the blob adapter,
+so a custom adapter raised `CaseClauseError` and no test could make a raw-log put, read
+or delete fail.
+
+**The module.** `Conveyor.RawStore` owns a build's raw bytes in every form. Its interface:
+
+| | Function | Caller |
+|---|---|---|
+| append | `write_mode() :: :postgres \| {:blob, %{hold_ms, max_bytes}}` | `Writer.Config`, once per shard |
+| | `compressors() :: %{bep: fun, text: fun}` | `Writer.Plan` |
+| | `event_segment(unit, [{seq, kind, message}], compress) :: row \| nil`, `log_segment(unit, [{seq, text}], compress) :: row \| nil` | `Ingest.Batch` |
+| | `prepare([{event_row \| nil, log_row \| nil}], shard, :postgres \| :blob) :: append` | `Writer.Store.new/4` |
+| | `append(append) :: {:ok, rows} \| {:error, message}` (idempotent: same key, same bytes) | `Writer.Store.put/1` |
+| read | `frames(inv) :: [binary]` | `Invocations.events/1` |
+| | `bep(inv) :: Enumerable.t()` (a `--build_event_binary_file`, lazily) | the download controller |
+| | `events_page(inv, page, per_page) :: {[{position, message}], total}` | `Invocations.events_page/3`, the Events tab |
+| | `log(inv) :: %{bytes: n, chunks: Enumerable.t()}` (the size fixed at the call: `x-log-bytes`) | `Invocations.log/1`, the download controller, the log viewer |
+| compact | `compact_due(now, opts) :: %{archived, skipped, lost, failed, remaining?}` | `Workers.ArchiveRaw` |
+| | `compact(id \| inv \| :gone, now) :: {:ok, :archived \| :not_due \| :already_archived \| :lost \| :skipped \| :not_found} \| {:error, reason}` | jobs by id, tests, by hand |
+| | `compaction?()`, `compaction_overdue_seconds(now)` | the worker, the gauge |
+| expire | `expire_partitions(today) :: [dropped]` | `Workers.PartitionMaintenance` |
+| | `expire_objects(now, opts) :: %{deleted, failed, remaining?}`, `expiry_backlog(now) :: %{objects, overdue_seconds}` | `Workers.RawLogSweep`, the gauges |
+| verify | `audit(inv) :: %{frames, events, log_bytes, problems}` | `Ingest.Verify` |
+
+**Depth.** Eighteen functions hide: two table shapes and their object columns, the
+coalescing of ranged reads, the archived-blob status and its one definition, zstd and its
+dictionary, the BEP framing, the registration row that precedes an object, the read-ahead
+of a compaction batch, the three date rules. **What callers no longer know:** the readers
+of `Invocations` and the download controller do not test `raw_status` or select
+`object_*`; `Verify` is one path (the row's counts against `audit/1`) instead of one per
+form; `Writer.Store` does not build objects or zip rows back to units, it prepares and
+appends; the workers do not compute cutoffs; the codec is in one file. The segment
+schemas, `Blobs` (which must know that `raw_blob` and `log_blob` reference blobs) and
+`Projects.Move` (which carries them) are the only modules outside the store that name a
+form, and `test/conveyor/raw_store_seam_test.exs` fails when another one does.
+`Conveyor.RawLog` (objects) and `Conveyor.RawArchive` (compaction) remain as the store's
+inside; their names stay because they are configuration keys.
+
+**The object seam: one behaviour, extended.** `Conveyor.Blobs.Adapter` gains keyed
+objects beside content-addressed blobs: `put_object/3` (whole, durable when it returns),
+`get_range/4` (exactly the bytes asked for; `:not_found`, `:short_read`), and
+`delete_objects/2` (bulk; the keys that are gone and the ones that are not; deleting one
+object is a list of one). The alternative was a sibling behaviour. Against it: the two
+kinds of object are one store (the same bucket or directory, credentials and outage),
+one adapter is configured per deployment, and every backend would implement two modules
+that are configured and fail together; a test double that injects a store failure would
+have to be installed twice. For it: the semantics differ (a digest validated by `Blobs`
+under a project prefix; a server-made key outside every prefix), which the behaviour's
+documentation states as two groups of callbacks. `Blobs.Disk` took the durable put (tmp,
+fsync, rename, directory fsync) from `RawLog`; `Blobs.S3` the PUT, the ranged GET and
+DeleteObjects (XML body, `Content-MD5`, the keys S3 refuses read back from the response);
+`Flaky` fails each of the three on a switch, `OneShot` delegates, `Counting` counts them.
+One keyed-object contract (`objects_contract_test.exs`) runs against Disk, Flaky, OneShot
+and S3 over the in-process server in the gate, and against MinIO with `--only s3`.
+Raw-log failures are counted as `conveyor_blobs_errors_count{op}` (`put_object`,
+`get_range`, `delete_objects`) next to the raw-log counters, whose names did not change.
+
+**The expiry rules, in one place** (`Conveyor.RawStore.Expiry`, pure; `R` =
+`RETENTION_RAW_DAYS`, `H` = `RAW_ARCHIVE_AFTER_HOURS`):
+
+1. The segment partition of day `d` may be dropped when `d < today − R`, unless
+   compaction is on and the day still holds a finished build that is not compacted
+   (`Archive.tla`, `DropGuard`).
+2. A raw-log object may be deleted when it was registered before `now − (R + 1) days`
+   and before 00:00 of the oldest segment partition that still exists (`RawLog.tla`: age
+   alone is `RawLog_current.cfg`). This is why an S3 lifecycle expiration on `rawlog/` is
+   not a substitute: it knows an object's age and nothing else.
+3. A build is due for compaction when it finished more than `H` hours ago; only builds
+   created on or after the oldest existing partition day are looked at.
+
+`RawStore.expire_partitions/1`, `expire_objects/2` and `compact_due/2` execute them; the
+three workers only run those on their schedule. The clock is an argument everywhere, so
+the contract suite walks a build through its life (the last day of retention, a sweep
+that runs before a late partition drop, the day after) without rewriting a timestamp.
+
+**Defects fixed first** (each with a test that failed before):
+
+| | Defect | Fix | Evidence |
+|---|---|---|---|
+| G1 | the sweep deleted at most 10,000 objects per daily run, one object and one row at a time; blob mode registers up to 691,000 a day per node (8 shards, 1 s hold) and flat-out load has measured 150 a second | pages of 1,000 by keyset until none is left or ten minutes passed; the objects of a page in bulk (`delete_objects/2`), then the rows of the keys reported deleted or absent (bytes, then row, as the model has it); a refused key keeps its row, is counted and stepped over; hourly; a timeout under Lifeline's rescue; a continuation job when objects remain | a run of 12,500 registered objects stopped at 10,000 before; 2,500 objects in 169 ms against MinIO (14,800/s) and 10,000 on disk in 0.56 s (17,700/s), against a bound of 8 a second per node |
+| G2 | a project slug or blob prefix of `rawlog` stored among the raw log's objects; two projects could share a prefix, and deleting a blob of one removed the other's bytes | the project changeset refuses a reserved prefix and one another project uses or still has blobs under, whenever the effective prefix changes; data from before: `Blobs` keeps the object while a project that shares the prefix holds a row for the same digest (no key is rewritten) | `blobs_test.exs`: both failed before (`{:ok, …}` for `rawlog`; `{:error, :not_found}` reading the twin's blob) |
+| G3 | two definitions of "archived": `raw_frames/1` required the events blob, `stream_log/2` and `log_segments/1` went by `raw_status` alone, so a row with the status and no blob read its events from the segments and its log as empty | one private `form/1` in the store | the contract test "archived means the events blob is referenced" |
+| G4 | (measurement) archive reads in blob mode | see H1 | 23,570 ranged reads for 1,500 paced builds: 15.7 per build, 0.367 per event |
+| new | the zstd stream matched `{:continue, output}` only, and OTP's codec returns `{:continue, remainder, output}` when its 128 KB buffer fills: an archived build with more than about 128 KB of events or log could not be decompressed (every reader crashed), and a segment that compressed past the buffer could not be archived. In the code since the archive landed (0.2.3); the fixtures are 40 KB | feed the remainder until the input is taken | found by the 60,000-event build H2's measurement needed; a codec test in both directions and a contract test that reads a build of megabytes from all three forms |
+
+**Measured changes.**
+
+*H1, archive object-first.* The cost research estimated at least 0.25 ranged GETs per
+event. Measured on the 1,500 builds of a paced blob-mode bench run (64,273 events; 16,182
+event rows and 7,388 log rows in 2,063 objects): **23,570 reads, exactly one per segment
+row: 15.7 per build, 0.367 per event.** A paced build has one row per object (the writer
+merges a build's batches of one group commit into one row), so coalescing within a build
+buys nothing; an object, though, holds the group commits of every build that ran at that
+moment. Compaction therefore works on batches: `compact_due/2` pages through the due
+builds (2,000 at a time, oldest finish first), reads the byte ranges a batch points at
+object by object (the ranges of all its builds in one object coalesce into one read; at
+most 64 MB read ahead, otherwise the batch is cut), then archives each build with the
+unchanged protocol (its own puts, the count check, the pin and the conditional update in
+one transaction). Building the archive in the worker at stream end was the alternative:
+the worker does not hold the build's bytes (they leave with each batch), and it would
+have put two more PUTs and a transaction on the path of the last acknowledgement.
+
+| | ranged reads | per build | per event | bytes read | archive time |
+|---|---|---|---|---|---|
+| before: one build at a time | 23,570 | 15.7 | 0.367 | 15.1 MB | 2.1 s (8 at once) |
+| batches of 200 | 5,438 | 3.6 | 0.085 | 60.6 MB | 2.6 s (4 at once) |
+| batches of 500 | 3,461 | 2.3 | 0.054 | 33.6 MB | 2.6 s |
+| one batch (the default page of 2,000) | **2,063** | **1.4** | **0.032** | 15.1 MB | 3.4 s |
+
+One read per object, eleven times fewer; the oracle passes on all 1,500 after. Smaller
+batches read more bytes because a coalesced range spans other builds' pieces. What this
+does not show: builds here are 44 events and all ran together. On the fleet's shape
+(about 490 events and 123 KB compressed per build, 20 objects a second, builds of four
+minutes) the 64 MB bound cuts a batch at about 500 builds, which touch about 5,500
+objects: roughly 11 reads per build against about 180, sixteen times fewer, not one per
+object. Getting to one needs the read-ahead on disk instead of in memory (follow-up).
+The job is now one job that snoozes itself while builds remain, not one job per build:
+the queue's two slots no longer run two archives side by side, each batch archives four
+builds at once instead.
+
+*H2, the events page.* `events_page/3` decoded the whole build for every page. From
+segments it now takes the rows' `first_seq` and `count` to find the rows that hold the
+positions asked for, and fetches and decodes only those. From an archived blob (one
+compressed stream, no index) it decompresses from the start, drops messages up to the
+page and stops; a frame-offset sidecar would save the dropping, not the decompression,
+and was not written. On a build of 60,000 events (240 segments, pages of 100, median of
+five):
+
+| page | postgres, before | after | blob (disk), before | after | archived, after |
+|---|---|---|---|---|---|
+| 1 | 31.5 ms | 2.4 ms | 42.9 ms | 2.4 ms | 5.7 ms |
+| 300 | 27.8 ms | 2.0 ms | 42.4 ms | 2.4 ms | 10.6 ms |
+| 600 | 28.7 ms | 2.1 ms | 44.5 ms | 2.1 ms | 14.6 ms |
+
+(Archived, before: not readable at this size, the defect above.) On S3 an archived page
+still downloads the blob first (`Blobs.S3.stream/2` spools to a file): follow-up.
+
+*H3, slimmer index rows.* `event_segments.kinds` was written for every event row and read
+by nothing (lib, assets, bench). On the paced blob run it was 78.7 of a row's 231.6
+bytes, 19.8 bytes per event. It is no longer written; the column stays (additive-only
+schema policy, docs/production.md) and takes its default. Deferred, with the research's
+estimate of 150 bytes per event paced for the whole item: the object key as an integer
+reference into `raw_log_objects` instead of 60 bytes of text on every row, and one row
+per batch for events and log together. Both change what a row means to nodes of the
+previous version during a rolling deploy and need a two-release migration.
+
+*H4, object registration.* Each raw-log object is registered by a synchronous
+transaction of its own before the put (`RawLog.tla`, `Registered`: an object without a
+row is one no sweep will ever delete). The bench counted 51,207 transactions for 9,969
+flushes; one in five is the registration. Not implemented, because both cheaper schemes
+change what the model checked:
+
+- *Register the next key in the current group's transaction.* No extra round trip. But
+  the object is then registered up to one hold before it is written, and the sweep's
+  bound ("a partition of day `d` only references objects registered on or after `d`")
+  fails for a key registered at 23:59:59 and written for a build created at 00:00:00:
+  the cutoff must move back by the longest time a registered key may wait, the writer
+  must refuse a key older than that, and `RawLog.tla` needs the pre-registration as an
+  action. Saving: one commit per flush (8 a second per node at the default hold; about
+  1 to 3 ms off every group's acknowledgement).
+- *Register a prefix per shard per hour* (`rawlog/<node>/<shard>/<hour>/`) and no row per
+  object. One registration an hour. The sweep then has to list the prefix (a `list`
+  callback on the adapter, S3 ListObjectsV2), `Registered` becomes "every object is under
+  a registered prefix", and a lease is swept by its end, not its start. Saving: the
+  commit per flush and the `raw_log_objects` table's churn (691,000 rows a day per node).
+
+The second is the better end state. It needs the model rewritten and checked first
+(`docs/spec/check.sh RawLog:fixed`), a listing contract for both adapters, and a sweep
+that handles both schemes during the release that switches.
+
+**Bench** (`bench/run.sh`, laptop, native PostgreSQL 17, disk store; flat out 200 × 10,000
+builds, paced 1,000 streams × 1,500 builds; before = `f03fc48`, after = this step):
+
+| profile | mode | | events/s | ack p50 / p99 | WAL per event | storage per build | events/s per app vCPU | objects | oracle |
+|---|---|---|---|---|---|---|---|---|---|
+| flat out | postgres | before (4 runs) | 20,794 (20,653–21,082) | 7.5 / 173 ms | 666 B | 27.9 KB | 5,307 | — | 10,000/10,000 each |
+| | | after (2 runs) | 20,775 (20,546–21,004) | 7.5 / 174 ms | **643 B** | 27.6 KB | 5,327 | — | 10,000/10,000 each |
+| flat out | blob | before (3 runs) | 17,962 (17,528–18,227) | 10.0 / 206 ms | 511 B | 19.9 KB | 5,074 | 10,032 | 10,000/10,000 each |
+| | | after (3 runs) | 18,293 (17,634–18,448) | 9.9 / 225 ms | **502 B** | 19.5 KB | 5,126 | 10,032 | 10,000/10,000 each |
+| paced | postgres | before | 989 | 1.02 / 2.03 s | 1,258 B | 34.2 KB | 3,296 | — | 1,500/1,500 |
+| | | after | 989 | 1.02 / 2.03 s | **1,200 B** | 33.5 KB | 3,296 | — | 1,500/1,500 |
+| paced | blob | before | 965 | 1.66 / 3.05 s | 1,008 B | 26.2 KB | 3,114 | 2,091 | 1,500/1,500 |
+| | | after (2 runs) | 965, 965 | 1.70 / 3.03 s | 985 B, 1,072 B | 24.8, 25.2 KB | 3,216, 3,327 | 2,108, 2,114 | 1,500/1,500 each |
+
+Medians with the range in brackets. No regression: flat out −0.1 % in postgres mode and
++1.8 % in blob mode, both inside the spread of the runs of one side; the acks did not
+move. WAL per event falls 2 to 5 % (the `kinds` column; paced blob is one run against
+two that differ by 9 % between themselves, so that row says nothing either way).
+Archiving the paced blob run's 1,500 builds after: 2,083 ranged reads (1.39 per build,
+0.032 per event) in 3.3 s, oracle 1,500/1,500 from the blobs. The sweep on disk: 10,000
+objects in 0.56 s (17,700 a second).
+
+Three things about the harness that the next bench should know:
+
+- *Where it runs from matters in blob mode.* The first "after" set ran from the
+  repository directory and the "before" set from a worktree under `/private/tmp`: flat
+  out in blob mode read 3 % slower after, on eight runs of each side, a fresh store
+  directory included. Run from a second worktree beside the first, the same commit was
+  equal to the baseline. The repository directory is watched and indexed, and blob mode
+  creates a thousand files a second in it; postgres mode and the paced profile do not
+  show it. Every flat-blob number above is worktree against worktree, alternated
+  (`bench/results/*c3-head-*` against `*c3-base-*`); the `*c3-after-*` reports are the
+  runs from the repository directory and are kept as the evidence, not as results.
+- *The reductions table found what the wall clock did not.* With throughput equal, the
+  writer did 5 % more reductions per run and the file server was among the busiest
+  processes: `Blobs.Disk` checked every key with `Path.safe_relative/2`, which asks the
+  file server for the working directory and looks for symlinks on each call (60 µs per
+  put and per ranged read). A string check replaced it; the writer's reductions are now
+  1 % under the baseline's (581 M against 588 M).
+- *A paced run can fail by itself.* One paced blob run of each side ended with 18 and 37
+  builds failed in the generator ("the connection is closed" on a lifecycle call, no
+  error on the server, every completed build verified); the reruns were clean. It is the
+  2026-11-06 note's unexplained failures again and is not from this step.
+
+**Tests replaced, not layered.** Removed: `raw_log_test`, `raw_log_mode_test`,
+`raw_log_s3_test`, `raw_archive_test`, `raw_archive_identity_test`, `raw_archive_s3_test`,
+`workers/raw_log_sweep_test` (1,045 lines: they rewrote `raw_log_objects.inserted_at` and
+segment days with SQL, counted `get_range` telemetry, called `@doc false` functions and
+undid an archive with an `UPDATE` to stage a crash). In their place:
+`raw_store_contract_test.exs` over `test/support/raw_store_contract.ex` ("the bytes
+appended are the bytes read" in every form, a build whose mode changed half-way included,
+across compaction, the partition drop and the sweep at each clock, on Disk, OneShot and
+Flaky; failures injected at the adapter: a put that fails appends nothing and is retried
+as the same object, a ranged read that fails is the reader's error and damages nothing,
+a delete that fails keeps the object registered, a store outage fails compaction and the
+build keeps reading from its segments; the Archive.tla chaos against the store's
+interface, the crash between the puts and the reference staged by a trigger that kills
+the reference transaction), `raw_store_s3_test.exs` (the same scenarios against MinIO),
+`raw_store_seam_test.exs`, `raw_store/codec_test.exs`, `raw_store/expiry_test.exs` and
+`blobs/objects_contract_test.exs`. The golden, download, log-viewer and oracle tests
+pass unchanged.
+
+**Follow-ups.** (1) H4: prefix leases for raw-log objects, after the model. (2) H3: the
+object key as an integer and one row per batch (about 130 bytes per event paced left of
+the research's 150). (3) H1 on long builds: spool the read-ahead to disk so a batch is
+bounded by disk, not by 64 MB, and reads each object once whatever the build length.
+(4) Ranged reads of archived blobs on S3 (a page downloads the object). (5) The sweep
+and the compaction do not yield to admission (`Conveyor.Admission.state().level`); under
+a shedding node they compete with commits for the store and the pool. (6) The prefix
+check is a query, not a constraint: two settings changes at the same moment can both
+pass; a unique index on the effective prefix needs existing duplicates resolved first.
+(7) Per-build `ArchiveRaw` jobs (`%{"id" => …}`) are still accepted for jobs enqueued by
+the previous version; remove the clause a release later. (8) `Blobs.S3.exists?/2` is a
+HEAD per pin (one per archived blob); unchanged here. (9) An S3 lifecycle rule on
+`rawlog/` remains not recommended (rule 2 above); a long-margin backstop (for example 90
+days) is safe only when `R` and the longest partition hold stay far below it, and was
+not added. (10) The trial demo's archived builds need an image with the codec fix.

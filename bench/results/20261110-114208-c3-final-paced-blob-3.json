@@ -1,0 +1,497 @@
+{
+  "label": "c3-final-paced-blob-3",
+  "machine": {
+    "os": "aarch64-apple-darwin25.6.0",
+    "otp": "29",
+    "schedulers": 16,
+    "postgres": "17.11 (Homebrew)"
+  },
+  "at": "2026-11-10T11:42:08Z",
+  "verify": {
+    "failed": 0,
+    "checked": 1500,
+    "failures": [],
+    "in_progress_left": 0
+  },
+  "writer": {
+    "count": 2108,
+    "events": 64273,
+    "batches": 18255,
+    "fenced": 0,
+    "duration_ms": {
+      "max": 49.0,
+      "p50": 5.9,
+      "p99": 39.5
+    },
+    "batches_per_flush": 8.7,
+    "events_per_flush": 30.5,
+    "group_failures": 0,
+    "group_failure_reasons": []
+  },
+  "app": {
+    "schedulers_online": 16,
+    "runtime_vcpu": 0.3,
+    "scheduler_vcpu": 0.48,
+    "wall_s": 69.7,
+    "beam_peak": 651480525,
+    "memory_by_kind": [
+      {
+        "bytes": 257627744,
+        "kind": "Conveyor.Ingest.Worker.init/1"
+      },
+      {
+        "bytes": 33912608,
+        "kind": "Conveyor.Ingest.Writer.init/1"
+      },
+      {
+        "bytes": 28228280,
+        "kind": ":cowboy_clear.connection_process/4"
+      },
+      {
+        "bytes": 20639336,
+        "kind": "GRPC.Server.Adapters.Cowboy.Handler.call_rpc/3"
+      },
+      {
+        "bytes": 20356400,
+        "kind": ":grpc_stream_h.request_process/3"
+      },
+      {
+        "bytes": 16650116,
+        "kind": ":erlang.apply/2"
+      },
+      {
+        "bytes": 4720656,
+        "kind": ":code_server"
+      },
+      {
+        "bytes": 761232,
+        "kind": "Conveyor.Limits"
+      },
+      {
+        "bytes": 399408,
+        "kind": "ThousandIsland.Acceptor.run/1"
+      },
+      {
+        "bytes": 378920,
+        "kind": ":telemetry_poller_default"
+      },
+      {
+        "bytes": 364040,
+        "kind": ":supervisor.\"Elixir.Supervisor.Default\"/1"
+      },
+      {
+        "bytes": 359800,
+        "kind": ":ranch_acceptor.init/6"
+      }
+    ],
+    "peak_streams": 1000,
+    "peak_workers": 1516,
+    "processes_peak_bytes": 406631672,
+    "reductions_by_kind": [
+      {
+        "reductions": 114196782,
+        "kind": "Conveyor.Ingest.Writer.init/1"
+      },
+      {
+        "reductions": 73540582,
+        "kind": "Conveyor.Ingest.Worker.init/1"
+      },
+      {
+        "reductions": 13857582,
+        "kind": ":erts_literal_area_collector.start/0"
+      },
+      {
+        "reductions": 1268988,
+        "kind": ":ranch_acceptor.init/6"
+      },
+      {
+        "reductions": 435050,
+        "kind": ":code_server"
+      },
+      {
+        "reductions": 409293,
+        "kind": "DBConnection.ConnectionPool.init/1"
+      },
+      {
+        "reductions": 407403,
+        "kind": ":erts_dirty_process_signal_handler.start/0"
+      },
+      {
+        "reductions": 364669,
+        "kind": ":ranch_conns_sup.init/7"
+      },
+      {
+        "reductions": 335044,
+        "kind": "Oban.Stager.init/1"
+      },
+      {
+        "reductions": 259639,
+        "kind": "Conveyor.Ingest.TagCounter"
+      },
+      {
+        "reductions": 197758,
+        "kind": "Conveyor.Ingest.WorkerSupervisor"
+      },
+      {
+        "reductions": 191116,
+        "kind": "Conveyor.Admission.Sampler"
+      },
+      {
+        "reductions": 180657,
+        "kind": ":file_server_2"
+      },
+      {
+        "reductions": 133941,
+        "kind": ":erlang.apply/2"
+      },
+      {
+        "reductions": 118413,
+        "kind": "DBConnection.Connection.init/1"
+      }
+    ],
+    "rss_baseline": 313180160,
+    "rss_peak": 814170112
+  },
+  "postgres": {
+    "tables": {
+      "actions": 3514368,
+      "event_segments": 3973120,
+      "invocation_metrics": 6512640,
+      "invocations": 17686528,
+      "log_segments": 1933312,
+      "tag_keys": 24576,
+      "targets": 1474560,
+      "test_results": 3072000
+    },
+    "statements": 42112,
+    "tuples": {
+      "actions": {
+        "del": 0,
+        "dead": 0,
+        "ins": 7110,
+        "live": 7110,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "event_segments": {
+        "del": 0,
+        "dead": 0,
+        "ins": 0,
+        "live": 0,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "invocation_metrics": {
+        "del": 0,
+        "dead": 40,
+        "ins": 1500,
+        "live": 1500,
+        "upd": 239,
+        "hot_upd": 169
+      },
+      "invocations": {
+        "del": 0,
+        "dead": 404,
+        "ins": 1500,
+        "live": 1500,
+        "upd": 17818,
+        "hot_upd": 12553
+      },
+      "log_segments": {
+        "del": 0,
+        "dead": 0,
+        "ins": 0,
+        "live": 0,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "tag_keys": {
+        "del": 0,
+        "dead": 24,
+        "ins": 15,
+        "live": 15,
+        "upd": 251,
+        "hot_upd": 251
+      },
+      "targets": {
+        "del": 0,
+        "dead": 296,
+        "ins": 3562,
+        "live": 3562,
+        "upd": 4391,
+        "hot_upd": 3026
+      },
+      "test_results": {
+        "del": 0,
+        "dead": 0,
+        "ins": 2810,
+        "live": 2810,
+        "upd": 0,
+        "hot_upd": 0
+      }
+    },
+    "cpu_by_backend": {
+      "autovacuum launcher": 0.0,
+      "background writer": 0.0,
+      "checkpointer": 0.01,
+      "client backend": 3.82,
+      "exited": 0.0,
+      "logical replication launcher": 0.0,
+      "walwriter": 0.01
+    },
+    "cpu_s": 3.84,
+    "exec_s": 1.84,
+    "invocations_hot_pct": 70.5,
+    "invocations_upd": 17814,
+    "nested_statements": 16497,
+    "plan_s": 0.58,
+    "rollbacks": 0,
+    "round_trips": 25615,
+    "round_trips_per_flush": 12.2,
+    "round_trips_per_xact": 3.1,
+    "size_delta": 38701916,
+    "top_statements": [
+      {
+        "calls": 3000,
+        "rows": 3000,
+        "query": "WITH ins AS (\n  INSERT INTO \"invocations\" (\"id\", \"project_id\", \"api_key_id\", \"build_id\", \"bes_instance_name\", \"status\", \"exit_code_name\", \"exit_code\", \"abort_re",
+        "ms": 285.8,
+        "plan_ms": 52.7,
+        "wal": 1698338,
+        "toplevel": true,
+        "dirtied": 144
+      },
+      {
+        "calls": 110,
+        "rows": 1500,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"bazel_version\" = u.\"bazel_version\", \"command\"",
+        "ms": 231.6,
+        "plan_ms": 23.3,
+        "wal": 11451579,
+        "toplevel": true,
+        "dirtied": 1467
+      },
+      {
+        "calls": 1261,
+        "rows": 1261,
+        "query": "INSERT INTO \"invocation_metrics\" (\"inserted_at\",\"updated_at\",\"invocation_id\",\"build_metrics\",\"tool_logs\") VALUES ($1,$2,$3,$4,$5) ON CONFLICT (\"invocation_id\") ",
+        "ms": 126.3,
+        "plan_ms": 5.7,
+        "wal": 5182319,
+        "toplevel": true,
+        "dirtied": 661
+      },
+      {
+        "calls": 112,
+        "rows": 1177,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"event_count\" = u.\"event_count\", \"log_bytes\" =",
+        "ms": 102.1,
+        "plan_ms": 4.6,
+        "wal": 2115578,
+        "toplevel": true,
+        "dirtied": 153
+      },
+      {
+        "calls": 2083,
+        "rows": 2083,
+        "query": "INSERT INTO \"raw_log_objects\" (\"key\") VALUES ($1) ON CONFLICT DO NOTHING",
+        "ms": 71.4,
+        "plan_ms": 2.2,
+        "wal": 805873,
+        "toplevel": true,
+        "dirtied": 77
+      },
+      {
+        "calls": 608,
+        "rows": 608,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"action_cache_hits\" = u.\"action_cache_hits\", \"",
+        "ms": 50.8,
+        "plan_ms": 43.9,
+        "wal": 1753131,
+        "toplevel": true,
+        "dirtied": 10
+      },
+      {
+        "calls": 88,
+        "rows": 530,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"configurations\" = u.\"configurations\", \"event_",
+        "ms": 40.0,
+        "plan_ms": 5.7,
+        "wal": 1322352,
+        "toplevel": true,
+        "dirtied": 60
+      },
+      {
+        "calls": 733,
+        "rows": 2583,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"event_count\" = u.\"event_count\"\nFROM unnest($1",
+        "ms": 39.7,
+        "plan_ms": 33.1,
+        "wal": 2968342,
+        "toplevel": true,
+        "dirtied": 21
+      },
+      {
+        "calls": 1515,
+        "rows": 1515,
+        "query": "SELECT $2 FROM ONLY \"public\".\"projects\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+        "ms": 32.6,
+        "plan_ms": 2.5,
+        "wal": 177129,
+        "toplevel": false,
+        "dirtied": 0
+      },
+      {
+        "calls": 14982,
+        "rows": 14982,
+        "query": "SELECT $2 FROM ONLY \"public\".\"invocations\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+        "ms": 30.0,
+        "plan_ms": 23.6,
+        "wal": 667072,
+        "toplevel": false,
+        "dirtied": 0
+      },
+      {
+        "calls": 1044,
+        "rows": 1500,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"lifecycle_finished\" = u.\"lifecycle_finished\"\n",
+        "ms": 28.6,
+        "plan_ms": 38.5,
+        "wal": 1781977,
+        "toplevel": true,
+        "dirtied": 6
+      },
+      {
+        "calls": 1014,
+        "rows": 1014,
+        "query": "INSERT INTO \"log_segments\" (\"data\",\"byte_size\",\"day\",\"invocation_id\",\"first_seq\",\"last_seq\",\"byte_offset\",\"line_offset\",\"line_count\",\"object_key\",\"object_offset",
+        "ms": 27.9,
+        "plan_ms": 4.9,
+        "wal": 381874,
+        "toplevel": true,
+        "dirtied": 34
+      }
+    ],
+    "vcpu": 0.06,
+    "wal_bytes": 64789728,
+    "wal_fpi": 16,
+    "wal_records": 285203,
+    "xacts": 8334,
+    "xacts_per_s": 122.2
+  },
+  "git": "aca1845",
+  "notes": null,
+  "settings": {
+    "streams": 1000,
+    "builds": 1500,
+    "delay_ms": 500,
+    "duration_s": null,
+    "pool_size": 40,
+    "ingest": {
+      "auth": "none",
+      "idle_timeout_ms": 600000,
+      "linger_ms": 30000,
+      "batch_max_events": 500,
+      "batch_max_bytes": 262144,
+      "batch_flush_ms": 2000,
+      "writer_shards": 16,
+      "writer_flush_ms": 20,
+      "writer_max_pending": 256,
+      "writer_retry_delays": [
+        50,
+        200,
+        800
+      ],
+      "writer_deadline_ms": 20000,
+      "tag_flush_ms": 1000,
+      "broadcast_interval_ms": 250
+    }
+  },
+  "headline": {
+    "ack_p50_ms": 1697.71,
+    "ack_p99_ms": 3036.42,
+    "events_per_pg_exec_s": 35654.8,
+    "events_per_s": 964.8,
+    "events_per_s_per_app_vcpu": 3215.9,
+    "events_per_s_per_pg_vcpu": 17128.4,
+    "rss_bytes_per_stream": 500990.0,
+    "storage_bytes_per_build": 25801.3,
+    "wal_bytes_per_event": 985.1
+  },
+  "loadgen": {
+    "ack_latency_ms": {
+      "count": 65773,
+      "max": 3098.38,
+      "p50": 1697.71,
+      "p90": 2680.24,
+      "p99": 3036.42
+    },
+    "build_duration_ms": {
+      "count": 1500,
+      "max": 49886,
+      "p50": 17831,
+      "p90": 48822,
+      "p99": 49841
+    },
+    "builds_failed": 0,
+    "builds_ok": 1500,
+    "builds_per_minute": 1329.2,
+    "builds_total": 1500,
+    "elapsed_ms": 67712,
+    "events": 65773,
+    "events_per_second": 971.4,
+    "failure_kinds": {},
+    "failures": [],
+    "missing_acks": 0,
+    "resends": 0,
+    "retried_builds": 0,
+    "started_at_unix_ms": 1794310859128,
+    "streams": 1000,
+    "timeline": [
+      {
+        "ack_max_ms": 3094.37,
+        "failed": 0,
+        "ok": 125,
+        "t_s": 0
+      },
+      {
+        "ack_max_ms": 3098.07,
+        "failed": 0,
+        "ok": 516,
+        "t_s": 10
+      },
+      {
+        "ack_max_ms": 3098.38,
+        "failed": 0,
+        "ok": 360,
+        "t_s": 20
+      },
+      {
+        "ack_max_ms": 3023.72,
+        "failed": 0,
+        "ok": 223,
+        "t_s": 30
+      },
+      {
+        "ack_max_ms": 3096.98,
+        "failed": 0,
+        "ok": 214,
+        "t_s": 40
+      },
+      {
+        "ack_max_ms": 3022.04,
+        "failed": 0,
+        "ok": 16,
+        "t_s": 50
+      },
+      {
+        "ack_max_ms": 3016.72,
+        "failed": 0,
+        "ok": 46,
+        "t_s": 60
+      }
+    ]
+  },
+  "loadgen_exit": 0,
+  "loadgen_output_tail": "\n04:42:06.840 [debug] GRPC.Client.Connection stopping as requested\n\n04:42:06.841 [debug] GRPC.Client.Connection stopping as requested\nbuilds     1500/1500 ok (0 failed), 1329.2 builds/min over 1000 streams\nevents     65773 sent, 0 missing acks, 971.4 events/s, 67712 ms wall, 0 builds retried\nack ms     p50 1697.71  p90 2680.24  p99 3036.42  max 3098.38  (client-observed, n=65773)\nbuild ms   p50 17831  p90 48822  p99 49841  max 49886\n\n\n\n"
+}

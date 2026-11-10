@@ -187,8 +187,8 @@ prefix may be `rawlog`.
   blob mode writes all day: at one object per shard per second a node registers up to
   691,000 objects a day (and flat-out load has measured 150 a second), and the previous
   daily run of at most 10,000 could never catch up. Measured: 2,500 objects in 0.17 s
-  against MinIO (about 15,000 a second) and 2,500 in under a second on disk, so one
-  ten-minute run covers days of one node's writes.
+  against MinIO (about 15,000 a second) and 10,000 in 0.56 s on disk (17,700 a second),
+  so one ten-minute run covers days of one node's writes.
   Orphans of a commit that failed after its put, or of a node that died in between (the
   client never saw an ack and resends), go the same way, and so do the bytes of a batch
   that left its group after the object was written (fenced, expired or failed: the rest
