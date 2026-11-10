@@ -4,6 +4,13 @@ defmodule Conveyor.Grpc.Acker do
   reports commits. Runs next to the handler process so reading requests and writing acks
   never block each other. Exits once the final sequence number (the
   `component_stream_finished` marker) has been acknowledged.
+
+  A failed batch (`{:ack_failed, seq, reason}` from the worker) ends the RPC at once: the
+  acker tells its parent and exits with the reason the gRPC adapter turns into an
+  UNAVAILABLE status. It is linked to the handler, which may be blocked reading the next
+  request and would otherwise keep pushing the rest of the connection's events at a worker
+  that is gone (each one starting a fresh worker whose acks nobody reads). Bazel retries
+  UNAVAILABLE and resends from its last acknowledgement.
   """
 
   alias Google.Devtools.Build.V1, as: V1
@@ -12,7 +19,43 @@ defmodule Conveyor.Grpc.Acker do
   @spec start(GRPC.Server.Stream.t()) :: pid()
   def start(stream) do
     parent = self()
-    spawn_link(fn -> loop(%{stream: stream, parent: parent, final: nil, acked: 0, sent: %{}}) end)
+
+    spawn_link(fn ->
+      loop(%{stream: stream, stream_id: nil, parent: parent, final: nil, acked: 0, sent: %{}})
+    end)
+  end
+
+  @doc "Tells the acker the stream id to echo in acknowledgements (known from the first event)."
+  @spec stream_id(pid(), V1.StreamId.t() | nil) :: :ok
+  def stream_id(acker, stream_id) do
+    send(acker, {:stream_id, stream_id})
+    :ok
+  end
+
+  @doc """
+  Whether the acker has seen a failed batch among everything sent to it so far. The handler
+  asks before it reports a sequence gap: a gap right after a failed batch is the fresh
+  worker of a stream that already failed, and must be answered as the failure it is.
+  """
+  @spec check(pid(), timeout()) :: :ok | {:error, term()}
+  def check(acker, timeout \\ 5_000) do
+    ref = Process.monitor(acker)
+    send(acker, {:check, self(), ref})
+
+    receive do
+      {:acker_ok, ^ref} ->
+        Process.demonitor(ref, [:flush])
+        :ok
+
+      {:acker_failed, ^acker, reason} ->
+        Process.demonitor(ref, [:flush])
+        {:error, reason}
+
+      {:DOWN, ^ref, :process, ^acker, reason} ->
+        {:error, reason}
+    after
+      timeout -> {:error, :ack_timeout}
+    end
   end
 
   @doc "Records that an event was received so its ack latency can be measured."
@@ -52,7 +95,7 @@ defmodule Conveyor.Grpc.Acker do
 
       {:ack, seq} ->
         GRPC.Server.send_reply(state.stream, %V1.PublishBuildToolEventStreamResponse{
-          stream_id: stream_id(state.stream),
+          stream_id: state.stream_id,
           sequence_number: seq
         })
 
@@ -63,6 +106,16 @@ defmodule Conveyor.Grpc.Acker do
 
       {:ack_failed, _seq, reason} ->
         send(state.parent, {:acker_failed, self(), reason})
+        # The shape `GRPC.Server.Adapters.Cowboy.Handler` reports as an RPC error when the
+        # handler process exits with it (what a raised `GRPC.RPCError` becomes).
+        exit({:shutdown, {failure(reason), []}})
+
+      {:stream_id, stream_id} ->
+        loop(%{state | stream_id: stream_id})
+
+      {:check, from, ref} ->
+        send(from, {:acker_ok, ref})
+        loop(state)
 
       {:final, seq} ->
         state = %{state | final: seq}
@@ -85,8 +138,12 @@ defmodule Conveyor.Grpc.Acker do
 
   defp finish(state), do: send(state.parent, {:acker_done, self()})
 
-  # Bazel only checks the sequence number, but echoing the stream id is what the API
-  # describes; the handler stores it in the stream's local map.
-  defp stream_id(%GRPC.Server.Stream{local: %{stream_id: id}}), do: id
-  defp stream_id(_), do: nil
+  @doc "The status a stream ends with when a batch was not persisted."
+  @spec failure(term()) :: GRPC.RPCError.t()
+  def failure(reason) do
+    GRPC.RPCError.exception(
+      status: :unavailable,
+      message: "event not persisted: #{inspect(reason)}"
+    )
+  end
 end

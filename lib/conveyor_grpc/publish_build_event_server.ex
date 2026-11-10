@@ -65,14 +65,18 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
   end
 
   defp run_stream(requests, stream) do
+    # A failed batch ends the RPC from the acker's side (it is linked and exits with an
+    # UNAVAILABLE error), wherever this process is: reading, pushing or awaiting.
     acker = Acker.start(stream)
-    stream = %{stream | local: Map.put(stream.local, :stream_id, nil)}
 
     last_seq =
       Enum.reduce(requests, 0, fn %V1.PublishBuildToolEventStreamRequest{ordered_build_event: obe} =
                                     req,
-                                  _ ->
+                                  last ->
         ctx = context(stream, req.notification_keywords, req.project_id)
+        # Bazel only checks the sequence number, but echoing the stream id is what the API
+        # describes.
+        if last == 0, do: Acker.stream_id(acker, obe.stream_id)
 
         if Event.bes_kind(obe.event) == :component_stream_finished,
           do: Acker.final(acker, obe.sequence_number)
@@ -85,6 +89,11 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
             obe.sequence_number
 
           {:error, :out_of_order} ->
+            # FAILED_PRECONDITION makes Bazel give the upload up, so it must be a real gap:
+            # after a failed batch the worker is gone and the next event of this
+            # connection lands on a fresh worker, ahead of the row. That is the failure.
+            with {:error, reason} <- Acker.check(acker), do: raise(Acker.failure(reason))
+
             raise GRPC.RPCError,
               status: :failed_precondition,
               message: "unexpected sequence number #{obe.sequence_number}"
@@ -104,9 +113,7 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
         :ok
 
       {:error, reason} ->
-        raise GRPC.RPCError,
-          status: :unavailable,
-          message: "event not persisted: #{inspect(reason)}"
+        raise Acker.failure(reason)
     end
   end
 

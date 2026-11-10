@@ -37,11 +37,41 @@ defmodule Conveyor.Grpc.AckerTest do
     assert :ok = Acker.await(acker, 1, 1_000)
   end
 
-  test "failures propagate and timeouts are reported" do
+  test "acks echo the stream id once it is known" do
     acker = Acker.start(stream())
-    send(acker, {:ack_failed, 1, :boom})
-    assert {:error, :boom} = Acker.await(acker, 1, 1_000)
+    id = %Google.Devtools.Build.V1.StreamId{invocation_id: "i", build_id: "b"}
+    Acker.stream_id(acker, id)
+    send(acker, {:ack, 1})
+    assert :ok = Acker.await(acker, 1, 1_000)
+    assert_received {:reply, %{sequence_number: 1, stream_id: ^id}}
+  end
 
+  test "a failed batch is reported to the parent and ends the RPC through the link" do
+    Process.flag(:trap_exit, true)
+    acker = Acker.start(stream())
+    assert :ok = Acker.check(acker)
+    send(acker, {:ack_failed, 1, :boom})
+
+    # What the gRPC adapter receives when the (non-trapping) handler dies with the acker.
+    assert_receive {:EXIT, ^acker,
+                    {:shutdown,
+                     {%GRPC.RPCError{status: 14, message: "event not persisted" <> _}, []}}}
+
+    assert {:error, :boom} = Acker.await(acker, 1, 1_000)
+    assert {:error, _} = Acker.check(acker)
+  end
+
+  test "check reports a failure that is still in the acker's mailbox" do
+    Process.flag(:trap_exit, true)
+    acker = Acker.start(stream())
+    :erlang.suspend_process(acker)
+    send(acker, {:ack_failed, 1, :boom})
+    task = Task.async(fn -> Acker.check(acker) end)
+    :erlang.resume_process(acker)
+    assert {:error, _} = Task.await(task)
+  end
+
+  test "timeouts are reported" do
     Process.flag(:trap_exit, true)
     acker2 = Acker.start(stream())
     assert {:error, :ack_timeout} = Acker.await(acker2, 5, 50)

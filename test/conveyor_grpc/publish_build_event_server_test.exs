@@ -150,4 +150,35 @@ defmodule Conveyor.Grpc.PublishBuildEventServerTest do
     GRPC.Stub.disconnect(channel)
     assert row.() == before
   end
+
+  @tag :capture_log
+  test "a failed batch ends the RPC with UNAVAILABLE while the client is still sending",
+       %{grpc_port: port, key: key} do
+    import Ecto.Query
+
+    {:ok, channel} = GRPC.Stub.connect("localhost:#{port}", adapter: GRPC.Client.Adapters.Mint)
+    id = Replay.uuid()
+    stream_id = %V1.StreamId{build_id: "b", invocation_id: id, component: :TOOL}
+    [e1, e2 | _] = Conveyor.Bep.Fixture.read!(fixture("analysis_failure"))
+    stream = Stub.publish_build_tool_event_stream(channel, metadata: %{"x-api-key" => key})
+    request = &%V1.PublishBuildToolEventStreamRequest{ordered_build_event: &1}
+
+    GRPC.Stub.send_request(stream, request.(Replay.ordered_event(stream_id, 1, e1)))
+    {:ok, replies} = GRPC.Stub.recv(stream, timeout: 5_000)
+    # The acknowledgement echoes the stream id.
+    assert [{:ok, %{sequence_number: 1, stream_id: ^stream_id}}] = Enum.take(replies, 1)
+
+    # Another node moved the row: the next batch is fenced. The client neither sends more
+    # nor closes its side; the server must end the call on its own.
+    Repo.update_all(from(i in Conveyor.Invocations.Invocation, where: i.id == ^id),
+      set: [last_event_seq: 99]
+    )
+
+    GRPC.Stub.send_request(stream, request.(Replay.ordered_event(stream_id, 2, e2)))
+
+    assert [{:error, %GRPC.RPCError{status: 14, message: "event not persisted" <> _}}] =
+             Enum.take(replies, 1)
+
+    GRPC.Stub.disconnect(channel)
+  end
 end
