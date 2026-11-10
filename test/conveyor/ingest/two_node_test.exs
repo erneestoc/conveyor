@@ -27,11 +27,11 @@ defmodule Conveyor.Ingest.TwoNodeTest do
   end
 
   defp await_exit(registry, id) do
-    case Registry.lookup(registry, id) do
-      [] ->
+    case worker_pid(registry, id) do
+      nil ->
         :ok
 
-      [{pid, _}] ->
+      pid ->
         ref = Process.monitor(pid)
         assert_receive {:DOWN, ^ref, :process, ^pid, _}, 5_000
         :ok
@@ -58,12 +58,12 @@ defmodule Conveyor.Ingest.TwoNodeTest do
 
     # Node A takes the first part of the stream and stays alive (idle, not finished).
     push(ctx_a, id, events, 1..5)
-    assert [{pid_a, _}] = Registry.lookup(Conveyor.Ingest.Registry, id)
+    assert is_pid(pid_a = worker_pid(id))
     assert reload(id).last_event_seq == 5
 
     # Bazel retries on node B, which resumes from the database's last committed seq.
     push(ctx_b, id, events, 6..n)
-    assert [{pid_b, _}] = Registry.lookup(Conveyor.Ingest.RegistryB, id)
+    assert is_pid(pid_b = worker_pid(Conveyor.Ingest.RegistryB, id))
     assert pid_b != pid_a and Process.alive?(pid_a)
     assert reload(id).last_event_seq == n
 
@@ -120,13 +120,13 @@ defmodule Conveyor.Ingest.TwoNodeTest do
       {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 1}}
 
     assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(id), 1, started))
-    assert Registry.lookup(Conveyor.Ingest.RegistryB, id) == []
+    assert worker_pid(Conveyor.Ingest.RegistryB, id) == nil
     assert %{last_event_seq: 5} = reload(id)
 
     # A build that has not started streaming anywhere is visible at once, without a worker.
     fresh = Replay.uuid()
     assert :ok = Ingest.lifecycle(ctx_b, Replay.ordered_event(stream_id(fresh), 1, started))
-    assert Registry.lookup(Conveyor.Ingest.RegistryB, fresh) == []
+    assert worker_pid(Conveyor.Ingest.RegistryB, fresh) == nil
     assert %{status: "in_progress", last_event_seq: 0} = reload(fresh)
 
     # The stream stays on A and finishes there.

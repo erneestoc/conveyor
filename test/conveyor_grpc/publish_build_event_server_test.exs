@@ -101,4 +101,53 @@ defmodule Conveyor.Grpc.PublishBuildEventServerTest do
 
     GRPC.Stub.disconnect(channel)
   end
+
+  @tag :capture_log
+  test "a key of another project gets NOT_FOUND for a build it does not own and writes nothing",
+       %{grpc_port: port, key: key} do
+    assert {:ok, %{invocation_id: id, sent: sent}} =
+             Replay.run(fixture("analysis_failure"), port: port, api_key: key)
+
+    assert :ok = await_worker_exit(id)
+    # (A finish notification that raced the worker's exit may still touch the timestamps.)
+    row = fn -> Map.drop(reload(id), [:last_event_at, :updated_at]) end
+    before = row.()
+
+    {:ok, other} = Projects.create_project(%{slug: "intruder", name: "Intruder"})
+    {:ok, _key, intruder} = Projects.create_api_key(other, %{name: "intruder"})
+    {:ok, channel} = GRPC.Stub.connect("localhost:#{port}", adapter: GRPC.Client.Adapters.Mint)
+    stream_id = %V1.StreamId{build_id: "b", invocation_id: id, component: :TOOL}
+    [started | _] = Conveyor.Bep.Fixture.read!(fixture("analysis_failure"))
+
+    stream = Stub.publish_build_tool_event_stream(channel, metadata: %{"x-api-key" => intruder})
+
+    GRPC.Stub.send_request(
+      stream,
+      %V1.PublishBuildToolEventStreamRequest{
+        ordered_build_event: Replay.ordered_event(stream_id, sent + 1, started)
+      },
+      end_stream: true
+    )
+
+    case GRPC.Stub.recv(stream) do
+      {:ok, replies} -> assert [{:error, %GRPC.RPCError{status: 5}}] = Enum.to_list(replies)
+      {:error, error} -> assert %GRPC.RPCError{status: 5} = error
+    end
+
+    attempt =
+      {:invocation_attempt_started, %V1.BuildEvent.InvocationAttemptStarted{attempt_number: 2}}
+
+    assert {:error, %GRPC.RPCError{status: 5, message: message}} =
+             Stub.publish_lifecycle_event(
+               channel,
+               %V1.PublishLifecycleEventRequest{
+                 build_event: Replay.ordered_event(stream_id, 1, attempt)
+               },
+               metadata: %{"x-api-key" => intruder}
+             )
+
+    refute message =~ "default"
+    GRPC.Stub.disconnect(channel)
+    assert row.() == before
+  end
 end

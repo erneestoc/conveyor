@@ -29,7 +29,7 @@ defmodule Conveyor.Ingest do
     @type t :: %__MODULE__{}
   end
 
-  @type push_result :: :ok | {:error, :out_of_order | :fenced | term()}
+  @type push_result :: :ok | {:error, :out_of_order | :not_found | {:fenced, integer()} | term()}
 
   @doc """
   Hands one `OrderedBuildEvent` of the tool event stream to its worker. Returns once the
@@ -85,16 +85,16 @@ defmodule Conveyor.Ingest do
         } = obe
       )
       when stream_id.invocation_id != "" do
-    case Registry.lookup(ctx.registry, stream_id.invocation_id) do
-      [{pid, _}] ->
+    case Worker.whereis(ctx.registry, ctx.project_id, stream_id.invocation_id) do
+      nil ->
+        touch_row(ctx, stream_id)
+
+      pid ->
         try do
           GenServer.call(pid, {:lifecycle, :invocation_attempt_started, obe}, :infinity)
         catch
           :exit, _ -> touch_row(ctx, stream_id)
         end
-
-      [] ->
-        touch_row(ctx, stream_id)
     end
   end
 
@@ -109,8 +109,11 @@ defmodule Conveyor.Ingest do
         } = obe
       )
       when stream_id.invocation_id != "" do
-    case Registry.lookup(ctx.registry, stream_id.invocation_id) do
-      [{pid, _}] ->
+    case Worker.whereis(ctx.registry, ctx.project_id, stream_id.invocation_id) do
+      nil ->
+        mark_lifecycle_finished(ctx, stream_id.invocation_id)
+
+      pid ->
         try do
           case GenServer.call(pid, {:lifecycle, :invocation_attempt_finished, obe}, :infinity) do
             # Bazel sends lifecycle events and the event stream on separate connections, so
@@ -119,18 +122,14 @@ defmodule Conveyor.Ingest do
             # commit is fenced; the notification itself is still valid, so record it
             # directly instead of failing the RPC, which would make Bazel abort the upload.
             {:error, {:fenced, _}} ->
-              mark_lifecycle_finished(:invocation_attempt_finished, stream_id.invocation_id)
+              mark_lifecycle_finished(ctx, stream_id.invocation_id)
 
             other ->
               other
           end
         catch
-          :exit, _ ->
-            mark_lifecycle_finished(:invocation_attempt_finished, stream_id.invocation_id)
+          :exit, _ -> mark_lifecycle_finished(ctx, stream_id.invocation_id)
         end
-
-      [] ->
-        mark_lifecycle_finished(:invocation_attempt_finished, stream_id.invocation_id)
     end
   end
 
@@ -139,17 +138,20 @@ defmodule Conveyor.Ingest do
 
   # Database errors surface as UNAVAILABLE so that Bazel retries, never as an internal error.
   defp touch_row(ctx, stream_id) do
-    Worker.load_or_create!(ctx, stream_id.invocation_id, stream_id)
-    :ok
+    with {:ok, _inv} <- Worker.load_or_create(ctx, stream_id.invocation_id, stream_id), do: :ok
   rescue
     e in [DBConnection.ConnectionError, Postgrex.Error] -> {:error, {:unavailable, e}}
   end
 
-  defp mark_lifecycle_finished(:invocation_attempt_finished, invocation_id) do
+  # Scoped by project: for an id of another project this updates nothing and answers as it
+  # does for an id that does not exist, so the notification reveals nothing.
+  defp mark_lifecycle_finished(%Context{project_id: project_id}, invocation_id) do
     import Ecto.Query, only: [from: 2]
 
     Conveyor.Repo.update_all(
-      from(i in Conveyor.Invocations.Invocation, where: i.id == ^invocation_id),
+      from(i in Conveyor.Invocations.Invocation,
+        where: i.id == ^invocation_id and i.project_id == ^project_id
+      ),
       set: [lifecycle_finished: true]
     )
 
@@ -159,11 +161,11 @@ defmodule Conveyor.Ingest do
   @doc "Finds or starts the worker for an invocation."
   @spec worker(Context.t(), String.t(), V1.StreamId.t()) :: {:ok, pid()} | {:error, term()}
   def worker(ctx, invocation_id, stream_id) do
-    case Registry.lookup(ctx.registry, invocation_id) do
-      [{pid, _}] ->
+    case Worker.whereis(ctx.registry, ctx.project_id, invocation_id) do
+      pid when is_pid(pid) ->
         {:ok, pid}
 
-      [] ->
+      nil ->
         case DynamicSupervisor.start_child(
                ctx.worker_supervisor,
                {Worker, {ctx, invocation_id, stream_id}}

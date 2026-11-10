@@ -19,6 +19,8 @@ defmodule Conveyor.Ingest.Worker do
 
   # Columns a worker holds only until the build is finalized and never puts on list topics.
   @wide_columns [:options, :workspace_status, :configurations]
+  # How long a refused worker (wrong project) stays to answer callers that hold its pid.
+  @refusal_ms 1_000
   alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -26,15 +28,28 @@ defmodule Conveyor.Ingest.Worker do
 
   def start_link({ctx, invocation_id, stream_id}) do
     GenServer.start_link(__MODULE__, {ctx, invocation_id, stream_id},
-      name: via(ctx.registry, invocation_id)
+      name: via(ctx.registry, ctx.project_id, invocation_id)
     )
   end
 
-  def via(registry \\ Conveyor.Ingest.Registry, invocation_id),
-    do: {:via, Registry, {registry, invocation_id}}
+  # A worker is registered under its project and invocation id: a context of another
+  # project never reaches it, and the worker that context starts instead is refused by
+  # `load_or_create/3` without disturbing the owner's stream.
+  def via(registry \\ Conveyor.Ingest.Registry, project_id, invocation_id),
+    do: {:via, Registry, {registry, {project_id, invocation_id}}}
+
+  @doc "The live worker of a project's invocation on this node, or nil."
+  @spec whereis(atom(), term(), String.t()) :: pid() | nil
+  def whereis(registry \\ Conveyor.Ingest.Registry, project_id, invocation_id) do
+    case Registry.lookup(registry, {project_id, invocation_id}) do
+      [{pid, _}] -> pid
+      [] -> nil
+    end
+  end
 
   @doc "Current in-memory summary of the invocation (for tests and debugging)."
-  def summary(invocation_id), do: GenServer.call(via(invocation_id), :summary)
+  def summary(project_id, invocation_id),
+    do: GenServer.call(via(project_id, invocation_id), :summary)
 
   # --- init ---------------------------------------------------------------------------------
 
@@ -46,11 +61,21 @@ defmodule Conveyor.Ingest.Worker do
 
   @impl true
   def handle_continue(:load, %{ctx: ctx, invocation_id: id, stream_id: stream_id}) do
-    inv =
-      Retry.with_backoff(fn -> load_or_create!(ctx, id, stream_id) end,
-        label: "worker load #{id}"
-      )
+    case Retry.with_backoff(fn -> load_or_create(ctx, id, stream_id) end,
+           label: "worker load #{id}"
+         ) do
+      {:ok, inv} ->
+        {:noreply, loaded(ctx, id, stream_id, inv)}
 
+      {:error, :not_found} ->
+        # The id belongs to another project. Give the name up at once, so the next lookup
+        # starts from the row again, answer the callers that already hold this pid, and go.
+        Registry.unregister(ctx.registry, {ctx.project_id, id})
+        {:noreply, %{refused: :not_found}, @refusal_ms}
+    end
+  end
+
+  defp loaded(ctx, id, stream_id, inv) do
     norm =
       Normalizer.new(inv,
         keywords: ctx.keywords,
@@ -86,7 +111,7 @@ defmodule Conveyor.Ingest.Worker do
     # A worker started for an already finished build (a late duplicate after a restart)
     # only needs to answer what arrives during the linger window.
     state = if state.finalized, do: start_linger(state), else: state
-    {:noreply, state |> reset_idle() |> mark_dirty(:summary) |> schedule_broadcast()}
+    state |> reset_idle() |> mark_dirty(:summary) |> schedule_broadcast()
   end
 
   # Insert first: a new build costs one statement; only a resumed or concurrently created
@@ -96,10 +121,15 @@ defmodule Conveyor.Ingest.Worker do
   by `Conveyor.Ingest.lifecycle/2` for the attempt-started notification, which must never
   start a worker (behind a balancer the notification and the stream land on different
   nodes; a worker started here would only fence the real one).
+
+  This is the one place every write path of a stream crosses before it may touch a build,
+  so the tenancy rule lives here: a row that exists under another project is
+  `{:error, :not_found}` for this context and nothing is written. Raises on database
+  errors.
   """
-  @spec load_or_create!(Conveyor.Ingest.Context.t(), String.t(), V1.StreamId.t() | nil) ::
-          Invocation.t()
-  def load_or_create!(ctx, id, stream_id) do
+  @spec load_or_create(Conveyor.Ingest.Context.t(), String.t(), V1.StreamId.t() | nil) ::
+          {:ok, Invocation.t()} | {:error, :not_found}
+  def load_or_create(ctx, id, stream_id) do
     now = DateTime.utc_now()
 
     row =
@@ -148,10 +178,13 @@ defmodule Conveyor.Ingest.Worker do
     SELECT #{cols} FROM "invocations" WHERE "id" = $1 AND NOT EXISTS (SELECT 1 FROM ins)
     """
 
-    case Repo.query!(sql, params, cache_statement: "conveyor_load_or_create_invocation") do
-      %{rows: [values]} -> Repo.load(Invocation, {fields, values})
-      %{rows: []} -> Repo.get!(Invocation, id)
-    end
+    inv =
+      case Repo.query!(sql, params, cache_statement: "conveyor_load_or_create_invocation") do
+        %{rows: [values]} -> Repo.load(Invocation, {fields, values})
+        %{rows: []} -> Repo.get!(Invocation, id)
+      end
+
+    if inv.project_id == ctx.project_id, do: {:ok, inv}, else: {:error, :not_found}
   end
 
   # --- calls --------------------------------------------------------------------------------
@@ -161,6 +194,9 @@ defmodule Conveyor.Ingest.Worker do
   # reading; when too much is unacknowledged the reply is deferred until the next commit,
   # which is the backpressure that eventually slows Bazel down through HTTP/2 flow control.
   @impl true
+  def handle_call(_request, _from, %{refused: reason} = state),
+    do: {:reply, {:error, reason}, state, @refusal_ms}
+
   def handle_call({:push, %V1.OrderedBuildEvent{sequence_number: seq} = obe, acker}, from, state) do
     state = %{state | last_event_at: System.monotonic_time(:millisecond)} |> reset_idle()
 
@@ -219,7 +255,7 @@ defmodule Conveyor.Ingest.Worker do
     {:noreply, flush(state)}
   end
 
-  def handle_call(:summary, _from, state), do: {:reply, summary(state.norm, state), state}
+  def handle_call(:summary, _from, state), do: {:reply, digest(state.norm, state), state}
 
   # Behind a balancer a retried stream can land on a node whose worker was started by a
   # lifecycle event and never saw the events another node committed. With nothing buffered
@@ -230,9 +266,14 @@ defmodule Conveyor.Ingest.Worker do
           t != nil,
           do: Process.cancel_timer(t)
 
-      {:noreply, fresh} =
-        handle_continue(:load, Map.take(state, [:ctx, :invocation_id, :stream_id]))
+      # The row was this project's when the worker loaded it and never changes project.
+      {:ok, inv} =
+        Retry.with_backoff(
+          fn -> load_or_create(state.ctx, state.invocation_id, state.stream_id) end,
+          label: "worker reload #{state.invocation_id}"
+        )
 
+      fresh = loaded(state.ctx, state.invocation_id, state.stream_id, inv)
       if fresh.expected_seq == seq, do: {:ok, fresh}, else: {:error, fresh}
     else
       {:error, state}
@@ -363,6 +404,8 @@ defmodule Conveyor.Ingest.Worker do
   defp settle_profile(norm, _id), do: norm
 
   @impl true
+  def handle_info(_msg, %{refused: _} = state), do: {:stop, :normal, state}
+
   def handle_info(:flush, state), do: {:noreply, flush(%{state | flush_timer: nil})}
 
   def handle_info({:batch_committed, ref}, state) do
@@ -553,7 +596,7 @@ defmodule Conveyor.Ingest.Worker do
       # configurations) are tens of KB each and stay out of list-level messages. With a
       # watched project of thousands of live builds, every worker's tick lands on the
       # viewer's node (fleet test: a 16 GB node killed within a minute).
-      summary = state.norm |> summary(state) |> Map.drop(@wide_columns)
+      summary = state.norm |> digest(state) |> Map.drop(@wide_columns)
 
       Watch.broadcast(Ingest.project_topic(project_id), {:invocation_updated, summary})
       Watch.broadcast(Ingest.all_topic(), {:invocation_updated, summary})
@@ -561,7 +604,7 @@ defmodule Conveyor.Ingest.Worker do
 
     if dirty.summary or dirty.targets != %{} or dirty.tests != %{} or dirty.actions != [] do
       detail = %{
-        invocation: summary(state.norm, state),
+        invocation: digest(state.norm, state),
         targets: Map.values(dirty.targets),
         tests: Map.values(dirty.tests),
         actions: Enum.reverse(dirty.actions)
@@ -586,7 +629,7 @@ defmodule Conveyor.Ingest.Worker do
 
   defp slim(state), do: state
 
-  defp summary(norm, state) do
+  defp digest(norm, state) do
     norm.inv
     |> Map.put(:id, state.invocation_id)
     |> Map.put(:project_id, state.ctx.project_id)

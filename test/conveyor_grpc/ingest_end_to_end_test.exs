@@ -17,7 +17,8 @@ defmodule Conveyor.Grpc.IngestEndToEndTest do
   @tag :capture_log
   test "replayed builds are persisted exactly once, including after a dropped connection", %{
     grpc_port: port,
-    plaintext: key
+    plaintext: key,
+    project: project
   } do
     results =
       ~w(clean_build_and_test test_failure flaky_test build_failure analysis_failure cached_build_and_test build_only_verbose)
@@ -35,7 +36,7 @@ defmodule Conveyor.Grpc.IngestEndToEndTest do
 
         other ->
           flunk(
-            "worker still running: #{inspect(other)} summary=#{inspect(Conveyor.Ingest.Worker.summary(r.invocation_id) |> Map.take([:status, :last_event_seq, :stream_finished, :finalized, :event_count]))} sent=#{r.sent}"
+            "worker still running: #{inspect(other)} summary=#{inspect(Conveyor.Ingest.Worker.summary(project.id, r.invocation_id) |> Map.take([:status, :last_event_seq, :stream_finished, :finalized, :event_count]))} sent=#{r.sent}"
           )
       end
 

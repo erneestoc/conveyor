@@ -57,19 +57,19 @@ defmodule Conveyor.Ingest.WorkerTest do
 
     # The notification creates the row (the build is visible at once) but starts no worker.
     assert %{status: "in_progress", last_event_seq: 0} = reload(id)
-    assert Registry.lookup(Conveyor.Ingest.Registry, id) == []
+    assert worker_pid(id) == nil
     push_all(ctx, id, Enum.take(events, 3))
-    assert %{status: "in_progress", finalized: false} = Worker.summary(id)
+    assert %{status: "in_progress", finalized: false} = Worker.summary(ctx.project_id, id)
     push_all(ctx, id, events, 4)
     finish(ctx, id, length(events) + 1)
 
     # A finished worker hibernates on its next quiet tick and drops the wide columns it
     # will never read again (PLAN §24 item 5); it still answers.
-    [{pid, _}] = Registry.lookup(Conveyor.Ingest.Registry, id)
+    pid = worker_pid(id)
     Process.sleep(400)
     {:current_function, {mod, fun, _}} = Process.info(pid, :current_function)
     assert {mod, fun} in [{:erlang, :hibernate}, {:gen_server, :loop_hibernate}]
-    summary = Worker.summary(id)
+    summary = Worker.summary(ctx.project_id, id)
     assert summary.finalized and not Map.has_key?(summary, :options)
 
     assert :ok =
@@ -139,10 +139,10 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert {:error, :out_of_order} =
              Ingest.push_sync(ctx, Replay.ordered_event(stream_id(id), 12, Enum.at(events, 11)))
 
-    assert %{last_event_seq: 10} = Worker.summary(id)
+    assert %{last_event_seq: 10} = Worker.summary(ctx.project_id, id)
 
     # Simulate a node restart: stop the worker, then continue from where the DB says.
-    [{pid, _}] = Registry.lookup(Conveyor.Ingest.Registry, id)
+    pid = worker_pid(id)
     GenServer.stop(pid)
     assert reload(id).last_event_seq == 10
     push_all(ctx, id, events, 11)

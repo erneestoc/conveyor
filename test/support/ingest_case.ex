@@ -42,11 +42,11 @@ defmodule Conveyor.IngestCase do
 
   @doc "Waits until the worker for an invocation has exited (finalization + linger)."
   def await_worker_exit(invocation_id, timeout \\ 5_000) do
-    case Registry.lookup(Conveyor.Ingest.Registry, invocation_id) do
-      [] ->
+    case worker_pid(invocation_id) do
+      nil ->
         :ok
 
-      [{pid, _}] ->
+      pid ->
         ref = Process.monitor(pid)
 
         receive do
@@ -54,6 +54,14 @@ defmodule Conveyor.IngestCase do
         after
           timeout -> {:error, :still_running}
         end
+    end
+  end
+
+  @doc "The live worker of an invocation (whatever its project) in an ingest instance, or nil."
+  def worker_pid(registry \\ Conveyor.Ingest.Registry, invocation_id) do
+    case Registry.select(registry, [{{{:_, invocation_id}, :"$1", :_}, [], [:"$1"]}]) do
+      [pid] -> pid
+      [] -> nil
     end
   end
 

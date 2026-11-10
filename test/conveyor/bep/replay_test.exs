@@ -57,7 +57,7 @@ defmodule Conveyor.Bep.ReplayTest do
 
     for _ <- 1..3, do: assert_receive(:acked, 5_000)
     :telemetry.detach(handler)
-    [{worker, _}] = Registry.lookup(Conveyor.Ingest.Registry, invocation_id)
+    worker = worker_pid(invocation_id)
     :ok = :sys.suspend(worker)
     worker
   end
@@ -73,7 +73,7 @@ defmodule Conveyor.Bep.ReplayTest do
       "replay-test-reconnect",
       [:conveyor, :loadgen, :reconnect],
       fn _, m, meta, _ ->
-        [{worker, _}] = Registry.lookup(Conveyor.Ingest.Registry, meta.invocation_id)
+        worker = worker_pid(meta.invocation_id)
         :ok = :sys.resume(worker)
         send(test_pid, {:reconnect, m, meta})
       end,

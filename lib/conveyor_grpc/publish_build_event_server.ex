@@ -27,6 +27,9 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
       :ok ->
         :ok
 
+      {:error, :not_found} ->
+        raise not_found(req.build_event)
+
       {:error, reason} ->
         raise GRPC.RPCError,
           status: :unavailable,
@@ -86,6 +89,9 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
               status: :failed_precondition,
               message: "unexpected sequence number #{obe.sequence_number}"
 
+          {:error, :not_found} ->
+            raise not_found(obe)
+
           {:error, reason} ->
             raise GRPC.RPCError,
               status: :unavailable,
@@ -102,6 +108,17 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
           status: :unavailable,
           message: "event not persisted: #{inspect(reason)}"
     end
+  end
+
+  # An invocation id that exists under another project. NOT_FOUND, the answer the HTTP
+  # upload and the web give for such an id: to this key the build does not exist, and the
+  # message names neither the owner nor what the build holds. A refusal of any kind tells a
+  # caller the id is taken (a free id would have been accepted), which is all it tells.
+  defp not_found(%V1.OrderedBuildEvent{stream_id: %V1.StreamId{invocation_id: id}}) do
+    GRPC.RPCError.exception(
+      status: :not_found,
+      message: "no invocation #{id} in this key's project"
+    )
   end
 
   defp context(%GRPC.Server.Stream{local: %{ctx: ctx}}, keywords, project_id) do
