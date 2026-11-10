@@ -49,6 +49,10 @@ config :conveyor, Conveyor.Ingest,
   writer_retry_delays: [5, 10, 20],
   broadcast_interval_ms: 10
 
+# No database probe beside the tests' sandbox; tests that need one inject it
+# (Conveyor.Admission.Sampler.inject/1).
+config :conveyor, Conveyor.Admission, probe_ms: 0
+
 config :conveyor, Oban, testing: :manual
 
 config :conveyor, Conveyor.Blobs, adapter: :disk, dir: "tmp/blobs_test"

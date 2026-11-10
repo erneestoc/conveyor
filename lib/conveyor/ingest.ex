@@ -11,6 +11,7 @@ defmodule Conveyor.Ingest do
   or `:ok` without effect for the finish notification) and writes nothing.
   """
 
+  alias Conveyor.Admission
   alias Conveyor.Ingest.Worker
   alias Google.Devtools.Build.V1, as: V1
 
@@ -85,15 +86,36 @@ defmodule Conveyor.Ingest do
   events costs a few commits rather than a thousand batch holds. The calling process
   receives the acknowledgements. `timeout` bounds the wait for each next acknowledgement.
   On an error nothing after the reported sequence was accepted; what committed before it
-  stays (a retry resumes through dedup).
+  stays (a retry resumes through dedup). The stream passes admission like any other:
+  `{:error, {seq, {:refused, reason}}}` when a door refuses it (`seq` 0: before any event).
   """
   @spec push_all(Context.t(), Enumerable.t(V1.OrderedBuildEvent.t()), timeout()) ::
           :ok | {:error, {seq :: non_neg_integer(), reason :: term()}}
   def push_all(%Context{} = ctx, events, timeout \\ 30_000) do
+    # The same doors as a gRPC stream: a slot of the key, the build's class at the first
+    # event, every event.
+    case Admission.open_stream(ctx.api_key_id, ctx.limits) do
+      {:ok, ticket} ->
+        try do
+          push_stream(ctx, events, ticket, timeout)
+        after
+          Admission.close_stream(ticket)
+        end
+
+      {:refuse, reason} ->
+        {:error, {0, {:refused, reason}}}
+    end
+  end
+
+  defp push_stream(ctx, events, ticket, timeout) do
     pushed =
-      Enum.reduce_while(events, {:ok, 0}, fn obe, _acc ->
-        case push(ctx, obe, self()) do
-          :ok -> {:cont, {:ok, obe.sequence_number}}
+      Enum.reduce_while(events, {:ok, 0}, fn obe, {:ok, last} ->
+        with :ok <- if(last == 0, do: Admission.build(ticket, resumed?(ctx, obe)), else: :ok),
+             :ok <- Admission.event(ticket),
+             :ok <- push(ctx, obe, self()) do
+          {:cont, {:ok, obe.sequence_number}}
+        else
+          {:refuse, reason} -> {:halt, {:error, {obe.sequence_number, {:refused, reason}}}}
           {:error, reason} -> {:halt, {:error, {obe.sequence_number, reason}}}
         end
       end)
@@ -103,6 +125,19 @@ defmodule Conveyor.Ingest do
       {:ok, last} -> await_acks(last, timeout)
       {:error, _} = error -> error
     end
+  end
+
+  @doc """
+  Whether the first event of a stream belongs to a build in progress: it does not start at
+  sequence 1 (Bazel resends from its last acknowledgement, so earlier events committed
+  somewhere), or its session lives on this node. No database read. A retry of a build of
+  which nothing was acknowledged yet looks new, and is treated as new.
+  """
+  @spec resumed?(Context.t(), V1.OrderedBuildEvent.t()) :: boolean()
+  def resumed?(%Context{} = ctx, %V1.OrderedBuildEvent{sequence_number: seq, stream_id: stream_id}) do
+    seq > 1 or
+      (stream_id != nil and
+         Worker.whereis(ctx.registry, ctx.project_id, stream_id.invocation_id) != nil)
   end
 
   # Acks arrive in sequence order; the last one means every event before it committed.
@@ -136,7 +171,12 @@ defmodule Conveyor.Ingest do
       when stream_id.invocation_id != "" do
     case Worker.whereis(ctx.registry, ctx.project_id, stream_id.invocation_id) do
       nil ->
-        touch_row(ctx, stream_id)
+        # The notification that announces a build is the stream door for it: a node that
+        # is shedding refuses the build here, before its row exists.
+        case Admission.build(ctx.api_key_id, false) do
+          :ok -> touch_row(ctx, stream_id)
+          {:refuse, reason} -> {:error, {:refused, reason}}
+        end
 
       pid ->
         try do

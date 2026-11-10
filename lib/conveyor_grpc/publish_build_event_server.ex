@@ -15,7 +15,7 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
   alias Conveyor.Bep.Event
   alias Conveyor.Grpc.Acker
   alias Conveyor.Ingest
-  alias Conveyor.Limits
+  alias Conveyor.Admission
   alias Google.Devtools.Build.V1, as: V1
 
   @spec publish_lifecycle_event(V1.PublishLifecycleEventRequest.t(), GRPC.Server.Stream.t()) ::
@@ -29,6 +29,9 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
 
       {:error, :not_found} ->
         raise not_found(req.build_event)
+
+      {:error, {:refused, reason}} ->
+        raise Admission.grpc_error(reason, ctx.limits)
 
       {:error, reason} ->
         raise GRPC.RPCError,
@@ -49,22 +52,22 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
     # order, as the writer commits them. Cowboy accepts replies from any process.
     %{ctx: %{api_key_id: key_id, limits: limits}} = stream.local
 
-    case Limits.acquire_stream(key_id, limits || Limits.defaults()) do
-      :ok ->
+    # The stream door: the one place a stream is refused before it starts (draining, the
+    # key's stream limit, a node that cannot commit in time).
+    case Admission.open_stream(key_id, limits) do
+      {:ok, ticket} ->
         try do
-          run_stream(requests, stream)
+          run_stream(requests, stream, ticket)
         after
-          Limits.release_stream(key_id)
+          Admission.close_stream(ticket)
         end
 
-      {:error, :too_many_streams} ->
-        raise GRPC.RPCError,
-          status: :resource_exhausted,
-          message: "too many concurrent streams for this API key (limit #{limits.max_streams})"
+      {:refuse, reason} ->
+        raise Admission.grpc_error(reason, limits)
     end
   end
 
-  defp run_stream(requests, stream) do
+  defp run_stream(requests, stream, ticket) do
     # A failed batch ends the RPC from the acker's side (it is linked and exits with an
     # UNAVAILABLE error), wherever this process is: reading, pushing or awaiting.
     acker = Acker.start(stream)
@@ -74,14 +77,21 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
                                     req,
                                   last ->
         ctx = context(stream, req.notification_keywords, req.project_id)
-        # Bazel only checks the sequence number, but echoing the stream id is what the API
-        # describes.
-        if last == 0, do: Acker.stream_id(acker, obe.stream_id)
+
+        # The first event names the build: the stream door's second half (a new build is
+        # refused before a build in progress), then the stream id to echo. Bazel only
+        # checks the sequence number, but echoing the stream id is what the API describes.
+        if last == 0 do
+          admit(Admission.build(ticket, Ingest.resumed?(ctx, obe)), ctx)
+          Acker.stream_id(acker, obe.stream_id)
+        end
 
         if Event.bes_kind(obe.event) == :component_stream_finished,
           do: Acker.final(acker, obe.sequence_number)
 
-        :ok = Limits.throttle(ctx.api_key_id, ctx.limits || Limits.defaults())
+        # The event door. A refused event was not handed to the session: it is never
+        # acknowledged, and the client resends it with everything after its last ack.
+        admit(Admission.event(ticket), ctx)
         Acker.note(acker, obe.sequence_number)
 
         case Ingest.push(ctx, obe, acker) do
@@ -116,6 +126,9 @@ defmodule Conveyor.Grpc.PublishBuildEventServer do
         raise Acker.failure(reason)
     end
   end
+
+  defp admit(:ok, _ctx), do: :ok
+  defp admit({:refuse, reason}, ctx), do: raise(Admission.grpc_error(reason, ctx.limits))
 
   # An invocation id that exists under another project. NOT_FOUND, the answer the HTTP
   # upload and the web give for such an id: to this key the build does not exist, and the

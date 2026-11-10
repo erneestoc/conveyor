@@ -194,7 +194,8 @@ defmodule ConveyorWeb.UploadController do
       project_id: key.project_id,
       project_slug: key.project.slug,
       api_key_id: key.id,
-      api_key_tags: key.default_tags
+      api_key_tags: key.default_tags,
+      limits: Conveyor.Limits.for_key(key)
     }
 
     stream_id = %V1.StreamId{build_id: uuid, invocation_id: uuid, component: :TOOL}
@@ -217,9 +218,22 @@ defmodule ConveyorWeb.UploadController do
       {:error, {_seq, :not_found}} ->
         {:error, 404, "no invocation #{uuid} in project #{key.project.slug}"}
 
+      # A door of admission refused the upload: the status says whether to come back
+      # (503: draining or overloaded) or to send less at once (429: the key's limit).
+      {:error, {_seq, {:refused, reason}}} ->
+        {status, message} = Conveyor.Admission.http_error(reason, ctx.limits)
+        {:error, status, message}
+
       {:error, {seq, reason}} ->
         {:error, 503, "ingest failed at event #{seq}: #{inspect(reason)}"}
     end
+  end
+
+  defp error(conn, status, message) when status in [429, 503] do
+    conn
+    |> put_resp_header("retry-after", "5")
+    |> put_status(status)
+    |> json(%{errors: %{detail: message}})
   end
 
   defp error(conn, status, message) do

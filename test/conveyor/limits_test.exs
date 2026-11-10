@@ -34,7 +34,6 @@ defmodule Conveyor.LimitsTest do
     assert :ok = Limits.release_stream(:k)
     assert :ok = Limits.release_stream(:k)
     assert :ok = Limits.release_stream(:k)
-    Process.sleep(20)
     assert Limits.streams(:k) == 0
     assert Limits.streams(:other) == 0
 
@@ -48,18 +47,13 @@ defmodule Conveyor.LimitsTest do
     limits = %{Limits.defaults() | max_streams: 2}
     for _ <- 1..3, do: assert(:ok = Limits.acquire_stream(nil, limits))
     assert Limits.total_streams() == 3
+    assert Limits.streams(nil) == 3
     assert :ok = Limits.acquire_stream(:k, limits)
-    assert Limits.total_streams() == 4
-
-    # Draining waits for them like for any other stream.
-    assert Conveyor.Drain.run(50) == :timeout
-    Conveyor.Drain.stop()
+    assert Limits.share() == {4, 2}
 
     for _ <- 1..3, do: assert(:ok = Limits.release_stream(nil))
     assert :ok = Limits.release_stream(:k)
-    wait_until(fn -> Limits.total_streams() == 0 end)
-    assert Conveyor.Drain.run(50) == :ok
-    Conveyor.Drain.stop()
+    assert Limits.share() == {0, 0}
   end
 
   defp wait_until(fun, tries \\ 50) do
@@ -70,11 +64,10 @@ defmodule Conveyor.LimitsTest do
     end
   end
 
-  test "token bucket slows callers down to the configured rate" do
-    limits = %{Limits.defaults() | max_events_per_second: 10}
-    {elapsed_us, _} = :timer.tc(fn -> for _ <- 1..15, do: :ok = Limits.throttle(:r, limits) end)
-    # 10 tokens are free, the next 5 arrive at 10/s: about half a second.
-    assert elapsed_us >= 350_000
-    assert :ok = Limits.throttle(nil, limits)
+  test "the token bucket holds one second of the rate and refills continuously" do
+    assert Enum.count(1..15, fn _ -> Limits.take_token(:r, 10) end) == 10
+    Process.sleep(120)
+    assert Limits.take_token(:r, 10)
+    refute Limits.take_token(:r, 10)
   end
 end

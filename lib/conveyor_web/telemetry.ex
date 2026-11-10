@@ -158,6 +158,25 @@ defmodule ConveyorWeb.Telemetry do
         description: "Live ingest workers (invocations in flight)"
       ),
       last_value("conveyor.ingest.streams.count", description: "Open BES streams"),
+      last_value("conveyor.admission.state.level",
+        description:
+          "Admission level of the node: 0 normal, 1 elevated (keys above their share lose new builds), 2 shedding (new builds refused), 3 critical (new streams refused, events of a share of open streams refused)"
+      ),
+      last_value("conveyor.admission.state.pressure",
+        description:
+          "Commit pressure as a fraction of the writer deadline (1.0: batches expire); the levels are entered at 0.15, 0.25 and 0.75"
+      ),
+      last_value("conveyor.admission.state.ready",
+        description: "1 while /health/ready answers 200"
+      ),
+      sum("conveyor.admission.refused.count",
+        tags: [:door, :reason],
+        description:
+          "Refusals by door (stream: at open; build: a new build at its first event or its lifecycle notification; event: the next event of an open stream) and reason (draining, overloaded, key_streams, key_share)"
+      ),
+      sum("conveyor.admission.slowed.count",
+        description: "Events delayed because their API key was above its event rate"
+      ),
       counter("conveyor.raw_log.put.count", description: "Raw-log objects written (blob mode)"),
       sum("conveyor.raw_log.put.bytes", description: "Raw-log bytes written (blob mode)"),
       counter("conveyor.raw_log.put_failed.count",
@@ -233,7 +252,14 @@ defmodule ConveyorWeb.Telemetry do
   @doc false
   def measure_ingest do
     :telemetry.execute([:conveyor, :ingest, :workers], %{count: workers()}, %{})
-    :telemetry.execute([:conveyor, :ingest, :streams], %{count: streams()}, %{})
+
+    :telemetry.execute(
+      [:conveyor, :ingest, :streams],
+      %{count: Conveyor.Admission.streams()},
+      %{}
+    )
+
+    Conveyor.Admission.measure()
     measure_writer_backlog()
     measure_oban()
     measure_raw_archive()
@@ -338,12 +364,6 @@ defmodule ConveyorWeb.Telemetry do
   # The poller can fire before the ingest supervision tree is up.
   defp workers do
     Registry.count(Conveyor.Ingest.Registry)
-  rescue
-    ArgumentError -> 0
-  end
-
-  defp streams do
-    Conveyor.Limits.total_streams()
   rescue
     ArgumentError -> 0
   end

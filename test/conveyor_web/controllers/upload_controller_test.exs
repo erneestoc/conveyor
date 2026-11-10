@@ -291,5 +291,46 @@ defmodule ConveyorWeb.UploadControllerTest do
            |> json_response(422)
   end
 
+  test "the BEP upload passes admission: 503 while the node sheds, 429 at the key's stream limit",
+       %{conn: conn, upload_key: key, project: project} do
+    on_exit(fn -> Conveyor.Admission.Sampler.inject([]) end)
+    headers = [{"x-api-key", key}]
+    events = Fixture.read!(fixture("test_failure"))
+
+    uuid =
+      Enum.find_value(events, fn e ->
+        match?(%{payload: {:started, _}}, e) && elem(e.payload, 1).uuid
+      end)
+
+    body = events |> Fixture.encode_all() |> IO.iodata_to_binary()
+    path = ~p"/api/v1/invocations/#{uuid}/bep"
+
+    Conveyor.Admission.Sampler.inject(signals: %{oldest_ms: 6_000})
+    refused = put_raw(conn, path, body, headers)
+
+    assert %{"errors" => %{"detail" => "this node is overloaded" <> _}} =
+             json_response(refused, 503)
+
+    assert get_resp_header(refused, "retry-after") == ["5"]
+    # Refused before anything was written.
+    assert Conveyor.Repo.get(Conveyor.Invocations.Invocation, uuid) == nil
+    Conveyor.Admission.Sampler.inject([])
+
+    {:ok, limited, limited_key} =
+      Projects.create_api_key(project, %{
+        name: "one",
+        scopes: ["upload"],
+        limits: %{"max_streams" => 1}
+      })
+
+    {:ok, _} = Conveyor.Admission.open_stream(limited.id, Conveyor.Limits.for_key(limited))
+
+    assert %{"errors" => %{"detail" => "too many concurrent streams" <> _}} =
+             put_raw(conn, path, body, [{"x-api-key", limited_key}]) |> json_response(429)
+
+    assert put_raw(conn, path, body, headers) |> json_response(202)
+    :ok = Conveyor.IngestCase.await_worker_exit(uuid)
+  end
+
   defp fixture(name), do: Conveyor.GrpcCase.fixture(name)
 end

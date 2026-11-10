@@ -156,6 +156,40 @@ if config_env() == :prod do
       String.to_integer(System.get_env("MAX_EVENTS_PER_SECOND_PER_KEY", "5000")),
     max_log_bytes: String.to_integer(System.get_env("MAX_LOG_MB", "256")) * 1024 * 1024
 
+  # Admission (Conveyor.Admission; docs/operations.md "Overload"). ADMISSION=off keeps the
+  # per-key limits and draining and never refuses for pressure. ADMISSION_THRESHOLDS is
+  # "enter/exit" per level (elevated, shedding, critical) as fractions of the writer's
+  # deadline, e.g. "0.15/0.05,0.25/0.10,0.75/0.50".
+  admission_thresholds =
+    case System.get_env("ADMISSION_THRESHOLDS") do
+      nil ->
+        []
+
+      spec ->
+        pairs =
+          for pair <- String.split(spec, ","),
+              do: pair |> String.split("/") |> Enum.map(&String.to_float(String.trim(&1)))
+
+        if length(pairs) != 3 or Enum.any?(pairs, &(length(&1) != 2)),
+          do:
+            raise(
+              "ADMISSION_THRESHOLDS must be three enter/exit pairs, e.g. 0.15/0.05,0.25/0.10,0.75/0.50"
+            )
+
+        [
+          enter: pairs |> Enum.map(&hd/1) |> List.to_tuple(),
+          exit: pairs |> Enum.map(&List.last/1) |> List.to_tuple()
+        ]
+    end
+
+  config :conveyor,
+         Conveyor.Admission,
+         [
+           enabled: System.get_env("ADMISSION", "on") not in ~w(off false 0),
+           max_backlog_bytes:
+             String.to_integer(System.get_env("ADMISSION_MAX_BACKLOG_MB", "512")) * 1024 * 1024
+         ] ++ admission_thresholds
+
   # Behind a layer-7 TLS terminator that sets x-forwarded-proto, FORCE_SSL=true redirects
   # http to https and sends HSTS (health paths stay reachable over plain HTTP).
   config :conveyor, :force_ssl, System.get_env("FORCE_SSL") in ~w(true 1)

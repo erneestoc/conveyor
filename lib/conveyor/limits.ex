@@ -1,6 +1,7 @@
 defmodule Conveyor.Limits do
   @moduledoc """
-  Per-API-key ingest limits, enforced without a database round trip:
+  The per-key bookkeeping behind `Conveyor.Admission` (which decides; this module counts),
+  without a database round trip:
 
     * `max_streams` — concurrent BES streams per key (`RESOURCE_EXHAUSTED` beyond it)
     * `max_events_per_second` — token bucket per key; senders above it are slowed down
@@ -27,7 +28,9 @@ defmodule Conveyor.Limits do
   @impl true
   def init(_opts) do
     :ets.new(@table, [:named_table, :public, :set, write_concurrency: true])
-    {:ok, %{refs: %{}}}
+    # refs: monitor => {key, pid}; owners: {key, pid} => its monitors (a release finds its
+    # slot without scanning every stream of the node).
+    {:ok, %{refs: %{}, owners: %{}}}
   end
 
   # Stream slots are handed out by this process so that a monitor on the stream handler
@@ -41,24 +44,30 @@ defmodule Conveyor.Limits do
     else
       :ets.insert(@table, {{:streams, key_id}, count + 1})
       ref = Process.monitor(pid)
-      {:reply, :ok, %{state | refs: Map.put(state.refs, ref, {key_id, pid})}}
+      owner = {key_id, pid}
+
+      {:reply, :ok,
+       %{
+         state
+         | refs: Map.put(state.refs, ref, owner),
+           owners: Map.update(state.owners, owner, [ref], &[ref | &1])
+       }}
     end
   end
 
   def handle_call(:reset, _from, state) do
     Enum.each(state.refs, fn {ref, _} -> Process.demonitor(ref, [:flush]) end)
-    {:reply, :ok, %{state | refs: %{}}}
+    {:reply, :ok, %{state | refs: %{}, owners: %{}}}
   end
 
-  @impl true
-  def handle_cast({:release, key_id, pid}, state) do
-    case Enum.find(state.refs, fn {_ref, {k, p}} -> k == key_id and p == pid end) do
-      {ref, _} ->
+  def handle_call({:release, key_id, pid}, _from, state) do
+    case state.owners do
+      %{{^key_id, ^pid} => [ref | _]} ->
         Process.demonitor(ref, [:flush])
-        {:noreply, decrement(state, ref)}
+        {:reply, :ok, decrement(state, ref)}
 
-      nil ->
-        {:noreply, state}
+      _ ->
+        {:reply, :ok, state}
     end
   end
 
@@ -71,9 +80,16 @@ defmodule Conveyor.Limits do
       {nil, _} ->
         state
 
-      {{key_id, _pid}, refs} ->
+      {{key_id, _pid} = owner, refs} ->
         :ets.update_counter(@table, {:streams, key_id}, {2, -1, 0, 0}, {{:streams, key_id}, 0})
-        %{state | refs: refs}
+
+        owners =
+          case List.delete(state.owners[owner], ref) do
+            [] -> Map.delete(state.owners, owner)
+            rest -> Map.put(state.owners, owner, rest)
+          end
+
+        %{state | refs: refs, owners: owners}
     end
   end
 
@@ -120,11 +136,13 @@ defmodule Conveyor.Limits do
     do: GenServer.call(__MODULE__, {:acquire, key_id, max, self()})
 
   @spec release_stream(term()) :: :ok
-  def release_stream(nil), do: GenServer.cast(__MODULE__, {:release, @anonymous, self()})
-  def release_stream(key_id), do: GenServer.cast(__MODULE__, {:release, key_id, self()})
+  def release_stream(nil), do: GenServer.call(__MODULE__, {:release, @anonymous, self()})
+  def release_stream(key_id), do: GenServer.call(__MODULE__, {:release, key_id, self()})
 
-  @doc "Current concurrent stream count for a key."
+  @doc "Current concurrent stream count for a key (`nil`: the streams without a key)."
   @spec streams(term()) :: non_neg_integer()
+  def streams(nil), do: streams(@anonymous)
+
   def streams(key_id) do
     case :ets.lookup(@table, {:streams, key_id}) do
       [{_, n}] -> n
@@ -133,26 +151,14 @@ defmodule Conveyor.Limits do
   end
 
   @doc """
-  Takes one event token for the key, sleeping in small steps while the bucket is empty.
-  Senders above their rate are slowed down rather than failed: a failed BES stream makes
-  Bazel resend everything, which is the opposite of what a rate limit wants.
+  Takes one event token for the key: `false` when its bucket is empty (the caller waits and
+  asks again; `Conveyor.Admission.event/1` does).
   """
-  @spec throttle(term(), limits()) :: :ok
-  def throttle(nil, _limits), do: :ok
-
-  def throttle(key_id, %{max_events_per_second: rate}) do
-    if take_token(key_id, rate) do
-      :ok
-    else
-      Process.sleep(10)
-      throttle(key_id, %{max_events_per_second: rate})
-    end
-  end
-
+  @spec take_token(term(), pos_integer()) :: boolean()
   # Token bucket with capacity = rate, refilled continuously; stored as {tokens, last_ms}.
   # The bucket row is replaced atomically enough for our purposes (contention only costs a
   # token miscount within one millisecond).
-  defp take_token(key_id, rate) do
+  def take_token(key_id, rate) do
     now = System.monotonic_time(:millisecond)
 
     {tokens, last} =
@@ -174,8 +180,13 @@ defmodule Conveyor.Limits do
 
   @doc "Concurrent streams across all keys on this node."
   @spec total_streams() :: non_neg_integer()
-  def total_streams do
-    :ets.select(@table, [{{{:streams, :_}, :"$1"}, [], [:"$1"]}]) |> Enum.sum()
+  def total_streams, do: elem(share(), 0)
+
+  @doc "`{streams, keys}`: the node's open streams and how many keys hold at least one."
+  @spec share() :: {non_neg_integer(), non_neg_integer()}
+  def share do
+    counts = :ets.select(@table, [{{{:streams, :_}, :"$1"}, [{:>, :"$1", 0}], [:"$1"]}])
+    {Enum.sum(counts), length(counts)}
   end
 
   @doc "Clears all counters (tests)."

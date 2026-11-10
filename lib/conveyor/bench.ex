@@ -145,7 +145,7 @@ defmodule Conveyor.Bench do
   defp live_streams, do: Registry.count(Conveyor.Ingest.Registry)
 
   # Open BES streams; workers linger after a build, so they are counted separately.
-  defp open_streams, do: Conveyor.Limits.total_streams()
+  defp open_streams, do: Conveyor.Admission.streams()
 
   # --- load generator as a child process -----------------------------------------------
 

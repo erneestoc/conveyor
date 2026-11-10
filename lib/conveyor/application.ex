@@ -18,6 +18,7 @@ defmodule Conveyor.Application do
       Conveyor.Watch,
       Conveyor.Projects.ApiKeyCache,
       Conveyor.Limits,
+      Conveyor.Admission.Sampler,
       Conveyor.Ingest.Supervisor,
       # Start a worker by calling: Conveyor.Worker.start_link(arg)
       # {Conveyor.Worker, arg},
@@ -46,7 +47,7 @@ defmodule Conveyor.Application do
   # SIGTERM: stop taking new streams, let balancers notice, finish open streams, then stop.
   @impl true
   def prep_stop(state) do
-    Conveyor.Drain.run(Conveyor.Drain.timeout_ms())
+    Conveyor.Admission.drain(Conveyor.Admission.drain_timeout_ms())
     state
   end
 
