@@ -32,8 +32,9 @@ defmodule Conveyor.Ingest.Session do
       sequence is refused (`{:error, :out_of_order}`) unless the session is quiet, in which
       case it asks for the row again (`:reload`) and judges the event against that.
     * **Acknowledgement is commit.** `{:ack, acker, seq}` is only ever emitted for a
-      sequence the row holds: from `committed/2`, or for a resend at or below the committed
-      sequence. Acks of one batch are emitted in ascending order.
+      sequence the row holds, from `committed/2`; a resend at or below the committed
+      sequence gets `{:ack_again, acker, seq}` (the same promise, told apart so that its
+      near-zero latency stays out of the ack histogram). Acks of one batch are emitted in ascending order.
     * **Every waiter hears.** A failed batch fails everything in hand: every connection
       waiting on any batch (in flight or still open) gets `{:nack, acker, seq, reason}`,
       every blocked or waiting caller gets a reply, and the session stops. It never
@@ -53,6 +54,7 @@ defmodule Conveyor.Ingest.Session do
 
       {:reply, from, term}            answer a caller (GenServer.reply)
       {:ack, acker, seq}              the sequence is committed; tell the connection
+      {:ack_again, acker, seq}        a resend of a sequence committed earlier; tell the connection
       {:nack, acker, seq, reason}     the sequence will not be acknowledged by this session
       {:submit, batch}                hand a batch to the writer (outcome: committed/failed)
       {:arm, name, ms}                (re)start the named timer: :flush :idle :linger :broadcast :refusal
@@ -113,6 +115,7 @@ defmodule Conveyor.Ingest.Session do
   @type effect ::
           {:reply, from(), term()}
           | {:ack, acker(), pos_integer()}
+          | {:ack_again, acker(), pos_integer()}
           | {:nack, acker(), pos_integer(), term()}
           | {:submit, Batch.t()}
           | {:arm, timer(), non_neg_integer()}
@@ -379,7 +382,7 @@ defmodule Conveyor.Ingest.Session do
     cond do
       # Already committed (a resend after a retry): acknowledged at once.
       seq <= s.committed_seq ->
-        {s, [{:ack, acker, seq}, {:reply, from, :ok} | fx]}
+        {s, [{:ack_again, acker, seq}, {:reply, from, :ok} | fx]}
 
       # Absorbed but not committed: a client that reconnected to this node resends what it
       # never saw acknowledged. The ack must wait for the commit, on this connection;

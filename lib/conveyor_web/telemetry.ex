@@ -13,6 +13,8 @@ defmodule ConveyorWeb.Telemetry do
 
   @impl true
   def init(_arg) do
+    :ok = Conveyor.Histogram.attach(histograms())
+
     children = [
       {:telemetry_poller, measurements: periodic_measurements(), period: 10_000},
       {TelemetryMetricsPrometheus.Core, metrics: prometheus_metrics(), name: :conveyor_prometheus}
@@ -21,9 +23,13 @@ defmodule ConveyorWeb.Telemetry do
     Supervisor.init(children, strategy: :one_for_one)
   end
 
-  @doc "Prometheus exposition text."
-  def scrape, do: TelemetryMetricsPrometheus.Core.scrape(:conveyor_prometheus)
+  @doc "Prometheus exposition text: the library's counters and gauges, then our histograms."
+  def scrape,
+    do:
+      TelemetryMetricsPrometheus.Core.scrape(:conveyor_prometheus) <> Conveyor.Histogram.scrape()
 
+  # Up to 60 s: the client gives up at 30 s, and a histogram that ends at 1 s reads every
+  # overload as "above one second".
   @ack_buckets [
     100,
     250,
@@ -37,33 +43,96 @@ defmodule ConveyorWeb.Telemetry do
     100_000,
     250_000,
     500_000,
-    1_000_000
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    10_000_000,
+    20_000_000,
+    30_000_000,
+    60_000_000
   ]
+
+  @ms_buckets [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]
+
+  @doc """
+  The histograms (`Conveyor.Histogram`): fixed buckets on counters, so a node nobody
+  scrapes holds no samples. No labels; a metric that needs one is a counter or a gauge.
+  """
+  def histograms do
+    ms = System.convert_time_unit(1, :millisecond, :native)
+
+    [
+      %{
+        name: "conveyor.ingest.ack.latency_us",
+        event: [:conveyor, :ingest, :ack],
+        measurement: :latency_us,
+        buckets: @ack_buckets,
+        count_as: "conveyor.ingest.ack.count",
+        count_description: "Build events acknowledged after their commit",
+        description:
+          "Time from receiving a build event to acknowledging its commit (microseconds); resent events that were already committed are counted in conveyor_ingest_ack_resent_count instead"
+      },
+      %{
+        name: "conveyor.ingest.writer.flush.duration",
+        event: [:conveyor, :ingest, :writer, :flush],
+        measurement: :duration,
+        per_unit: ms,
+        buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000],
+        description: "Group commit duration per writer shard (ms)"
+      },
+      %{
+        name: "conveyor.ingest.writer.flush.wait",
+        event: [:conveyor, :ingest, :writer, :flush],
+        measurement: :wait,
+        buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000, 30_000],
+        description:
+          "How long the oldest batch of a group commit waited for its outcome, from the worker's submit (ms)"
+      },
+      %{
+        name: "conveyor.ingest.writer.flush.events",
+        event: [:conveyor, :ingest, :writer, :flush],
+        measurement: :events,
+        buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000],
+        description: "Events per group commit"
+      },
+      %{
+        name: "conveyor.repo.query.total_time",
+        event: [:conveyor, :repo, :query],
+        measurement: :total_time,
+        per_unit: ms,
+        buckets: @ms_buckets,
+        description: "Database query time (ms)"
+      },
+      %{
+        name: "conveyor.repo.query.queue_time",
+        event: [:conveyor, :repo, :query],
+        measurement: :queue_time,
+        per_unit: ms,
+        buckets: @ms_buckets,
+        description: "Time waiting for a database connection (ms)"
+      },
+      %{
+        name: "phoenix.endpoint.stop.duration",
+        event: [:phoenix, :endpoint, :stop],
+        measurement: :duration,
+        per_unit: ms,
+        buckets: @ms_buckets,
+        description: "HTTP request duration (ms)"
+      }
+    ]
+  end
 
   @doc "Metrics exported to Prometheus."
   def prometheus_metrics do
     [
-      distribution("conveyor.ingest.ack.latency_us",
-        description: "Time from receiving a build event to acknowledging it (microseconds)",
-        reporter_options: [buckets: @ack_buckets]
+      sum("conveyor.ingest.ack.resent.count",
+        description:
+          "Acknowledgements of resent events that were already committed (a client that retried); not in the latency histogram"
       ),
-      counter("conveyor.ingest.ack.count", description: "Build events acknowledged"),
       sum("conveyor.ingest.batch.committed.events",
         description: "Build events committed to the database"
       ),
       counter("conveyor.ingest.batch.committed.count", description: "Batches committed"),
-      distribution("conveyor.ingest.writer.flush.duration",
-        unit: {:native, :millisecond},
-        reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000]],
-        description: "Group commit duration per writer shard (ms)"
-      ),
-      distribution("conveyor.ingest.writer.flush.wait",
-        reporter_options: [
-          buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000, 30_000]
-        ],
-        description:
-          "How long the oldest batch of a group commit waited for its outcome, from the worker's submit (ms)"
-      ),
       last_value("conveyor.ingest.writer.backlog.batches",
         tags: [:shard],
         description: "Batches handed to a writer shard and not answered yet"
@@ -84,10 +153,6 @@ defmodule ConveyorWeb.Telemetry do
       ),
       sum("conveyor.ingest.writer.expired.count",
         description: "Batches that passed their deadline before their commit could start"
-      ),
-      distribution("conveyor.ingest.writer.flush.events",
-        reporter_options: [buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000]],
-        description: "Events per group commit"
       ),
       last_value("conveyor.ingest.workers.count",
         description: "Live ingest workers (invocations in flight)"
@@ -131,21 +196,6 @@ defmodule ConveyorWeb.Telemetry do
       last_value("conveyor.raw_archive.overdue.seconds",
         description:
           "How long the oldest finished build has waited past RAW_ARCHIVE_AFTER_HOURS (0 when the archive is keeping up; the partition drop holds days back meanwhile)"
-      ),
-      distribution("conveyor.repo.query.total_time",
-        unit: {:native, :millisecond},
-        reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]],
-        description: "Database query time (ms)"
-      ),
-      distribution("conveyor.repo.query.queue_time",
-        unit: {:native, :millisecond},
-        reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]],
-        description: "Time waiting for a database connection (ms)"
-      ),
-      distribution("phoenix.endpoint.stop.duration",
-        unit: {:native, :millisecond},
-        reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 5_000]],
-        description: "HTTP request duration (ms)"
       ),
       last_value("vm.memory.total", unit: :byte),
       last_value("vm.total_run_queue_lengths.total"),

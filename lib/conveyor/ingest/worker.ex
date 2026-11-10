@@ -214,6 +214,11 @@ defmodule Conveyor.Ingest.Worker do
     w
   end
 
+  defp effect({:ack_again, acker, seq}, w) do
+    send(acker, {:ack, seq, :resent})
+    w
+  end
+
   defp effect({:nack, acker, seq, reason}, w) do
     send(acker, {:ack_failed, seq, reason})
     w

@@ -47,7 +47,9 @@ defmodule Conveyor.Ingest.WriterDownTest do
     # restarted writer commits.
     for seq <- 1..n, do: assert(:ok = Ingest.push(ctx, obe.(seq), self()))
     assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), n + 1, @marker), self())
-    for seq <- 1..(n + 1), do: assert_receive({:ack, ^seq}, 5_000)
+    # The first event committed before the writer died: its resend is told apart.
+    assert_receive {:ack, 1, :resent}, 5_000
+    for seq <- 2..(n + 1), do: assert_receive({:ack, ^seq}, 5_000)
     assert :ok = await_worker_exit(id)
     assert :ok = Verify.check(id, n)
   end

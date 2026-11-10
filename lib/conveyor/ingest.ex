@@ -42,7 +42,8 @@ defmodule Conveyor.Ingest do
   @doc """
   Hands one `OrderedBuildEvent` of the tool event stream to its worker. Returns once the
   event is absorbed (or later, under backpressure); `acker` receives `{:ack, seq}` when the
-  event is committed and may then acknowledge it to Bazel, or `{:ack_failed, seq, reason}`.
+  event is committed and may then acknowledge it to Bazel (`{:ack, seq, :resent}` for a
+  resend of an event committed earlier), or `{:ack_failed, seq, reason}`.
   """
   @spec push(Context.t(), V1.OrderedBuildEvent.t(), pid()) :: push_result()
   def push(
@@ -70,6 +71,7 @@ defmodule Conveyor.Ingest do
 
       receive do
         {:ack, ^seq} -> :ok
+        {:ack, ^seq, :resent} -> :ok
         {:ack_failed, ^seq, reason} -> {:error, reason}
       after
         timeout -> {:error, :timeout}
@@ -107,7 +109,9 @@ defmodule Conveyor.Ingest do
   defp await_acks(last, timeout) do
     receive do
       {:ack, ^last} -> :ok
+      {:ack, ^last, :resent} -> :ok
       {:ack, _seq} -> await_acks(last, timeout)
+      {:ack, _seq, :resent} -> await_acks(last, timeout)
       {:ack_failed, seq, reason} -> {:error, {seq, reason}}
     after
       timeout -> {:error, {last, :timeout}}

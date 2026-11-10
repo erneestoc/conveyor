@@ -1,5 +1,5 @@
 defmodule Conveyor.Grpc.AckerTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Conveyor.Grpc.Acker
 
@@ -29,6 +29,33 @@ defmodule Conveyor.Grpc.AckerTest do
     assert :ok = Acker.await(acker, 3, 1_000)
     assert_received {:reply, %{sequence_number: 1}}
     assert_received {:reply, %{sequence_number: 3}}
+  end
+
+  test "a resent, already committed event is acknowledged and counted apart from latency" do
+    Conveyor.Histogram.reset()
+    test = self()
+    id = {__MODULE__, make_ref()}
+
+    :telemetry.attach(
+      id,
+      [:conveyor, :ingest, :ack, :resent],
+      fn _, m, _, _ -> send(test, {:resent, m.count}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(id) end)
+
+    acker = Acker.start(stream())
+    Acker.note(acker, 1)
+    Acker.note(acker, 2)
+    send(acker, {:ack, 1, :resent})
+    send(acker, {:ack, 2})
+    assert :ok = Acker.await(acker, 2, 1_000)
+    assert_received {:reply, %{sequence_number: 1}}
+    assert_received {:reply, %{sequence_number: 2}}
+    assert_received {:resent, 1}
+    # Only the committed event's latency is in the histogram.
+    assert %{count: 1} = Conveyor.Histogram.snapshot("conveyor.ingest.ack.latency_us")
   end
 
   test "await without a final marker completes at the last sent sequence" do

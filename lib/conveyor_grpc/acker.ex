@@ -94,14 +94,19 @@ defmodule Conveyor.Grpc.Acker do
         loop(%{state | sent: Map.put(state.sent, seq, t0)})
 
       {:ack, seq} ->
-        GRPC.Server.send_reply(state.stream, %V1.PublishBuildToolEventStreamResponse{
-          stream_id: state.stream_id,
-          sequence_number: seq
-        })
-
+        reply(state, seq)
         {t0, sent} = Map.pop(state.sent, seq)
         if t0, do: emit_latency(t0)
         state = %{state | acked: max(state.acked, seq), sent: sent}
+        if done?(state), do: finish(state), else: loop(state)
+
+      # A resend of an event committed before this connection: acknowledged at once, and
+      # counted apart. Its latency says nothing about commits, and a resend storm of them
+      # would pull the histogram's percentiles down exactly when they matter.
+      {:ack, seq, :resent} ->
+        reply(state, seq)
+        :telemetry.execute([:conveyor, :ingest, :ack, :resent], %{count: 1}, %{})
+        state = %{state | acked: max(state.acked, seq), sent: Map.delete(state.sent, seq)}
         if done?(state), do: finish(state), else: loop(state)
 
       {:ack_failed, _seq, reason} ->
@@ -125,6 +130,13 @@ defmodule Conveyor.Grpc.Acker do
         state = %{state | final: state.final || last_seq}
         if done?(state), do: finish(state), else: loop(state)
     end
+  end
+
+  defp reply(state, seq) do
+    GRPC.Server.send_reply(state.stream, %V1.PublishBuildToolEventStreamResponse{
+      stream_id: state.stream_id,
+      sequence_number: seq
+    })
   end
 
   # Time from receiving an event on the wire to sending its acknowledgement.

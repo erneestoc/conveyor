@@ -18,7 +18,7 @@ defmodule Conveyor.Ingest.SessionTest do
       {:lifecycle, kind}          a lifecycle notification on this node
 
   Effects are compared in a protocol view: `{:reply, seq | :lifecycle, result}`,
-  `{:ack, conn, seq}`, `{:nack, conn, seq, reason}`, `{:submit, first..last}` (or
+  `{:ack, conn, seq}`, `{:ack_again, conn, seq}` (a resend of a committed sequence), `{:nack, conn, seq, reason}`, `{:submit, first..last}` (or
   `{:submit, range, :final}`; `{:submit, :waiters}` for a batch that only carries a caller), `{:arm | :cancel, :flush | :linger | :refusal}`, `:reload`,
   `:unregister`, `:stop`. The idle and broadcast timers, telemetry, logs and broadcasts are
   left out unless a scenario lists them in `:also`.
@@ -64,8 +64,8 @@ defmodule Conveyor.Ingest.SessionTest do
     # --- Push: the dedup rule (Ingest_fixed.cfg / Ingest_current.cfg) ------------------------
     {"a resend at or below the committed sequence is acknowledged at once", [loaded: [last: 5]],
      [
-       {{:push, 3, :c2}, [{:reply, 3, :ok}, {:ack, :c2, 3}]},
-       {{:push, 5, :c2}, [{:reply, 5, :ok}, {:ack, :c2, 5}]},
+       {{:push, 3, :c2}, [{:reply, 3, :ok}, {:ack_again, :c2, 3}]},
+       {{:push, 5, :c2}, [{:reply, 5, :ok}, {:ack_again, :c2, 5}]},
        {{:push, 6, :c2}, [{:arm, :flush}, {:reply, 6, :ok}]}
      ]},
     {"a resend of an absorbed, unflushed event is acknowledged only by its commit, on both connections",
@@ -113,7 +113,7 @@ defmodule Conveyor.Ingest.SessionTest do
      [
        {{:push, 6, :c1}, [:reload]},
        {{:loaded, [last: 9]},
-        [{:cancel, :flush}, {:cancel, :linger}, {:reply, 6, :ok}, {:ack, :c1, 6}]}
+        [{:cancel, :flush}, {:cancel, :linger}, {:reply, 6, :ok}, {:ack_again, :c1, 6}]}
      ]},
     # --- back-pressure (not modelled) -------------------------------------------------------
     {"back-pressure: past max_unacked_events the push is answered by the next commit",
@@ -188,8 +188,8 @@ defmodule Conveyor.Ingest.SessionTest do
     {"outcome unknown, the batch did commit: the next session acknowledges the resend from the row",
      [loaded: [last: 2]],
      [
-       {{:push, 1, :c2}, [{:reply, 1, :ok}, {:ack, :c2, 1}]},
-       {{:push, 2, :c2}, [{:reply, 2, :ok}, {:ack, :c2, 2}]},
+       {{:push, 1, :c2}, [{:reply, 1, :ok}, {:ack_again, :c2, 1}]},
+       {{:push, 2, :c2}, [{:reply, 2, :ok}, {:ack_again, :c2, 2}]},
        {{:push, 3, :c2}, [{:arm, :flush}, {:reply, 3, :ok}]}
      ]},
     {"outcome unknown, the batch did not commit: the next session absorbs the resend",
@@ -204,7 +204,7 @@ defmodule Conveyor.Ingest.SessionTest do
        {{:push, 1, :c1}, [{:arm, :flush}, {:reply, 1, :ok}]},
        {{:marker, 2, :c1}, [{:cancel, :flush}, {:submit, 1..2, :final}, {:reply, 2, :ok}]},
        {{:commit, 1}, [{:ack, :c1, 1}, {:ack, :c1, 2}, {:arm, :linger}]},
-       {{:push, 2, :c2}, [{:reply, 2, :ok}, {:ack, :c2, 2}]},
+       {{:push, 2, :c2}, [{:reply, 2, :ok}, {:ack_again, :c2, 2}]},
        {{:timer, :idle}, []},
        {{:timer, :linger}, [:stop]}
      ]},
@@ -226,7 +226,7 @@ defmodule Conveyor.Ingest.SessionTest do
     {"a session for a finished build only lingers and answers resends",
      [loaded: [last: 4, finished: true]],
      [
-       {{:push, 4, :c1}, [{:reply, 4, :ok}, {:ack, :c1, 4}]},
+       {{:push, 4, :c1}, [{:reply, 4, :ok}, {:ack_again, :c1, 4}]},
        {{:timer, :idle}, []},
        {{:timer, :linger}, [:stop]}
      ]},
@@ -285,7 +285,7 @@ defmodule Conveyor.Ingest.SessionTest do
        {{:push, 1, :c1}, [{:arm, :flush}, {:reply, 1, :ok}]},
        {{:timer, :idle}, [{:cancel, :flush}, {:submit, 1..1, :final}]},
        {{:commit, 1}, [{:ack, :c1, 1}, {:arm, :linger}]},
-       {{:push, 1, :c2}, [{:reply, 1, :ok}, {:ack, :c2, 1}]},
+       {{:push, 1, :c2}, [{:reply, 1, :ok}, {:ack_again, :c2, 1}]},
        {{:timer, :linger}, [:stop]}
      ]},
     # --- tenancy ------------------------------------------------------------------------------
@@ -393,6 +393,9 @@ defmodule Conveyor.Ingest.SessionTest do
         [{:reply, seq, result}]
 
       {:ack, _, _} = ack ->
+        [ack]
+
+      {:ack_again, _, _} = ack ->
         [ack]
 
       {:nack, _, _, _} = nack ->
