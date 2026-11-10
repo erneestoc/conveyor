@@ -4,8 +4,8 @@ defmodule Conveyor.RawLogS3Test do
   with `mix test --only s3` and the environment described in `Conveyor.Blobs.S3ContractTest`
   (the local MinIO: bucket `conveyor-test`, endpoint `http://localhost:9000`, path style,
   the credentials from the `chumti-minio` container's environment). Covers
-  `Conveyor.Blobs.S3.put_object/3`, `get_range/4` and `delete/2` for a raw-log key, and
-  `Conveyor.RawLog` over the S3 adapter: put, coalesced ranged reads and the sweep.
+  `Conveyor.RawLog` over the S3 adapter: put, coalesced ranged reads and the sweep (the
+  adapter's own contract is in `s3_contract_test.exs`).
   """
   use Conveyor.DataCase, async: false
 
@@ -34,26 +34,6 @@ defmodule Conveyor.RawLogS3Test do
     Application.put_env(:conveyor, Blobs, adapter: :s3, s3: s3)
     on_exit(fn -> Application.put_env(:conveyor, Blobs, prev) end)
     {:ok, opts: Keyword.put(s3, :project_prefix, nil)}
-  end
-
-  test "put_object, get_range (full, partial, past the end, missing) and delete", %{opts: opts} do
-    key = RawLog.new_key(7)
-    body = :crypto.strong_rand_bytes(300_000)
-
-    assert {:error, :not_found} = S3.get_range(key, 0, 10, opts)
-    assert :ok = S3.put_object(key, body, opts)
-
-    assert {:ok, ^body} = S3.get_range(key, 0, byte_size(body), opts)
-    assert {:ok, part} = S3.get_range(key, 100_000, 50_000, opts)
-    assert part == binary_part(body, 100_000, 50_000)
-    assert {:ok, <<_::binary-size(1)>>} = S3.get_range(key, byte_size(body) - 1, 1, opts)
-
-    # A range that runs past the end is a short read, never silently truncated.
-    assert {:error, {:short_read, 1000}} = S3.get_range(key, byte_size(body) - 1000, 5000, opts)
-
-    assert :ok = S3.delete(key, opts)
-    assert {:error, :not_found} = S3.get_range(key, 0, 10, opts)
-    assert :ok = S3.delete(key, opts)
   end
 
   test "RawLog over S3: put, coalesced ranged reads, sweep" do

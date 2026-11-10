@@ -15,6 +15,14 @@ defmodule Conveyor.Blobs.OneShot do
   @impl true
   defdelegate delete(digest, opts), to: Disk
 
+  # Keyed objects are read by range into a binary: nothing to enumerate twice.
+  @impl true
+  defdelegate put_object(key, iodata, opts), to: Disk
+  @impl true
+  defdelegate get_range(key, offset, length, opts), to: Disk
+  @impl true
+  defdelegate delete_objects(keys, opts), to: Disk
+
   @impl true
   def stream(digest, opts) do
     with {:ok, inner} <- Disk.stream(digest, opts) do

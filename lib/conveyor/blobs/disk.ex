@@ -6,6 +6,9 @@ defmodule Conveyor.Blobs.Disk do
 
   Writes go to a temporary file in the same directory and are renamed into place, so a
   crash mid-write never leaves a partial blob under its final name.
+
+  Keyed objects (the raw log) are files at `<dir>/<key>`, written durably
+  (`put_object/3`).
   """
   @behaviour Conveyor.Blobs.Adapter
 
@@ -44,6 +47,118 @@ defmodule Conveyor.Blobs.Disk do
       :ok -> :ok
       {:error, :enoent} -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # --- keyed objects ----------------------------------------------------------------------
+
+  @doc """
+  Writes `<dir>/<key>`. An acknowledgement follows this write, so `:ok` means the object
+  survives a crash of the machine: the bytes go to a temporary name and are synced, the
+  rename makes the object appear whole or not at all, and the directory is synced so the
+  name is on disk too (as are the directories this call had to create). `fsync: false`
+  skips the syncs and keeps the rename.
+  """
+  @impl true
+  def put_object(key, iodata, opts) do
+    root = Keyword.fetch!(opts, :dir)
+    path = object_path(key, opts)
+    dir = Path.dirname(path)
+    sync? = Keyword.get(opts, :fsync, true)
+    tmp = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    result =
+      with :ok <- ensure_dir(root, dir, sync?),
+           {:ok, io} <- :file.open(tmp, [:write, :raw, :binary]),
+           :ok <- write_and_close(io, iodata, sync?),
+           :ok <- :file.rename(tmp, path) do
+        if sync?, do: sync_dir(dir), else: :ok
+      end
+
+    if result != :ok, do: File.rm(tmp)
+    result
+  end
+
+  defp write_and_close(io, iodata, sync?) do
+    with :ok <- :file.write(io, iodata),
+         :ok <- if(sync?, do: :file.sync(io), else: :ok) do
+      :file.close(io)
+    else
+      error ->
+        :file.close(io)
+        error
+    end
+  end
+
+  defp ensure_dir(root, dir, sync?) do
+    if File.dir?(dir) do
+      :ok
+    else
+      with :ok <- File.mkdir_p(dir) do
+        if sync?, do: sync_up(Path.dirname(dir), root), else: :ok
+      end
+    end
+  end
+
+  # New directories are entries of their parents: sync those up to the store's root.
+  defp sync_up(dir, root) do
+    with :ok <- sync_dir(dir) do
+      if dir == root or not String.starts_with?(dir, root),
+        do: :ok,
+        else: sync_up(Path.dirname(dir), root)
+    end
+  end
+
+  defp sync_dir(dir) do
+    with {:ok, io} <- :file.open(dir, [:read, :raw, :directory]) do
+      result = :file.sync(io)
+      :file.close(io)
+      result
+    end
+  end
+
+  @impl true
+  def get_range(key, offset, length, opts) do
+    case :file.open(object_path(key, opts), [:read, :binary, :raw]) do
+      {:ok, io} ->
+        try do
+          case :file.pread(io, offset, length) do
+            {:ok, data} when byte_size(data) == length -> {:ok, data}
+            {:ok, _} -> {:error, :short_read}
+            :eof -> {:error, :short_read}
+            {:error, reason} -> {:error, reason}
+          end
+        after
+          :file.close(io)
+        end
+
+      {:error, :enoent} ->
+        {:error, :not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @impl true
+  def delete_objects(keys, opts) do
+    {deleted, failed} =
+      Enum.reduce(keys, {[], []}, fn key, {deleted, failed} ->
+        case File.rm(object_path(key, opts)) do
+          :ok -> {[key | deleted], failed}
+          {:error, :enoent} -> {[key | deleted], failed}
+          {:error, reason} -> {deleted, [{key, reason} | failed]}
+        end
+      end)
+
+    {Enum.reverse(deleted), Enum.reverse(failed)}
+  end
+
+  @doc "Absolute path of a keyed object. The key is a relative path without `..`."
+  def object_path(key, opts) do
+    case Path.safe_relative(key) do
+      {:ok, relative} -> Path.join(Keyword.fetch!(opts, :dir), relative)
+      :error -> raise ArgumentError, "object key #{inspect(key)} leaves the store"
     end
   end
 

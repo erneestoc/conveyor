@@ -14,6 +14,10 @@ defmodule Conveyor.Blobs.S3 do
     * `:project_prefix` — the project's own prefix under it (set by `Conveyor.Blobs`;
       absent for blobs stored before prefixes existed)
     * `:access_key_id`, `:secret_access_key`, `:session_token`
+
+  Keyed objects (the raw log) are stored at `<prefix>/<key>`: `put_object/3` is one PUT
+  (S3 answers once the object is durable), `get_range/4` one ranged GET,
+  `delete_objects/2` one DeleteObjects per 1,000 keys.
   """
   @behaviour Conveyor.Blobs.Adapter
 
@@ -142,31 +146,34 @@ defmodule Conveyor.Blobs.S3 do
     end
   end
 
-  @doc "Puts bytes under a key that is not a content digest (the raw log, PLAN §25 step 2)."
-  @spec put_object(String.t(), binary(), keyword()) :: :ok | {:error, term()}
-  def put_object(key, body, opts) when is_binary(body) do
+  # --- keyed objects ----------------------------------------------------------------------
+  # Under the store's prefix, outside every project's: `<prefix>/<key>`.
+
+  @impl true
+  def put_object(key, iodata, opts) do
+    body = IO.iodata_to_binary(iodata)
     hash = :crypto.hash(:sha256, body) |> Base.encode16(case: :lower)
     headers = [{"content-type", "application/octet-stream"}]
 
-    case request(:put, key, opts, headers, body, hash) do
+    case request(:put, key, keyed(opts), headers, body, hash) do
       {:ok, status, _headers, _body} when status in 200..299 -> :ok
       {:ok, status, _headers, body} -> {:error, {:http, status, body}}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  @doc "Reads `length` bytes at `offset` of an object (one ranged GET)."
-  @spec get_range(String.t(), non_neg_integer(), pos_integer(), keyword()) ::
-          {:ok, binary()} | {:error, term()}
+  @doc "One ranged GET."
+  @impl true
   def get_range(key, offset, length, opts) do
     range = [{"range", "bytes=#{offset}-#{offset + length - 1}"}]
 
-    case request(:get, key, opts, range, nil, @empty_sha256) do
+    case request(:get, key, keyed(opts), range, nil, @empty_sha256) do
       {:ok, status, _headers, body} when status in [200, 206] and byte_size(body) == length ->
         {:ok, body}
 
-      {:ok, status, _headers, body} when status in [200, 206] ->
-        {:error, {:short_read, byte_size(body)}}
+      # Fewer bytes than asked for, or a range that starts past the end.
+      {:ok, status, _headers, _body} when status in [200, 206, 416] ->
+        {:error, :short_read}
 
       {:ok, 404, _headers, _body} ->
         {:error, :not_found}
@@ -179,17 +186,18 @@ defmodule Conveyor.Blobs.S3 do
     end
   end
 
+  defp keyed(opts), do: Keyword.put(opts, :project_prefix, nil)
+
   @max_delete 1000
 
   @doc """
-  Deletes keys that are not content digests (raw-log objects) with DeleteObjects, 1,000
-  per request. Returns the keys that are gone (deleted now, or absent already) and the
-  ones the store refused, each with its reason; a request that fails as a whole fails
-  every key in it.
+  DeleteObjects, 1,000 keys per request. A request that fails as a whole fails every key
+  in it.
   """
-  @spec delete_objects([String.t()], keyword()) ::
-          {deleted :: [String.t()], failed :: [{String.t(), term()}]}
+  @impl true
   def delete_objects(keys, opts) do
+    opts = keyed(opts)
+
     keys
     |> Enum.chunk_every(@max_delete)
     |> Enum.reduce({[], []}, fn chunk, {deleted, failed} ->

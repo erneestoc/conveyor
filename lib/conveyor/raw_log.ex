@@ -4,7 +4,9 @@ defmodule Conveyor.RawLog do
   compressed payloads into one object here, and the segment rows in Postgres carry a byte
   range of it instead of the bytes. Objects are server-internal (never served by URL,
   read by range through the server), span projects, and are time-ordered by key under
-  `rawlog/<node>/<shard>/<ulid>` in the same backend as the blob store (`BLOB_STORE`).
+  `rawlog/<node>/<shard>/<ulid>` in the same backend as the blob store (`BLOB_STORE`),
+  through the same adapter (`Conveyor.Blobs.Adapter`, keyed objects): whatever adapter is
+  configured serves the raw log, a test double included.
 
   Each object is registered in `raw_log_objects` *before* it is written, in its own tiny
   transaction, so `sweep/1` can delete objects older than the raw retention, orphans of a
@@ -12,6 +14,7 @@ defmodule Conveyor.RawLog do
   """
 
   import Ecto.Query
+  alias Conveyor.Blobs.Adapter
   alias Conveyor.Repo
 
   @prefix "rawlog"
@@ -134,82 +137,14 @@ defmodule Conveyor.RawLog do
 
   @doc """
   Registers and writes an object. The row goes first in its own transaction; the bytes
-  are durable when this returns `:ok` (on disk: written under a temporary name, synced,
-  renamed, the directory synced; see `fsync?/0`).
+  are durable when this returns `:ok` (`c:Conveyor.Blobs.Adapter.put_object/3`; on disk
+  see `fsync?/0`).
   """
   @spec put(String.t(), iodata()) :: :ok | {:error, term()}
   def put(key, iodata) do
     Repo.insert_all("raw_log_objects", [%{key: key}], on_conflict: :nothing)
-
-    case adapter() do
-      {:disk, dir} ->
-        put_file(dir, Path.join(dir, key), iodata, fsync?())
-
-      {:s3, opts} ->
-        Conveyor.Blobs.S3.put_object(
-          key,
-          IO.iodata_to_binary(iodata),
-          Keyword.put(opts, :project_prefix, nil)
-        )
-    end
-  end
-
-  # The acknowledgement follows this write, so `:ok` means the object survives a crash of
-  # the machine: the bytes go to a temporary name and are synced, the rename makes the
-  # object appear whole or not at all, and the directory is synced so the name is on disk
-  # too (as are the directories this call had to create).
-  defp put_file(root, path, iodata, sync?) do
-    dir = Path.dirname(path)
-    tmp = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
-
-    result =
-      with :ok <- ensure_dir(root, dir, sync?),
-           {:ok, io} <- :file.open(tmp, [:write, :raw, :binary]),
-           :ok <- write_and_close(io, iodata, sync?),
-           :ok <- :file.rename(tmp, path) do
-        if sync?, do: sync_dir(dir), else: :ok
-      end
-
-    if result != :ok, do: File.rm(tmp)
-    result
-  end
-
-  defp write_and_close(io, iodata, sync?) do
-    with :ok <- :file.write(io, iodata),
-         :ok <- if(sync?, do: :file.sync(io), else: :ok) do
-      :file.close(io)
-    else
-      error ->
-        :file.close(io)
-        error
-    end
-  end
-
-  defp ensure_dir(root, dir, sync?) do
-    if File.dir?(dir) do
-      :ok
-    else
-      with :ok <- File.mkdir_p(dir) do
-        if sync?, do: sync_up(Path.dirname(dir), root), else: :ok
-      end
-    end
-  end
-
-  # New directories are entries of their parents: sync those up to the store's root.
-  defp sync_up(dir, root) do
-    with :ok <- sync_dir(dir) do
-      if dir == root or not String.starts_with?(dir, root),
-        do: :ok,
-        else: sync_up(Path.dirname(dir), root)
-    end
-  end
-
-  defp sync_dir(dir) do
-    with {:ok, io} <- :file.open(dir, [:read, :raw, :directory]) do
-      result = :file.sync(io)
-      :file.close(io)
-      result
-    end
+    {adapter, opts} = Conveyor.Blobs.adapter()
+    Adapter.counted(:put_object, adapter.put_object(key, iodata, [fsync: fsync?()] ++ opts))
   end
 
   @doc """
@@ -225,25 +160,8 @@ defmodule Conveyor.RawLog do
           {:ok, binary()} | {:error, term()}
   def get_range(key, offset, length) do
     :telemetry.execute([:conveyor, :raw_log, :get_range], %{count: 1, bytes: length}, %{key: key})
-
-    case adapter() do
-      {:disk, dir} ->
-        with {:ok, io} <- File.open(Path.join(dir, key), [:read, :binary, :raw]) do
-          try do
-            case :file.pread(io, offset, length) do
-              {:ok, data} when byte_size(data) == length -> {:ok, data}
-              {:ok, _} -> {:error, :short_read}
-              :eof -> {:error, :short_read}
-              other -> other
-            end
-          after
-            File.close(io)
-          end
-        end
-
-      {:s3, opts} ->
-        Conveyor.Blobs.S3.get_range(key, offset, length, Keyword.put(opts, :project_prefix, nil))
-    end
+    {adapter, opts} = Conveyor.Blobs.adapter()
+    Adapter.counted(:get_range, adapter.get_range(key, offset, length, opts))
   end
 
   @sweep_page 1000
@@ -338,25 +256,9 @@ defmodule Conveyor.RawLog do
 
   # Objects that are gone (deleted now or absent already) and the ones that are not.
   defp delete_many(keys) do
-    case adapter() do
-      {:disk, dir} ->
-        Enum.reduce(keys, {[], []}, fn key, {deleted, failed} ->
-          case File.rm(Path.join(dir, key)) do
-            :ok -> {[key | deleted], failed}
-            {:error, :enoent} -> {[key | deleted], failed}
-            {:error, reason} -> {deleted, [{key, reason} | failed]}
-          end
-        end)
-
-      {:s3, opts} ->
-        Conveyor.Blobs.S3.delete_objects(keys, Keyword.put(opts, :project_prefix, nil))
-    end
-  end
-
-  defp adapter do
-    case Conveyor.Blobs.adapter() do
-      {Conveyor.Blobs.Disk, opts} -> {:disk, opts[:dir]}
-      {Conveyor.Blobs.S3, opts} -> {:s3, opts}
-    end
+    {adapter, opts} = Conveyor.Blobs.adapter()
+    {deleted, failed} = adapter.delete_objects(keys, opts)
+    Enum.each(failed, fn {_key, reason} -> Adapter.counted(:delete_objects, {:error, reason}) end)
+    {deleted, failed}
   end
 end

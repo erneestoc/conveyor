@@ -488,13 +488,22 @@ defmodule Conveyor.Ingest.WriterTest do
   @tag :capture_log
   test "while the object store refuses the object the group waits, then fails whole; every try is the same object",
        %{project: project} do
-    # The store's root is a file: no object can be written under it.
+    # A store outage: every put fails while the switch is on.
     previous = Application.get_env(:conveyor, Conveyor.Blobs)
-    on_exit(fn -> Application.put_env(:conveyor, Conveyor.Blobs, previous) end)
     root = Path.join(System.tmp_dir!(), "conveyor-no-store-#{System.unique_integer([:positive])}")
-    File.write!(root, "in the way")
-    on_exit(fn -> File.rm(root) end)
-    Application.put_env(:conveyor, Conveyor.Blobs, adapter: :disk, dir: root)
+
+    on_exit(fn ->
+      Application.put_env(:conveyor, Conveyor.Blobs, previous)
+      Application.delete_env(:conveyor, :flaky_object_puts)
+      File.rm_rf(root)
+    end)
+
+    Application.put_env(:conveyor, Conveyor.Blobs,
+      adapter: Conveyor.Blobs.Flaky,
+      opts: [dir: root]
+    )
+
+    Application.put_env(:conveyor, :flaky_object_puts, true)
 
     test_pid = self()
     handler = "writer-test-puts-#{System.unique_integer([:positive])}"

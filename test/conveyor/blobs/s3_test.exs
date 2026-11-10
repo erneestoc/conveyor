@@ -140,9 +140,15 @@ defmodule Conveyor.Blobs.S3Test do
     } do
       :ok = S3.put_object("rawlog/n/0/ranged", "0123456789", opts)
       assert {:ok, "345"} = S3.get_range("rawlog/n/0/ranged", 3, 3, opts)
-      assert {:error, {:short_read, 2}} = S3.get_range("rawlog/n/0/ranged", 8, 5, opts)
+      assert {:error, :short_read} = S3.get_range("rawlog/n/0/ranged", 8, 5, opts)
+      assert {:error, :short_read} = S3.get_range("rawlog/n/0/ranged", 20, 1, opts)
       assert {:error, :not_found} = S3.get_range("rawlog/n/0/none", 0, 1, opts)
-      assert {:error, {:http, 416, _}} = S3.get_range("rawlog/n/0/ranged", 20, 1, opts)
+      bad = Keyword.put(opts, :secret_access_key, "nope")
+      assert {:error, {:http, 403, _}} = S3.get_range("rawlog/n/0/ranged", 0, 1, bad)
+      assert {:error, {:http, 403, _}} = S3.put_object("rawlog/n/0/ranged", "x", bad)
+      down = Keyword.put(opts, :endpoint, "http://127.0.0.1:1")
+      assert {:error, _} = S3.get_range("rawlog/n/0/ranged", 0, 1, down)
+      assert {:error, _} = S3.put_object("rawlog/n/0/ranged", "x", down)
     end
 
     test "connection failures are returned, not raised", %{opts: opts} do

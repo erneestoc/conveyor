@@ -68,6 +68,23 @@ defmodule Conveyor.Blobs.S3ContractTest do
     assert :ok = S3.delete(digest, opts)
   end
 
+  test "keyed objects: put whole, read by range, short reads, bulk delete", %{opts: opts} do
+    Conveyor.Blobs.ObjectsContractTest.assert_contract(S3, opts)
+  end
+
+  test "delete_objects takes more keys than one request holds", %{opts: opts} do
+    keys = for i <- 1..1_050, do: "rawlog/contract/bulk/#{i}"
+
+    keys
+    |> Task.async_stream(&(:ok = S3.put_object(&1, "x", opts)), max_concurrency: 16)
+    |> Stream.run()
+
+    assert {deleted, []} = S3.delete_objects(keys, opts)
+    assert length(deleted) == 1_050
+    assert {:error, :not_found} = S3.get_range(hd(keys), 0, 1, opts)
+    assert {:error, :not_found} = S3.get_range(List.last(keys), 0, 1, opts)
+  end
+
   test "the object key follows the configured prefix and addressing style", %{opts: opts} do
     digest = String.duplicate("ab", 32)
     url = S3.url(digest, opts)
