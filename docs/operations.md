@@ -19,6 +19,10 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 | `conveyor_ingest_batch_committed_events` (counter) | rate drops to zero while streams are open |
 | `conveyor_ingest_streams_count`, `conveyor_ingest_workers_count` (gauges) | near `MAX_STREAMS_PER_KEY` times keys |
 | `conveyor_ingest_fenced_count` (counter) | any increase that repeats: two nodes wrote one invocation (balancer or lifecycle problem) |
+| `conveyor_ingest_writer_backlog_oldest_ms{shard}` (gauge), `conveyor_ingest_writer_flush_wait` (histogram, ms) | oldest above 5,000 ms for a minute, or wait p99 above 5,000 ms: commits are not keeping up; batches expire at `INGEST_WRITER_DEADLINE_MS` (20 s). See "Commit pressure" below |
+| `conveyor_ingest_writer_backlog_batches{shard}`, `conveyor_ingest_writer_backlog_bytes{shard}` (gauges) | growing over several scrapes: the same, earlier |
+| `conveyor_ingest_writer_expired_count` (counter) | any increase: batches waited past their deadline and their streams failed; clients are resending |
+| `conveyor_ingest_writer_group_failed_count{kind}` (counter) | `unavailable` or `data` at all; `contention` repeating; `fenced` follows `conveyor_ingest_fenced_count` |
 | `conveyor_oban_jobs_count{queue,state}`, `conveyor_oban_oldest_available_seconds{queue}` (gauges) | oldest waiting job older than 10 minutes: the queue is not draining |
 | `conveyor_blobs_errors_count{op}` (counter) | any increase: blob store credentials, bucket policy or disk |
 | `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count` (counters) | any increase: the blob store refuses raw-log writes or deletes (`RAW_LOG=blob`); see "Raw log (blob mode)" below |
@@ -151,8 +155,10 @@ readable for their whole retention.
   oldest segment partition that still exists: a day the hourly drop has not reached, or
   that the archive's guard keeps, keeps its objects (`docs/spec/RawLog.tla`). Orphans of a
   commit that failed after its put, or of a node that died in between (the client never
-  saw an ack and resends), go the same way; nothing is listed and nothing is
-  reference-counted. `conveyor_raw_log_sweep_failed_count` counts objects it could not
+  saw an ack and resends), go the same way, and so do the bytes of a batch that left its
+  group after the object was written (fenced, expired or failed: the rest of the group
+  commits against the same object, and those bytes stay in it with no row pointing at
+  them); nothing is listed and nothing is reference-counted. `conveyor_raw_log_sweep_failed_count` counts objects it could not
   delete; they are retried the next day. The sweep runs in both modes, so objects left by
   a blob-mode period are collected after a switch back.
 - Cost: the PUTs. A node issues at most `INGEST_WRITER_SHARDS × 1000 / RAW_LOG_FLUSH_MS`
@@ -161,13 +167,18 @@ readable for their whole retention.
   ranged GET per object a build touches. Mid-build acks wait up to `INGEST_BATCH_FLUSH_MS`
   plus `RAW_LOG_FLUSH_MS` (measured p50 1.6 s, p99 3 s on paced builds; the end of a build
   flushes at once), see PLAN §25 "Ack latency in blob mode".
+- Disk store: an object is written under a temporary name, synced, renamed into place
+  and its directory synced before the batches in it are acknowledged (`RAW_LOG_FSYNC`,
+  on by default; about 10 ms per object on the laptop).
 - Metrics: `conveyor_raw_log_put_count` and `conveyor_raw_log_put_bytes` (objects and
   bytes written), `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count`.
-- When `conveyor_raw_log_put_failed_count` rises: a failed put raises in the writer, the
-  group takes the per-batch fallback (each batch tries its own object), and a batch that
-  still cannot be stored fails its worker, so Bazel resends it; nothing is acknowledged
-  that is not stored, but `conveyor_ingest_ack_latency_us` climbs and, if every put
-  fails, no batch commits and clients give up at their timeout. Check, in order: the
+- When `conveyor_raw_log_put_failed_count` rises: a group's object is put once; a put
+  that fails is tried again under the same key after 50, 200 and 800 ms, and if the store
+  still refuses, the whole group fails (its streams end with UNAVAILABLE and Bazel
+  resends). No batch tries an object of its own, so a store outage costs four puts per
+  group, not one per batch. Nothing is acknowledged that is not stored, but
+  `conveyor_ingest_ack_latency_us` climbs and, if every put fails, no batch commits and
+  clients give up at their timeout. Check, in order: the
   store itself (raw-log calls are not counted in `conveyor_blobs_errors_count{op}`, so
   that series rising too means the whole store is down, the raw-log counter alone means
   something specific to the `rawlog/` prefix: on S3 the credentials, the bucket's region
@@ -211,6 +222,44 @@ first: slow flushes mean PostgreSQL (CPU, IOPS, credits on burstable instances, 
 tuples on `invocations`); fast flushes with high ack latency mean the nodes are saturated
 (`vm_total_run_queue_lengths_total`, add nodes). Never raise `POOL_SIZE` past what
 `max_connections` allows for all nodes.
+
+**Commit pressure** (no rule shipped yet; the thresholds above are the ones to start
+from). Every writer shard reports what it has been handed and has not answered:
+`conveyor_ingest_writer_backlog_batches`, `…_bytes` and `…_oldest_ms` (sampled every 10 s),
+and each group commit records how long its oldest batch waited from the worker's submit to
+its outcome (`conveyor_ingest_writer_flush_wait`). On a healthy node the wait is the hold
+plus a commit: about 20 ms in postgres mode, up to `RAW_LOG_FLUSH_MS` in blob mode, and
+the backlog is whatever arrived during one hold. What the numbers say when they rise:
+
+- *Oldest age and wait climbing on every shard, flush duration high*: the database is
+  slow. Same checks as "Ack latency high". Nothing is lost while the age stays under
+  `INGEST_WRITER_DEADLINE_MS`; clients only see slower acknowledgements.
+- *Oldest age climbing on one shard only*: that shard is inside a slow commit, usually a
+  lock wait on a build another node is also writing (see "Fenced commits") or a retry
+  loop; `conveyor_ingest_writer_group_failed_count` says which.
+- *`conveyor_ingest_writer_expired_count` rising*: batches reached the deadline before a
+  commit could start. They were never written and never acknowledged; their streams end
+  with UNAVAILABLE and Bazel resends. This is the node shedding load it could not commit
+  in time, and it is better than the alternative (commits landing after the client has
+  resent elsewhere, which fence the new stream), but it means capacity is short: the
+  database first (CPU, IOPS, burst credits), then the pool (`conveyor_repo_query_queue_time`).
+  Raising the deadline does not help unless the client's ack timeout is raised too.
+- *`group_failed{kind="unavailable"}`*: the database refused connections or the object
+  store refused a raw-log object. The group waits 50, 200 and 800 ms
+  (`writer_retry_delays`) and then fails as a whole: every stream in it gets UNAVAILABLE
+  and resends. Check the pool, `max_connections`, a failover in progress, or the blob
+  store (with `conveyor_raw_log_put_failed_count`).
+- *`group_failed{kind="contention"}`*: deadlocks or serialization failures between two
+  groups, retried the same way and then halved. A few during a rolling deploy are normal.
+- *`group_failed{kind="data"}`*: the database refused a row (a value too long, a
+  constraint). The group is halved until the build that carries it is alone; that build's
+  stream fails and the node logs `writer shard N: 1 of M units failed: …`. It is a bug in
+  the normalizer or a schema drift: the log line has the Postgres error.
+- *`group_failed{kind="fenced"}`*: a group contained a stale batch and was attempted again
+  without it: the count of fenced retries. It moves with `conveyor_ingest_fenced_count`.
+
+`Conveyor.Ingest.WriterPool.pressure/0` returns the pool's total backlog and the oldest
+age from the same counters (`bin/conveyor rpc 'IO.inspect(Conveyor.Ingest.WriterPool.pressure())'`).
 
 **Fenced commits** (`ConveyorFencedCommits`). Two nodes wrote the same invocation. A
 handful after a client reconnected through a balancer is normal: the resend lands on

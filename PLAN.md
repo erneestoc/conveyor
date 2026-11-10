@@ -1248,6 +1248,24 @@ Events per app vCPU by OS CPU time does not depend on who else has the cores:
 | finished workers not hibernated at the peak | 2,392 · 2,800 · 2,399 of ≈ 10,000 | 2,447 · 1,874 · 2,534 | 0 · 0 |
 | peak RSS | 1.94 · 1.92 · 1.92 GB | 1.67 · 1.90 · 1.96 GB | 1.68 · 1.70 GB |
 
+*The same six runs on a quiet machine* (an hour later, nothing else building; load average
+5–11 with the bench's own processes; `bench/results/20261110-06*-q-before-*.json`,
+`…-q-after-*.json`):
+
+| | before (`56e9e85`) | after (`0e50085`) |
+|---|---|---|
+| events/s | 19,748 · 19,428 · 19,320 | 19,930 · 19,447 · 19,605 |
+| ack p50 / p99 ms | 38 / 281 · 33 / 247 · 39 / 286 | 42 / 248 · 35 / 272 · 48 / 281 |
+| events/s per app vCPU (OS time) | 5,843 · 5,817 · 5,784 | 5,914 · 5,805 · 5,888 |
+| worker memory at the peak sample | 150 · 124 · 129 MB | 162 · 128 · 170 MB |
+| finished workers not hibernated at the peak | 544 · 330 · 634 | 443 · 583 · 550 |
+| peak RSS | 1.68 · 1.67 · 1.70 GB | 1.73 · 1.71 · 1.71 GB |
+
+Quiet, the two builds are within 1 % of each other on throughput in either direction (the
+spread between runs of one build is 2 %), ack latency overlaps, and the workers that miss
+the hibernation tick drop from a quarter to about 5 % in both, which is why the memory gap
+closes: the earlier readings measured the machine.
+
 *One worker, deterministic* (each of the eight fixtures pushed through one worker 20 times
 in a prod build, the worker read with `Process.info`; independent of machine load):
 
@@ -1282,3 +1300,197 @@ pipeline with more than one process per shard must keep a single pid whose death
 every stage (or link the stages). Admission control has one place to refuse a push before
 it is absorbed (`Session.push/4`, next to back-pressure) and one status mapping
 (`PublishBuildEventServer`); `Ingest.push_all/3` (HTTP upload, seed) skips `Limits`.
+
+### 26.3 Commit pipeline (candidate 4)
+
+**The module.** `Conveyor.Ingest.Writer` is the commit pipeline of one shard. Its interface
+is one function and one promise: `submit/2` hands a batch to a shard and returns the pid of
+the shard's process; the submitter then receives exactly one outcome.
+
+| Outcome | Message to the submitter | Meaning |
+|---|---|---|
+| committed | `{:batch_committed, ref}` | the batch is in the database, its bytes in the raw log |
+| fenced | `{:batch_failed, ref, {:fenced, seq}}` | the row was not at `seq`: another session owns the build |
+| expired | `{:batch_failed, ref, :expired}` | the batch passed its deadline before a commit could start, or between two attempts |
+| failed | `{:batch_failed, ref, reason}` | the database or the object store refused it after the policy's attempts |
+| writer down | `:DOWN` of the pid (or `{:error, :writer_down}` from `submit/2`: never taken) | the shard's process went away: unknown, the batch may have committed |
+
+What the session relies on (PLAN §26.2) is kept: one outcome per batch; every stage runs in
+the shard's process, so a monitor on the returned pid covers the whole pipeline; batches of
+one invocation commit in submission order, and when one does not commit the later ones of
+its invocation in the group do not either. New: the deadline, and a bound on the work a
+group can cause. A batch that is not committed was not written, with one exception no
+writer can remove: a commit whose own acknowledgement is lost on the way back (the
+connection dies during `COMMIT`) is reported as a failure although the row holds it. The
+session already treats every failure as "may have committed" and stops, so the resend goes
+through the row.
+
+Also on the interface: `Writer.pressure/1` and `WriterPool.pressure/0` (below), and
+`Writer.whereis/1`. `submit/2` takes the shard that `WriterPool.for_invocation/1` returns,
+not a process name.
+
+**Inside.** One process per shard runs six stages; each is a module with its own tests.
+
+| Stage | Module | Interface | Pure |
+|---|---|---|---|
+| when to commit | `Writer.Flush` | `decide(waiting, config) :: :flush \| {:wait, ms}` with `waiting = %{count, bytes, oldest_ms, finalize?}` | yes |
+| units and deadlines | `Batch.units/1`, the driver | `units([batch]) :: [{key, unit, [ref]}]`, `key = {invocation_id, position}` | yes |
+| plan | `Writer.Plan` | `compressors/0`, `segments(unit, compressors) :: {event_row \| nil, log_row \| nil}`, `rows(units, segments) :: plan` | yes (holds the shard's zstd contexts) |
+| store | `Writer.Store` | `new(keys, segments, shard, blob?)`, `put(store) :: {:ok, store} \| {:error, message}`, `segments(store, keys)` | no (the object store) |
+| transaction | `Writer.Transaction` | `run(units, plan, timeout) :: :committed \| {:fenced, [key]} \| {:error, :unavailable \| :contention \| :data, message}` | no (Postgres) |
+| what next | `Writer.Policy` | `new(keys, retry_delays: …)`, `next(p) :: {:attempt, keys, p} \| {:done, %{key => verdict}}`, `record(p, outcome) :: {p, delay_ms}`, `evict(p, keys, verdict)`, `open(p)`, `max_attempts(n, retries)` | yes |
+
+`Writer.Config` (`hold_ms`, `max_pending`, `max_bytes`, `blob?`, `deadline_ms`,
+`retry_delays`) is built once when the pool starts and passed to every shard; nothing in
+the commit path reads the application environment. Before, blob mode was read at start for
+the hold and again per flush for the put, and the shard count on every submit.
+
+There is no seam with one adapter in here. The two decisions are plain functions over
+data; the store and the transaction are called directly. Failure paths are reached through
+the real dependencies: a trigger that answers with SQLSTATE 53300 or 40P01 inside the
+test's transaction for the database, a blob directory whose root is a file for the object
+store (`RawLog` still bypasses the blob adapter, so `Blobs.Flaky` cannot be put under it;
+the next-but-one step moves raw-log storage behind the adapter and can swap the directory
+trick for it).
+
+**Defects fixed first**, each with a test that failed before:
+
+| | Defect | Commit | Fix |
+|---|---|---|---|
+| D4 | the fence ran last: a stale group wrote every child row and its WAL before rolling back (19,575 fenced commits in the 2026-11-06 storm) | `2cdc899` | the fenced updates run first, rows in invocation id order, all statements before the verdict (one attempt names every fenced unit). Every node's group locks a build's invocation row before its children. Test: a batch both stale and unwritable is reported as fenced |
+| D5 | a disk raw-log put was a plain `File.write` although the ack follows it | `e6ad538` | temporary name, sync, rename, directory sync (new directories up to the root too); errors returned, no temporary file left. `RAW_LOG_FSYNC=false` opts out. Cost on the laptop (APFS, `F_FULLFSYNC`, 200 KB, machine under load): 4.7 ms rename only, 9.5 ms with the file sync, 14.2 ms with both. Test: the sync calls observed by tracing |
+| D1 | a failed group was redone from scratch: the fenced retry and, after any other error, up to 256 single commits each planned again and each put a new raw-log object (153 PUTs/s against the 48/s the holds bound) | `7e9fa09` | a group is planned and stored once; attempts reuse the object and its byte ranges; the policy below replaces the fallback. Test: a group with a fenced and a refused unit stores 1 object (9 before); a group the database refuses fails whole |
+| D2 | no deadline: a 60 s transaction timeout against Bazel's 30 s ack timeout | `ac4e60f` | a batch carries its submit time; `INGEST_WRITER_DEADLINE_MS` (20 s) later it leaves as `:expired` before planning or between attempts, unwritten; a commit that starts gets the remaining budget as the timeout of the transaction and of each statement. Test: a shard whose batches are due on arrival |
+| D3 | the backlog was unbounded and invisible | `a3f6dd9` | a gauge per shard incarnation (three atomics registered with the shard's name): batches, bytes, submit time of the oldest unanswered batch. `Writer.pressure/1`, `WriterPool.pressure/0`: counter reads, no message. Exported with `group_failed{kind}`, `expired` and the per-group `wait` histogram |
+
+**The flush decision** (`Writer.Flush`, 12 table rows): a full group (`max_pending`), enough
+bytes (`max_bytes`, blob mode) or the end of a stream commit at once; anything else waits
+for the hold. The hold is counted from the submit time of the oldest waiting batch (it was
+counted from when the shard took the first batch out of its mailbox): batches that queued
+behind a slow commit have already waited and get `{:wait, 0}`, which is still a timer
+message behind everything else that queued, so the next group takes all of it. The PUT
+bound of blob mode is unchanged (at most one object per shard per hold); the cycle is
+`max(hold, commit)` instead of `hold + commit`.
+
+**The failure policy** (`Writer.Policy`, 17 table rows plus the bounds):
+
+| Attempt ended with | Next | Why |
+|---|---|---|
+| committed | done for those units | |
+| fenced units | they leave, with the later units of their invocations; the rest is attempted again at once | a fence is the fault of one build; its neighbours are fine. One more transaction, no new object |
+| unavailable: no connection, pool exhausted, shutting down, statement timed out, the object store refused the object | the same units after 50, 200, 800 ms; then **every** unit still open fails | not the fault of any batch. Smaller transactions only add load to a system that is refusing it; the streams fail, Bazel resends, and the resend finds a healthier system or is shed by admission control |
+| contention: deadlock, serialization failure | the same units after the next delay; with none left, as a refused row | between this group and another transaction; a group that still deadlocks is halved to shrink the locks it takes at once |
+| data: anything else (a row the database refuses) | the attempted units are split in two, each half attempted in order; a single unit fails, and the later units of its invocation with it | the fault of one batch. Halving finds it in about `2·log2(n)` transactions; one by one cost `n` (and `n` objects) |
+
+Bound: a group of `n` units starts at most `1 + retries + 2·⌈log2 n⌉ + 1` transactions (21
+for 256 units; one poison unit among 256 takes 17) and sleeps at most the sum of the delays
+(1.05 s). The delays are the group's budget, not each attempt's. When more is wrong than
+the budget covers, the units still open fail with the last error. Before: up to 1 + 256
+transactions and objects, each with its own three retries.
+
+**The deadline.** 20 s by default: with the 2 s batch hold in front, an outcome reaches
+the client within about 22 s of the event, under the 30 s after which Bazel resends on a
+new stream. Expiry is checked before planning and before every attempt, so an expired
+batch costs no compression, no object and no statement. The timeouts are client side (the
+connection is dropped and the server rolls back when it notices): a server-side
+`statement_timeout` would cost a round trip per transaction, and the statement that waits
+on another node's lock is the first one. Noted, not done.
+
+**Per-batch CPU, measured.** One zstd context per shard instead of one per segment
+(`Invocations.compressors/0`; the frames are identical, the dictionary id is in the frame):
+87 → 58 µs per event segment of 30 events, 57 → 43 µs per log segment, under load. The
+cast to the shard carries the batch without its waiters (the submitter keeps them).
+`unique_rounds` is linear (it was quadratic in the group size).
+
+**Models.** `Writer.tla` is rewritten around the pipeline: `Take` (what waits becomes the
+group), `Attempt` (the object, once per group, then the transaction with the fence first:
+the fenced batches leave with the later batches of their invocations and the rest goes
+again), `Expire` (a deadline passes: the batch and its followers leave unwritten), and the
+lost acknowledgement as a nondeterministic branch of a successful commit. Properties:
+`Contiguous`, `OneOutcome` (committed, failed and expired never overlap: an expired batch
+is never acknowledged), `Reported` (reported committed ⇒ committed), `Settled` (in the row
+yet reported failed or expired only after a lost acknowledgement), `TagsExact`,
+`OneObject` (a group stores at most one object however many attempts). `Writer_fixed.cfg` holds (95,101
+states); `Writer_lostack.cfg` (one lost acknowledgement) holds without `TagsExact`
+(383,234); `Writer_current.cfg` keeps the documented, accepted `TagsExact` violation;
+`Writer_reput.cfg` (a new object per attempt, the writer before this section) violates
+`OneObject`. `docs/spec/check.sh` passes with the two new configurations.
+`Ingest.tla` is unchanged: `:expired` is a `DbFail`. `RawLog.tla` is unchanged; its README
+section states why object reuse and unreferenced bytes leave `Readable` and `Registered`
+as they are, and that "a group commit takes seconds" is now enforced by the deadline.
+
+**Tests replaced.** Removed: the test that counted `begin` queries through telemetry (a
+fenced group costs one more transaction) and the two that asserted with
+`refute_receive … 300` or relied on the application environment being read per flush.
+Added: `writer/flush_test.exs` (12 rows) and `writer/policy_test.exs` (17 rows, 4 bounds, 2
+on eviction), no database. `writer_test.exs` is the Postgres side, through the interface
+and on outcomes (messages, rows, object count): the fence first, one object whatever the
+attempts, a refused group fails whole, a deadlocking group is halved, the store refusing
+the object (same key on every try), expiry, the end of a stream and the byte limit against
+a 60 s hold, pressure and its reset on restart. Blob-mode tests start their own shard with
+a `Writer.Config`; the three end-to-end ones in `raw_log_mode_test.exs` restart the pool
+through `IngestCase.raw_log_mode!/2`. Suite: 385 → 426 tests.
+
+**Measured** (`bench/run.sh` shapes, laptop, quiet: load average under 3 before each run;
+`bench/results/20261110-06*-q-*.json` and `…07*-q-*.json`). Base is `0e50085`, the tree
+before this section.
+
+| | base `0e50085` | defects fixed `7e9fa09` | pipeline `4552940` |
+|---|---|---|---|
+| **flat out, postgres** (200 × 10,000) events/s | 19,930 · 19,447 · 19,605 | 19,676 | 19,539 · 19,355 |
+| ack p50 / p99 ms | 42 / 248 · 35 / 272 · 48 / 281 | 31 / 278 | 36 / 272 · 56 / 291 |
+| WAL bytes/event | 661 · 666 | 665 | 664 · 662 |
+| transactions/s (round trips per flush) | 1,616 · 1,632 (9.2–9.3) | 1,642 (9.3) | 1,644 · 1,617 (9.1) |
+| **flat out, blob** (disk store) events/s | 17,166 | 16,636 | 15,897 · 16,913 · 16,628; with `RAW_LOG_FSYNC=false` 17,297 · 16,928 |
+| ack p50 / p99 ms | 55 / 392 | 45 / 517 | 146 / 478 · 59 / 311 · 68 / 346 |
+| WAL bytes/event | 531 | 513 | 528 · 515 |
+| objects | 10,030 (one per flush) | 10,025 (one per flush) | 10,000 · 10,000 · 10,000 (counted) |
+| **paced, postgres** (1,000 streams) events/s | 990 | 990 | 990 |
+| ack p50 / p99 ms | 1,027 / 2,052 | 1,027 / 2,054 | 1,029 / 2,066 |
+| WAL bytes/event; transactions/s | 1,215; 161 | 1,207; 167 | 1,221; 162 |
+| **paced, blob** events/s | 959 · 959 | 965 | 963 · 963 · 964 |
+| ack p50 / p99 ms | 1,713 / 3,060 · 1,734 / 3,063 | 1,687 / 3,067 | 1,769 / 3,668 · 1,694 / 3,058 · 1,703 / 3,063 |
+| WAL bytes/event (full-page images in the run) | 1,006 (101) · 992 (11) | 1,003 (17) | 1,087 (599) · 1,013 (124) · 1,049 (372) |
+| objects; transactions/s | 2,048; 121 | 2,101 flushes; 121 | 2,074 · 2,101 · 2,085; 122 |
+| **connection drops** (flat out, blob, every stream dropped after 20 events) events/s | 9,860 | | 9,482 |
+| ack p50 / p99 ms; objects; fenced | 7.1 / 178; 10,000; 0 | | 7.7 / 61; 10,000; 0 |
+
+Every run: 10,000/10,000 (1,500/1,500) builds verified by the oracle, 0 failed, 0 missing
+acks, 0 group failures. Noise observed on the quiet machine: ±1.5 % on flat-out postgres
+throughput (19.3–19.9k over eight runs of three builds), ±3 % on flat-out blob between
+runs of one build (the syncs), and one paced blob run in three had a checkpoint land in
+it (599 full-page images: WAL +8 %, ack p99 3.7 s instead of 3.06 s). Within that, no
+shape regressed. Flat-out blob is the one that moved: the pipeline without the sync reads
+as the base (17.1k against 17.2k), and syncing every object before the ack costs about
+3 % of flat-out throughput on this laptop (`F_FULLFSYNC`; Linux `fsync` on EBS is cheaper).
+That is the price of D5 and it is the default. The drop run exercises resends, not the
+failure policy: a dropped connection resumes on the same worker here, so nothing is
+fenced; the policy's paths are covered by its table and the Postgres-backed tests, and
+their production evidence is the next fleet run.
+
+**For the next steps.**
+
+*Admission control.* `WriterPool.pressure/0` returns `%{batches, bytes, oldest_ms}` over
+all shards from counters (16 registry lookups and 48 atomic reads on this machine: cheap
+per request, not per event; cache it per stream if it is consulted in `Session.push/4`).
+`oldest_ms` is the signal that tracks the client's experience: it is the age of the oldest
+batch any shard has not answered, mailbox included, and it reaches `deadline_ms` exactly
+when batches start to expire. Healthy is the hold plus a commit (tens of ms in postgres
+mode, up to `RAW_LOG_FLUSH_MS` in blob mode), so a threshold has to be read against the
+configured hold. The gauge reads 0 for a moment after each flush until the shard takes the
+next batch out of its mailbox; smooth it or use the per-shard `backlog.batches` beside it.
+Expiry already sheds what cannot commit in time, but only after 20 s of waiting; admission
+is the earlier, cheaper refusal. The acceptance test from the review stands: the paced
+7,500-stream level on the trial volume.
+
+*Raw bytes store.* `Writer.Store` is the only place the pipeline touches the object store:
+`new/4` lays the group out through `RawLog.objectify/2` (key and byte ranges fixed there),
+`put/1` calls `RawLog.put/2` and may be called again after an error with the same key and
+bytes; keep that idempotence. `RawLog.put/2` still registers the row and writes through
+its own disk/S3 branches (now atomic and synced on disk); moving it behind the blob
+adapter lets the store-failure test use `Blobs.Flaky` instead of a blocked directory.
+Objects can now hold unreferenced bytes (units evicted after the put), so anything that
+accounts per byte, or archives object-first, must go by the rows' ranges and not assume an
+object is fully referenced. The registration row per put is still its own transaction
+(51,207 of them for 9,969 flushes in the review's numbers); a prefix lease per shard would
+remove it and needs `RawLog.tla`'s `Registered` re-modelled.

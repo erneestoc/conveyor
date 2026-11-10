@@ -29,10 +29,14 @@ Browser ──HTTPS / WebSocket──▶ node C ─────┘         S3 (p
 4. **Batches** close every 50 ms or 500 events or 256 KB. The worker hands a batch to a
    **writer shard** chosen by hashing the invocation id.
 5. **Group commit.** Every 20 ms a writer shard commits all pending batches from all its
-   invocations in one transaction: one statement per table (segments, targets, tests,
-   actions, named sets, metrics) with rows merged across batches, then one fenced update
-   per batch on the invocation row. If the group fails, batches are retried one by one so
-   one bad invocation cannot block the others.
+   invocations in one transaction: the fenced updates on the invocation rows first, then
+   one statement per table (segments, targets, tests, actions, metrics) with rows merged
+   across batches. Every batch gets one outcome before a deadline (20 s): committed,
+   fenced, expired or failed. A group is planned and stored once; if an attempt fails, a
+   bounded policy decides what is attempted next (the group without its fenced builds, the
+   same group after a wait while the database is unavailable, halves to isolate a row the
+   database refuses), so one bad invocation cannot block the others and a failing
+   database is not answered with more transactions.
 6. **Acknowledgement.** Only after the commit does the worker ack the batch's sequence
    numbers to Bazel. Acks are the durability boundary; Bazel resends from the last
    unacknowledged event on any retry.

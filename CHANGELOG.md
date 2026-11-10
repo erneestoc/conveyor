@@ -18,6 +18,24 @@
   commits a file in a few batches instead of one batch hold per event.
   `Invocations.get!/1` is removed (use `get/2` with `project_ids`).
 
+- **Commit pipeline (PLAN §26.3):** the writer is a pipeline with one promise: a submitted
+  batch gets exactly one outcome (committed, fenced, expired or failed) before a deadline.
+  Fixed with it: a group commit that failed no longer falls back to one transaction and
+  one new raw-log object per batch (a group is planned and stored once, and what follows a
+  failed attempt is a bounded policy: retry while the database or the store is unavailable
+  and then fail the group, halve the group to find a row the database refuses); a batch
+  that has waited `INGEST_WRITER_DEADLINE_MS` (new, 20 s) fails as expired instead of
+  committing after Bazel's 30 s ack timeout and fencing the stream that took over; the
+  fenced update runs first in the transaction, so a stale group aborts before it writes
+  child rows; raw-log objects on the disk store are written atomically and synced before
+  the ack (`RAW_LOG_FSYNC`, new, default on). New on `/metrics`: writer backlog per shard
+  (`conveyor_ingest_writer_backlog_batches`, `_bytes`, `_oldest_ms`), the wait of the
+  oldest batch per group commit (`conveyor_ingest_writer_flush_wait`),
+  `conveyor_ingest_writer_group_failed_count{kind}` and
+  `conveyor_ingest_writer_expired_count`; docs/operations.md "Commit pressure" says what to
+  do when they rise. Finished workers are hibernated by the commit that leaves them idle
+  (flat-out bench: worker memory at the peak 293–407 MB → 65–95 MB for 10,000 lingering
+  workers). Writer settings are read once when the node starts.
 - **Derived rows nothing read are no longer stored (PLAN §26.1):** `named_sets` rows and
   `targets.output_groups` were written for every build and read by nothing (the raw BEP
   stream keeps the same data). Flat-out bench: WAL 721 → 662 bytes/event, storage

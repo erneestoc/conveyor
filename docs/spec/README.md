@@ -40,8 +40,8 @@ The protocol lives in one pure module, so the mapping is by function:
 | `StartWorker` | `Worker.load_or_create/3` → `Session.loaded/2` |
 | `Push` (dedup, `Absorb`, takeover, reject) | `Ingest.push/3` → `Session.push/4`; takeover is the `:reload` effect followed by `Session.loaded/2` |
 | `Flush` | `Session.timer(s, :flush)` (or the batch size, or the marker) → `{:submit, batch}` |
-| `Commit` | `Writer` (`fenced_update!/3`) → `Session.committed/2`, fenced → `Session.failed/3` |
-| `DbFail` | `Session.failed/3` |
+| `Commit` | `Writer.Transaction.run/3` (the fenced update) → `Session.committed/2`, fenced → `Session.failed/3` |
+| `DbFail` | `Session.failed/3` (a failed or expired batch: `Writer.Policy` gave up, or the deadline passed) |
 | `WriterDown` | the worker's monitor → `Session.writer_down/1` |
 | `Exit` | `Session.timer(s, :linger)`; the idle disconnect before it is `Session.timer(s, :idle)` |
 | `LifecycleStarted`, `LifecycleFinished` | `Ingest.lifecycle/2` → `Session.lifecycle/3` on a live worker, the row directly otherwise |
@@ -127,12 +127,26 @@ drop guard keeping the day). `R` = 1, two batches, two objects per writer.
 | `RawLog_ackonput.cfg` | the ack once the bytes are durable, before the index commit | `Readable` violated in 6 steps: acknowledged with no row to find the bytes by; a failed commit or a crash then leaves them an orphan the sweep collects, and the client never resends |
 | `RawLog_rowafter.cfg` | the row registered after the bytes | `Registered` violated in 3 steps: the window in which a crash leaves an object no sweep will ever delete |
 
-The writer and `RawLog.put/2` already did the first two (`store_object!/2` runs before the
-transaction, the row goes in before the bytes); the third is the change the model asked
+The writer and `RawLog.put/2` already did the first two (`Writer.Store.put/1` runs before
+the transaction, the row goes in before the bytes); the third is the change the model asked
 for: `Workers.RawLogSweep` bounds its cutoff by `Partitions.oldest_day/0`, since an
 object is registered when its batches commit and so never before their build's creation
 day, a partition of day `d` only references objects registered on or after `d`
 (`raw_log_sweep_test.exs`).
+
+Since 2026-11-09 (PLAN §26.3) a group's object is written once and every attempt of the
+group commits against it: the retry after a failed commit, the group without its fenced or
+expired batches, a half of it. In the model's terms the steps between "put" and "commit"
+are one longer commit step, which the model already lets fail or be interrupted, so the
+actions and both properties are unchanged. Two of its assumptions are touched and hold:
+"a group commit takes seconds" is now enforced rather than assumed (a batch that has not
+committed `INGEST_WRITER_DEADLINE_MS`, 20 s, after its submission leaves the group and is
+never written, so a row never points at an object registered more than that before the
+row's commit), and an object may now hold bytes no row points at (a batch that left the
+group after the put). The model is per object, not per byte range: `Readable` asks that an
+acknowledged batch's object exists, `Registered` that every object has a row for the
+sweep, and unreferenced bytes inside a registered object affect neither; they are deleted
+with the object.
 
 ## Deduplicated input lists (`SpawnInputs.tla`)
 
@@ -153,24 +167,51 @@ transaction as the spawns) and `prune_orphan_inputs/2` (`FOR UPDATE`, re-check, 
 `spawn_inputs_test.exs` pins the Postgres locking behaviour the fixed configuration relies
 on with two connections (`DO UPDATE` blocks a `FOR UPDATE NOWAIT`, `DO NOTHING` does not).
 
-## Writer group commit (`Writer.tla`)
+## Writer commit pipeline (`Writer.tla`)
 
-One shard, two invocations, stale submissions, the group commit with its per-batch
-fallback, tag counts added after the commit. Without chaos every property holds
-(`Writer_fixed.cfg`, 686 states): a batch's rows land exactly once and in order, and the
-counted tags equal the committed batches. `Writer_current.cfg` adds a lost commit
-acknowledgement (the transaction committed, the writer saw an error and retried): the retry
-fences, the fallback fails every batch, the clients re-synchronise through dedup, nothing
-is lost or duplicated, but the tag counts of that group are never added. Accepted:
-facet counts are approximate by design and `Invocations.rebuild_tag_keys!/1` restores them.
+One shard, two invocations, stale submissions. The shard takes what was submitted as a
+group (`Take`), stores the group's bytes as one object and attempts the group in one
+transaction with the fence first (`Attempt`): fenced batches leave with the later batches
+of their invocations and the rest is attempted again against the same object. A deadline
+can pass at any point (`Expire`): the batch and its followers leave the group unwritten.
+Tag counts are added after a commit the shard knows about. Chaos: a commit whose
+acknowledgement is lost (the shard sees an error and attempts the group again, which now
+fences).
 
-Since 2026-10-01 the implementation's fallback is narrower than the model's: a fenced
-group fails only the fenced invocations' batches (from the fenced sequence on) and commits
-the rest again as one group, instead of redoing every batch alone. Every batch the model
-commits in `Fallback` is still committed or failed-and-resent by the client; the model's
-properties (rows land once and in order, counted tags equal committed batches) are
-unaffected because the change only removes commits from a round. Re-model if the fallback
-ever starts committing batches the group did not contain.
+| Property | Meaning |
+|---|---|
+| `Contiguous` | a committed batch's rows are exactly the row's advance (the fence) |
+| `OneOutcome` | committed, failed and expired never overlap: in particular an expired batch is never reported committed, so never acknowledged |
+| `Reported` | a batch reported committed is in the row |
+| `Settled` | a batch in the row yet reported failed or expired can only come from a lost acknowledgement |
+| `TagsExact` | the counted tags equal the committed batches |
+| `OneObject` | a group stores at most one object however many attempts it takes |
+
+| Config | Knobs | Result |
+|---|---|---|
+| `Writer_fixed.cfg` | no chaos, the object stored once per group | all hold (95,101 distinct states) |
+| `Writer_lostack.cfg` | one lost acknowledgement | all but `TagsExact` hold (383,234 states): the retry fences, the client re-synchronises through dedup, nothing is lost, duplicated or wrongly acknowledged. This is why the session treats every failure as "may have committed" |
+| `Writer_current.cfg` | the same with `TagsExact` | violated in 4 steps: the tag counts of the group whose acknowledgement was lost are never added. Accepted: facet counts are approximate by design and `Invocations.rebuild_tag_keys!/1` restores them |
+| `Writer_reput.cfg` | a new object per attempt (the writer before 2026-11-09) | `OneObject` violated: a fenced group's second attempt stores a second object (the 153 PUTs/s of the 2026-11-06 resend storm, against a bound of 48) |
+
+Code to model:
+
+| Action | Code |
+|---|---|
+| `Submit` | `Writer.submit/2` (the batch, its submit time; the shard's pressure gauge) |
+| `Take` | `Writer.Flush.decide/2` says `:flush` or the hold's timer fires; `Batch.units/1` merges each invocation's contiguous batches |
+| `Expire` | the driver's deadline check before planning and before every attempt → `Writer.Policy.evict/3` with `:expired` |
+| `Attempt`, the object | `Writer.Store.new/4` (layout fixed once) and `Store.put/1` (again only after a failed put, same key) |
+| `Attempt`, the transaction | `Writer.Transaction.run/3`: fenced updates first, then the rows |
+| `Attempt`, fenced | `Writer.Policy.record(p, {:fenced, keys})`: those units and the later units of their invocations get `:fenced`, the rest is attempted again |
+| `Attempt`, lost acknowledgement | `Transaction.run/3` returns `{:error, :unavailable, _}` for a commit that did happen; the policy retries, the retry fences |
+| reported committed, tags | `{:batch_committed, ref}` to each submitter; `TagCounter.add/1` after the commit |
+
+Not in the model, in the policy's own tests (`writer/policy_test.exs`): the retry delays,
+halving a group to isolate a row the database refuses, and the bound on attempts. They
+choose which subset of the group an attempt holds and when; every attempt is still the
+model's `Attempt` over batches in submission order, so the properties carry over. The
+model's `Attempt` evicts the later batches of a fenced invocation as the policy does.
 
 ## Rollup staleness (`Rollup.tla`)
 

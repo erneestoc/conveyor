@@ -12,10 +12,18 @@ defmodule Conveyor.Ingest.Writer do
   | Outcome | Message | Meaning |
   |---|---|---|
   | committed | `{:batch_committed, ref}` | the batch is in the database (and its bytes in the raw log) |
-  | fenced | `{:batch_failed, ref, {:fenced, seq}}` | the invocation row was not at `seq`: another session owns the build. Nothing of the batch was written |
-  | expired | `{:batch_failed, ref, :expired}` | the batch passed its deadline before a commit could start (or between two attempts). Nothing was written |
-  | failed | `{:batch_failed, ref, reason}` | the database or the object store refused it after the policy's attempts. Nothing was written |
+  | fenced | `{:batch_failed, ref, {:fenced, seq}}` | the invocation row was not at `seq`: another session owns the build |
+  | expired | `{:batch_failed, ref, :expired}` | the batch passed its deadline before a commit could start (or between two attempts) |
+  | failed | `{:batch_failed, ref, reason}` | the database or the object store refused it after the policy's attempts |
   | writer down | `:DOWN` of the returned pid, or `{:error, :writer_down}` from `submit/2` | the shard's process went away. `{:error, :writer_down}`: the batch was never taken. `:DOWN` with a batch outstanding: **unknown**, it may have committed |
+
+  A batch that is not reported committed is never acknowledged, and was not written, with
+  one exception no writer can remove: a commit whose own acknowledgement is lost on the
+  way back (the connection dies during `COMMIT`) looks like a failure although the row
+  holds the batch. A submitter must therefore treat every outcome but committed as "may
+  have committed" and re-read the row (`Conveyor.Ingest.Session` stops and the resend
+  goes through the row). `docs/spec/Writer.tla` checks exactly this (`OneOutcome`,
+  `Reported`, `Settled`).
 
   What a caller may rely on:
 

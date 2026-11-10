@@ -1,7 +1,7 @@
 -------------------------------- MODULE RawLog --------------------------------
 (***************************************************************************)
 (* The raw log in blob mode (PLAN §25 step 2; Conveyor.RawLog,              *)
-(* Conveyor.Ingest.Writer.store_object!/2, Conveyor.Workers.RawLogSweep).   *)
+(* Conveyor.Ingest.Writer.Store, Conveyor.Workers.RawLogSweep).             *)
 (* A writer shard on each of two nodes takes the batches pending on it as   *)
 (* one group, registers a fresh object key in raw_log_objects (its own tiny *)
 (* transaction, stamped with the day), writes the group's bytes to that     *)

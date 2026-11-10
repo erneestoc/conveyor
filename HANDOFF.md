@@ -80,14 +80,15 @@ lib/conveyor/
   ingest/worker.ex      per-invocation GenServer, wiring only: interprets the session's effects; owns load_or_create/3 (the row + the tenancy check), the writer monitor, the named timers; registered as {project_id, invocation_id}
   ingest/normalizer.ex  pure BEP payload → State (inv map + dirty) + Batch rows; finalize/disconnect
   ingest/batch.ex       rows for one commit; event/log segment rows (zstd via :zstd from OTP)
-  ingest/writer.ex      group commit per shard, per-batch fallback, Fenced (CAS on last_event_seq), Retry
-  ingest/writer_pool.ex shards by phash2(invocation_id)
+  ingest/writer.ex      the commit pipeline of one shard (PLAN §26.3): submit/2 a batch → exactly one outcome (committed | fenced | expired | failed; the pid's death = unknown); the process, the pressure gauge, the driver loop
+  ingest/writer/        its stages: config.ex (struct, read once at start), flush.ex (pure: commit now or wait), plan.ex (units → rows, compression contexts), store.ex (one raw-log object per group, put once), transaction.ex (fence first, CAS on last_event_seq, the unnest SQL), policy.ex (pure: what follows a failed attempt, bounded)
+  ingest/writer_pool.ex shards by phash2(invocation_id) (count in a persistent term); pressure/0 for admission control
   ingest/tag_counter.ex per-node coalescing of tag_keys counts (one sorted upsert per second; flush on shutdown)
   seed.ex               realistic seed: fixture replays reshaped over N days (+ big_log)
   ingest/scrub.ex       redacts header flags, URL creds, token=, Bearer in command lines/logs (rewrites raw protobuf)
   ingest/tags.ex        merge order derived < workspace_status < keywords < api_key < build_metadata; ignores volatile keys
   ingest/status.ex      exit code → status, categories
-  ingest/retry.ex       backoff for DBConnection/Postgrex transient errors
+  ingest/retry.ex       backoff for DBConnection/Postgrex transient errors (the worker's row load; the writer's retries are Writer.Policy's)
   ingest/verify.ex      oracle: contiguous segments, counts, log offsets, final status
   invocations.ex        read side: list(project_id/statuses/query/before), events/raw_frames/log/log_segments/targets/test_results/actions/metrics/facets/failed_targets/slowest_tests/events_page/day
   invocations/*.ex      schemas (Invocation, Target, TestResult, Action, Metrics, TagKey, EventSegment, LogSegment)
@@ -110,7 +111,8 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - **Acks are the durability boundary.** An event is acked only after its batch commits; Bazel resends from the last un-acked seq; `seq <= committed` is acked immediately (dedup), an absorbed uncommitted resend is acked by its commit; `seq > expected` → FAILED_PRECONDITION unless the quiet session catches up from the row.
 - **The protocol lives in `Ingest.Session`, nowhere else.** A rule about sequences, acks, batches, idle, linger or finalize is a transition there with a row in `session_test.exs`; the worker only interprets effects. Do not put protocol decisions back into GenServer callbacks, and do not give the session I/O.
 - **An invocation id belongs to its project.** `Worker.load_or_create/3` refuses a row of another project (`{:error, :not_found}`, gRPC NOT_FOUND); workers are registered per `{project_id, invocation_id}`; every direct row update on the ingest path is scoped by project; jobs carry `project_id` (`Invocations.job_args/1`, `for_job/1`).
-- **Every submitted batch gets an outcome.** `Writer.submit/2` returns the writer pid, the worker monitors it; `:DOWN` with batches in flight = failed with `:writer_down`, outcome unknown, the session stops and the resend goes through the row. A failed batch fails every waiter and ends the gRPC stream at once (the acker exits with UNAVAILABLE; it is linked to the handler). Whoever restructures the writer must keep: one outcome message per batch to the submitter, one pid whose death covers the whole commit path, submission order per invocation.
+- **Every submitted batch gets an outcome.** `Writer.submit/2` returns the shard's pid, the worker monitors it; `:DOWN` with batches in flight = failed with `:writer_down`, outcome unknown, the session stops and the resend goes through the row. A failed batch fails every waiter and ends the gRPC stream at once (the acker exits with UNAVAILABLE; it is linked to the handler). The outcomes are committed, `{:fenced, seq}`, `:expired` (past `INGEST_WRITER_DEADLINE_MS`, never attempted) and failed; the session treats every one but committed as "may have committed" (a commit whose own acknowledgement was lost looks like a failure) and stops. The pipeline's contract, which its stages must keep: one outcome message per batch to the submitter, one pid whose death covers every stage (they all run in the shard's process), submission order per invocation.
+- **The writer's decisions are pure and bounded.** When to commit is `Writer.Flush.decide/2`; what follows a failed attempt is `Writer.Policy` (fenced units leave and the rest goes again; unavailable → 50/200/800 ms then the whole group fails; contention → the same, then halves; a refused row → halves; at most `1 + retries + 2·⌈log2 n⌉ + 1` transactions per group). A group is planned and its raw-log object put **once**; every attempt points at the same object. Do not add a path that plans or puts per attempt or per batch (the 2026-11-06 storm: 153 PUTs/s against a bound of 48), and do not read the application environment in the commit path (`Writer.Config` is read when the shard starts; tests that need another mode start their own shard or call `IngestCase.raw_log_mode!/2`, which restarts the pool).
 - **Fencing:** every batch commit does `UPDATE invocations SET ... WHERE last_event_seq = first_seq - 1`; failure = `{:fenced, n}` → worker exits → stream fails → Bazel retries. Works across nodes without cluster locks.
 - **Segment partition day = `invocations.inserted_at` date**, never `started_at` (it changes). Partitions `event_segments_YYYYMMDD` / `log_segments_YYYYMMDD` are created on boot (`Conveyor.Storage.boot/0`) and hourly; creation tolerates `duplicate_table` (boot races).
 - **Targets are keyed by (label, aspect)**; `configuration_id` is an attribute (TargetConfigured carries no configuration).
@@ -121,9 +123,50 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - **Finish lifecycle events must never start a new worker** for a finished build (it did once; worker lived until idle timeout).
 - Config knobs live in `config :conveyor, Conveyor.Ingest` (auth, idle_timeout_ms, linger_ms, batch_max_events/bytes, batch_flush_ms, writer_shards, writer_flush_ms, tag_flush_ms, broadcast_interval_ms, max_unacked_events).
 - **Log viewer path (any log size):** the LiveView never sends log text; `log:reset` carries the download URL, `live` and byte count; the browser's log worker streams `/invocation/:id/download/log` (chunked, `x-log-bytes` header) into a paged byte buffer with terminal emulation (`\r`, cursor-up, SGR kept) and serves only visible lines to the page. Live appends (`{:log_chunks, chunks, offset}` on the log topic → `log:append` with `offset`) splice by byte offset; appends ahead of the loaded bytes queue and trigger one delayed reload. Measured: 50 MB in 0.2 s, 127 MB RSS, filter 9 ms. `node --test assets/test/*.test.mjs` runs in precommit (Node 24 on this machine).
-- **Writer hot path (M7 profiling):** a group commit writes one statement per table and column set (segments, targets, tests, actions, named sets, metrics) then one fenced `UPDATE` per batch; rows of the same invocation across batches are merged in order (one upsert must not touch a row twice). `tag_keys` rows are shared per project and must never be updated inside the group transaction (it serialized every shard on their row locks) — counts go through `Conveyor.Ingest.TagCounter` (one sorted upsert per node per second). Never index `last_event_at` (or any column the per-batch update sets): it makes every update non-HOT. Tests that assert tag counts call `TagCounter.flush()` first. DB pool: dev 20, prod `POOL_SIZE` default 40, `queue_target 1s / queue_interval 10s` (overload → latency, not errors).
+- **Writer hot path (M7 profiling):** a group commit runs the fenced `UPDATE … FROM unnest` first (one per set of dirty columns, rows in invocation id order, so a stale group aborts before it writes a child row), then one statement per table and column set (segments, targets, tests, actions, metrics); rows of the same invocation across batches are merged in order (one upsert must not touch a row twice). `tag_keys` rows are shared per project and must never be updated inside the group transaction (it serialized every shard on their row locks) — counts go through `Conveyor.Ingest.TagCounter` (one sorted upsert per node per second). Never index `last_event_at` (or any column the per-batch update sets): it makes every update non-HOT. Tests that assert tag counts call `TagCounter.flush()` first. DB pool: dev 20, prod `POOL_SIZE` default 40, `queue_target 1s / queue_interval 10s` (overload → latency, not errors).
 
 ## 7. Next work, in order (with concrete specs)
+
+### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1 and 4 landed; next 2 (admission), then 3 (raw bytes store)
+
+- **Done:** §26.1 derived rows, §26.2 stream session, §26.3 commit pipeline (2026-11-10:
+  `2cdc899` fence first, `e6ad538` durable disk puts, `d7d9f42` session hibernation,
+  `7e9fa09` plan/store once + `Writer.Policy`, `ac4e60f` deadline, `a3f6dd9` pressure
+  gauges, `4552940` the pipeline's modules). The §26.2 "regression" was noise plus a real
+  memory effect present before and after the session (finished workers missing the
+  hibernation tick); fixed in `Session.committed/2`.
+- **Next: admission/overload control (candidate 2).** Signals: `WriterPool.pressure/0`
+  (`oldest_ms` is the one that tracks the client; it reaches `INGEST_WRITER_DEADLINE_MS`
+  when batches start to expire; healthy is the hold plus a commit, so read it against the
+  configured hold; it reads 0 for an instant after each flush). The place to refuse is
+  `Session.push/4` next to back-pressure, one status mapping in
+  `PublishBuildEventServer`; `Ingest.push_all/3` skips `Limits`. Acceptance test: the paced
+  7,500-stream level that spiralled on 2026-11-06. No alert rules were added for the new
+  series (`deploy/` was out of scope): docs/operations.md "Commit pressure" has the
+  thresholds to start from.
+- **Then: raw bytes store behind the blob adapter (candidate 3).** `Writer.Store` is the
+  pipeline's only contact with the object store (`new/4` fixes key and ranges, `put/1` is
+  idempotent and retried under the same key). Objects may hold unreferenced bytes (units
+  evicted after the put). `RawLog.put/2` on disk is now tmp + fsync + rename + directory
+  fsync (`RAW_LOG_FSYNC`); it still bypasses the adapter, so the store-failure test blocks
+  the directory instead of using `Blobs.Flaky`. The sweep's 10,000-per-day cap is still
+  open (review defect table).
+- **Gotchas from this step.** (1) The laptop is shared with other projects' Bazel builds:
+  load average went 2 → 260 during this session. Check `uptime` before trusting a bench;
+  events per app vCPU by OS time and per-process reductions do not depend on the load. The
+  probes used here (a bench wrapper that samples worker heaps and counts raw-log objects,
+  and a deterministic one-worker probe) lived in the session scratchpad; PLAN §26.2 and
+  §26.3 describe what they measure. (2) `ConveyorWeb.Telemetry`'s poller starts before the
+  ingest supervisor and removes a measurement that raises for good: anything it calls must
+  tolerate a pool that is not up (`WriterPool.shards/0` returns 0 then). (3) Writer
+  configuration is read when the pool starts: a test that needs another mode starts its
+  own shard (`{Writer, shard: "name", config: %Writer.Config{…}}`, string names: the shard
+  is part of the object key) or calls `IngestCase.raw_log_mode!/2`. (4) To put several
+  batches into one group deterministically, suspend the shard, submit, resume
+  (`writer_test.exs`, `submit_together/2`). (5) Database failures are injected with a
+  trigger inside the test's sandbox transaction (`refuse_work!/0`: SQLSTATE 53300 and
+  40P01), never with a mock. (6) Timeouts in the commit path are client side; a
+  server-side `statement_timeout` per transaction would cost a round trip and was left out.
 
 ### DONE 2026-09-26: raw segments write-behind (0.2.3, off by default) — next: enable on the trial
 
@@ -244,10 +287,8 @@ events/s on 8 vCPUs, flat out to 66k/s), the 100 GB gp3 volume is the first ceil
 (`1226571`; flat-out tasks no longer die, 60 streams per task is the setting that ran, 125
 untested since), `FetchProfile` not enqueued without an endpoint and upsert rows in
 conflict-key order (`691c1a8`), `bench/fleet.sh` waits for lagging CloudWatch lines.
-**Follow-ups recorded, not done:** (1) a fenced group's retry and the batch-by-batch
-fallback re-objectify and PUT a new raw-log object (the first becomes an orphan for the
-sweep): under the resend storm the PUT rate was 153/s against the 48/s the holds bound;
-reuse the object (filter the objectified plan's rows instead of re-planning). (2) The
+**Follow-ups recorded, not done:** (1) done 2026-11-09 (PLAN §26.3): a group's object
+is put once and every attempt reuses it. (2) The
 paced spiral at 7,500+ streams on this volume: once group commits pass the client's 30 s
 ack timeout, resends fence, fences deadlock, every tier amplifies; the fix is storage
 headroom (or Aurora) plus the upsert ordering already landed; a server-side guard (shed
