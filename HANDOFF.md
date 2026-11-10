@@ -19,7 +19,8 @@ excoveralls, Tailwind v4 (daisyUI plugin present but app components are hand-wri
 
 - Project name is **Conveyor** (modules `Conveyor.*`, `ConveyorWeb.*`).
 - **Commit per step**; push `main` to `origin` (github.com/erneestoc/conveyor) when a step is green. Tags trigger the public release workflow (GHCR image + chart): push tags only when the user says so. Attribution trailer on every commit:
-  `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`.
+  `Co-Authored-By: Claude Fable 5.2 <noreply@anthropic.com>` (followed by the
+  `Claude-Session: <url>` line when the session supplies one).
 - **95%+ line coverage is a hard gate**: `mix precommit` = compile --warnings-as-errors,
   deps.unlock --unused, format, `coveralls` with `minimum_coverage: 95` (`coveralls.json`
   excludes `lib/conveyor_proto/`, `test/support/`, release/telemetry boilerplate).
@@ -74,8 +75,9 @@ lib/conveyor/
   bep/event.ex          unwrap BES Any → BEP, kind names, time conversions
   bep/fixture.ex        varint-delimited BEP file reader/writer (same framing as segments)
   bep/replay.ex         Bazel-faithful BES client (lifecycle + stream, drop_after chaos)
-  ingest.ex             Context struct, push/3 (async ack via acker pid), push_sync/2 (tests), lifecycle/2, topics
-  ingest/worker.ex      per-invocation GenServer: order/dedup, absorb → Normalizer, batches, backpressure (max_unacked_events), idle timeout → disconnected, finalize + linger, PubSub digests
+  ingest.ex             Context struct (incl. session config override), push/3 (async ack via acker pid), push_all/3 (a whole stream: HTTP upload, seed), push_sync/2 (tests), lifecycle/2, session_config/0, idle_timeout_ms/0, topics
+  ingest/session.ex     the stream protocol, pure: loaded/push/timer/committed/failed/writer_down/lifecycle → {session, effects} (order/dedup, batches, backpressure, takeover, idle → disconnected, linger, finalize); session/config.ex its knobs (PLAN §26.2)
+  ingest/worker.ex      per-invocation GenServer, wiring only: interprets the session's effects; owns load_or_create/3 (the row + the tenancy check), the writer monitor, the named timers; registered as {project_id, invocation_id}
   ingest/normalizer.ex  pure BEP payload → State (inv map + dirty) + Batch rows; finalize/disconnect
   ingest/batch.ex       rows for one commit; event/log segment rows (zstd via :zstd from OTP)
   ingest/writer.ex      group commit per shard, per-batch fallback, Fenced (CAS on last_event_seq), Retry
@@ -105,7 +107,10 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 6. Key design facts to keep intact
 
-- **Acks are the durability boundary.** An event is acked only after its batch commits; Bazel resends from the last un-acked seq; `seq < expected` is acked immediately (dedup); `seq > expected` → FAILED_PRECONDITION.
+- **Acks are the durability boundary.** An event is acked only after its batch commits; Bazel resends from the last un-acked seq; `seq <= committed` is acked immediately (dedup), an absorbed uncommitted resend is acked by its commit; `seq > expected` → FAILED_PRECONDITION unless the quiet session catches up from the row.
+- **The protocol lives in `Ingest.Session`, nowhere else.** A rule about sequences, acks, batches, idle, linger or finalize is a transition there with a row in `session_test.exs`; the worker only interprets effects. Do not put protocol decisions back into GenServer callbacks, and do not give the session I/O.
+- **An invocation id belongs to its project.** `Worker.load_or_create/3` refuses a row of another project (`{:error, :not_found}`, gRPC NOT_FOUND); workers are registered per `{project_id, invocation_id}`; every direct row update on the ingest path is scoped by project; jobs carry `project_id` (`Invocations.job_args/1`, `for_job/1`).
+- **Every submitted batch gets an outcome.** `Writer.submit/2` returns the writer pid, the worker monitors it; `:DOWN` with batches in flight = failed with `:writer_down`, outcome unknown, the session stops and the resend goes through the row. A failed batch fails every waiter and ends the gRPC stream at once (the acker exits with UNAVAILABLE; it is linked to the handler). Whoever restructures the writer must keep: one outcome message per batch to the submitter, one pid whose death covers the whole commit path, submission order per invocation.
 - **Fencing:** every batch commit does `UPDATE invocations SET ... WHERE last_event_seq = first_seq - 1`; failure = `{:fenced, n}` → worker exits → stream fails → Bazel retries. Works across nodes without cluster locks.
 - **Segment partition day = `invocations.inserted_at` date**, never `started_at` (it changes). Partitions `event_segments_YYYYMMDD` / `log_segments_YYYYMMDD` are created on boot (`Conveyor.Storage.boot/0`) and hourly; creation tolerates `duplicate_table` (boot races).
 - **Targets are keyed by (label, aspect)**; `configuration_id` is an attribute (TargetConfigured carries no configuration).

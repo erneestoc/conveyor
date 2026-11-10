@@ -1,7 +1,7 @@
 -------------------------------- MODULE Ingest --------------------------------
 (***************************************************************************)
-(* The Conveyor ingest protocol (lib/conveyor/ingest/worker.ex, writer.ex,  *)
-(* ingest.ex) for one invocation: a Bazel-like client streams events 1..N   *)
+(* The Conveyor ingest protocol (lib/conveyor/ingest/session.ex, worker.ex,  *)
+(* writer.ex, ingest.ex) for one invocation: a Bazel-like client streams events 1..N   *)
 (* plus the stream-finished marker N+1, resending from its last             *)
 (* acknowledged event after every lost connection; each node runs at most   *)
 (* one worker per invocation, which loads the row, absorbs events in order, *)
@@ -23,7 +23,7 @@ CONSTANTS
   Nodes,                 \* e.g. {n1, n2}
   N,                     \* events per build; N+1 is the stream-finished marker
   MaxDrops,              \* connection losses the client suffers
-  MaxDbFails,            \* commits that fail for a non-fence reason (DB hiccup)
+  MaxDbFails,            \* commits that fail for a non-fence reason, or are lost with the writer
   LifecycleStartsWorker, \* pre-M10: the attempt-started notification started a worker
   FinishRecordsWhenFenced, \* M10: a fenced finish is recorded directly
   DedupBelowCommitted,   \* TRUE: ack a resend at once only when it is committed
@@ -70,7 +70,7 @@ Init ==
   /\ drops = 0 /\ dbFails = 0
 
 (***************************************************************************)
-(* Worker start: load_or_create! reads the row.                             *)
+(* Worker start: load_or_create reads the row (Session.loaded).              *)
 (***************************************************************************)
 StartWorker(n) ==
   /\ wOn' = [wOn EXCEPT ![n] = TRUE]
@@ -119,7 +119,7 @@ Drop ==
 
 (***************************************************************************)
 (* The client pushes its next event to the node it is connected to.         *)
-(* Ingest.push: find or start the worker; Worker.handle_call({:push, ...}). *)
+(* Ingest.push: find or start the worker; Session.push.                     *)
 (***************************************************************************)
 Absorb(n, s) ==
   /\ wBatch' = [wBatch EXCEPT ![n] = @ \cup {s}]
@@ -164,24 +164,32 @@ Push(n) ==
                      /\ wBatch' = [wBatch EXCEPT ![n] = {s}]
                      /\ wInflight' = [wInflight EXCEPT ![n] = <<>>]
                      /\ wOwed' = [wOwed EXCEPT ![n] = {s}]
-        \/ \* ahead of the worker: takeover when nothing is buffered, else the
-           \* stream fails with FAILED_PRECONDITION and the client reconnects
+        \/ \* ahead of the worker. With nothing buffered or in flight the worker reads
+           \* the row again and judges the event against it (Session.push -> :reload ->
+           \* Session.loaded): the next sequence is absorbed (takeover), one the row
+           \* already holds is acknowledged, a real gap fails the stream with
+           \* FAILED_PRECONDITION. With work in hand the stream fails at once.
            /\ s > exp
-           /\ cAcked' = cAcked
-           /\ IF on /\ batch = {} /\ Len(inflight) = 0 /\ dbLast + 1 = s
-                THEN /\ cConn' = cConn
-                     /\ wOn' = wOn
-                     /\ wExp' = [wExp EXCEPT ![n] = s + 1]
-                     /\ wCommitted' = [wCommitted EXCEPT ![n] = dbLast]
-                     /\ wBatch' = [wBatch EXCEPT ![n] = {s}]
-                     /\ wInflight' = wInflight
-                     /\ wOwed' = [wOwed EXCEPT ![n] = {s}]
-                ELSE /\ cConn' = None
-                     \* a failed takeover keeps the reloaded state (`{:error, fresh}`),
-                     \* so the next attempt is judged against the row's sequence
-                     /\ IF on /\ batch = {} /\ Len(inflight) = 0
-                          THEN StartWorker(n)
-                          ELSE IF on THEN WorkerVarsUnchanged(n) ELSE StartWorker(n)
+           /\ IF on /\ batch = {} /\ Len(inflight) = 0
+                THEN IF dbLast + 1 = s
+                       THEN /\ cAcked' = cAcked
+                            /\ cConn' = cConn
+                            /\ wOn' = wOn
+                            /\ wExp' = [wExp EXCEPT ![n] = s + 1]
+                            /\ wCommitted' = [wCommitted EXCEPT ![n] = dbLast]
+                            /\ wBatch' = [wBatch EXCEPT ![n] = {s}]
+                            /\ wInflight' = wInflight
+                            /\ wOwed' = [wOwed EXCEPT ![n] = {s}]
+                       ELSE IF s <= dbLast
+                              THEN /\ cAcked' = cAcked \cup {s}
+                                   /\ cConn' = cConn
+                                   /\ StartWorker(n)
+                              ELSE /\ cAcked' = cAcked
+                                   /\ cConn' = None
+                                   /\ StartWorker(n)
+                ELSE /\ cAcked' = cAcked
+                     /\ cConn' = None
+                     /\ IF on THEN WorkerVarsUnchanged(n) ELSE StartWorker(n)
 
 (***************************************************************************)
 (* The worker hands its batch to the writer.                                *)
@@ -230,6 +238,28 @@ DbFail(n) ==
                  wOwed, cNext, cAcked, cStarted, cFinishSent, drops>>
 
 (***************************************************************************)
+(* The writer process goes away inside a live node (crash, restart) while   *)
+(* it holds the worker's batches. The worker's monitor reports it; the      *)
+(* outcome of the head batch is unknown: the writer died before the commit, *)
+(* or after it and before telling the worker. Either way the worker stops   *)
+(* and the stream fails (Session.writer_down); the client's resend goes     *)
+(* through the row. Counted with the failed commits.                        *)
+(***************************************************************************)
+WriterDown(n) ==
+  /\ wOn[n] /\ Len(wInflight[n]) > 0
+  /\ dbFails < MaxDbFails
+  /\ dbFails' = dbFails + 1
+  /\ LET b == Head(wInflight[n]) IN
+       \/ UNCHANGED <<dbLast, dbFinished>>
+       \/ /\ dbLast = Min(b) - 1
+          /\ dbLast' = Max(b)
+          /\ dbFinished' = (dbFinished \/ Marker \in b)
+  /\ wOn' = [wOn EXCEPT ![n] = FALSE]
+  /\ cConn' = IF cConn = n THEN None ELSE cConn
+  /\ UNCHANGED <<dbLifecycle, wExp, wCommitted, wBatch, wInflight, wOwed,
+                 cNext, cAcked, cStarted, cFinishSent, drops>>
+
+(***************************************************************************)
 (* Idle timeout or the linger after finalization: a quiet worker exits.     *)
 (***************************************************************************)
 Exit(n) ==
@@ -263,6 +293,7 @@ Next ==
   \/ \E n \in Nodes : Flush(n)
   \/ \E n \in Nodes : Commit(n)
   \/ \E n \in Nodes : DbFail(n)
+  \/ \E n \in Nodes : WriterDown(n)
   \/ \E n \in Nodes : Exit(n)
   \/ \E m \in Nodes : LifecycleFinished(m)
 

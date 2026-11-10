@@ -1141,3 +1141,97 @@ flushes. `output_groups` is `NOT NULL DEFAULT '{}'`, so new nodes omitting it is
 next release drops the table and the column in one migration (HANDOFF §7 has the exact
 note); a regression test (`worker_test.exs`, "persists a full build") asserts an ingested
 fixture leaves both empty.
+
+### 26.2 Stream session (candidate 1)
+
+**The module.** `Conveyor.Ingest.Session` holds the protocol of one build's event stream as
+pure transitions: the session state plus an input give the new state plus a list of
+effects. It has no process, no Repo, no timers and reads no application environment; its
+configuration is a `Session.Config` struct given at start (`Ingest.session_config/0`, or
+`Context.session` in tests). `Conveyor.Ingest.Worker` is the wiring: it turns messages into
+inputs and carries the effects out, and owns the three things that are I/O (the row, the
+writer monitor, the timers). `Normalizer` and `Batch` are unchanged. Wire behaviour,
+telemetry names and row/segment formats are unchanged.
+
+**Interface** (inputs; each returns `{session, [effect]}`; the invariants and error modes
+are in the moduledoc and are what `session_test.exs` tests):
+
+| Function | Input | `Ingest.tla` action |
+|---|---|---|
+| `new/2` | config, invocation and project | |
+| `loaded/2` | the row (`{:ok, inv}`) or a refusal (`{:error, :not_found}`) | `StartWorker` |
+| `push/4` | an event, the connection's acker, the caller | `Push` (dedup, `Absorb`, takeover, reject) |
+| `timer/2` | `:flush`, `:idle`, `:linger`, `:broadcast`, `:refusal` elapsed | `Flush`, `Exit` |
+| `committed/2` | a batch committed | `Commit` |
+| `failed/3` | a batch failed (`{:fenced, n}`, error, `:writer_down`) | `Commit` fenced, `DbFail` |
+| `writer_down/1` | the writer process went away | `WriterDown` (new in the model) |
+| `lifecycle/3` | attempt started / finished on a live session | `LifecycleStarted`, `LifecycleFinished` |
+| `summary/1` | the in-memory view | |
+
+**Effects:** `{:reply, from, term}`, `{:ack, acker, seq}`, `{:nack, acker, seq, reason}`,
+`{:submit, batch}`, `{:arm, timer, ms}`, `{:cancel, timer}`, `:reload`, `:unregister`,
+`{:broadcast, topic, message}`, `{:telemetry, event, measurements, metadata}`,
+`{:log, level, message}`, `{:finalized, invocation}`, `:hibernate`, `{:stop, :normal}`.
+
+**Defects fixed first** (each with a test that failed before the fix):
+
+| | Defect | Commit | Fix |
+|---|---|---|---|
+| A1 | cross-project write (security) | `607cfa8` | `Worker.load_or_create/3`, the one place every stream and lifecycle path crosses, answers `{:error, :not_found}` for a row of another project; workers register as `{project_id, invocation_id}` so a foreign context never reaches the owner's worker; the direct lifecycle-finished update is scoped by project. gRPC answers NOT_FOUND (what the HTTP upload and the web answer for such an id; the message names neither owner nor content). A refusal of any kind reveals that the id is taken, since a free id is accepted; nothing else leaks |
+| A2 | stranded worker (liveness) | `1f4efbb` | `Writer.submit/2` returns the writer's pid; the worker monitors it and a `:DOWN` with batches in flight is a failed batch with reason `:writer_down`. The outcome is unknown (the batch may have committed), so the session stops and the resend goes through the row |
+| A3 | ack failure not reported mid-stream | `d048a78` | the acker exits with the UNAVAILABLE error the gRPC adapter reports; it is linked to the handler, so the RPC ends wherever the handler is. A sequence gap right after a failed batch is reported as that failure (`Acker.check/2`), not as FAILED_PRECONDITION. Acks echo the stream id |
+| A4 | linger never cancelled | `1904885` | confirmed with a non-zero linger: the worker stopped under a resumed client, and the build stayed `disconnected` after its stream finished. An idle disconnect is its own state; the next event resumes (from the row once the disconnect committed); a linger that elapses with work in hand waits for it |
+| A5 | `mark_lifecycle_finished` errors unmapped | `08e32ce` | database errors are `{:error, {:unavailable, e}}` |
+| A6 | HTTP upload paid a batch hold per event | `56e9e85` | `Ingest.push_all/3` (push, then read the acks), shared with the seed |
+
+Found while extracting (`312af2f`), all on error paths: a failed batch did not tell the
+waiters of the batch still open; a lifecycle finish arriving while the final batch was at
+the writer finalized (and counted the tags) a second time; after a takeover reload an
+event the row already held was reported as a gap; a timer firing after it was replaced
+reached the callbacks.
+
+**Tests replaced.** Added: `session_test.exs`, 27 table-driven scenarios (`{input,
+expected effects}` steps: resend below expected, resend of an uncommitted event on two
+connections, gap, takeover and refused takeover, back-pressure, failed batch with several
+waiters, writer death and both outcome-unknown resumes, finalize once, idle, resume within
+the linger before and after the disconnect commits, quiet exit, refusal) plus 6 focused
+tests (final batch contents, digests, hibernate, profile settling); `tenancy_test.exs` (2),
+`writer_down_test.exs` (3), 3 gRPC/acker tests. Removed from `worker_test.exs`: the
+back-pressure and the resend-of-uncommitted tests (timing and a sink process) and the
+`Process.sleep` before the hibernation check; the idle and linger tests no longer change
+the application environment (they pass `Context.session`). Kept end to end: the fixture
+runs through the real pipeline, `two_node_test.exs`, the replay tests, the oracle and
+golden tests unchanged. Suite: 338 → 379 tests.
+
+**Model.** `Ingest.tla` gained `WriterDown(n)` (the writer dies holding the head batch; it
+committed or it did not; the worker stops) and the takeover branch that acknowledges an
+event the row already holds. `Ingest_fixed.cfg` holds (917k distinct states); the two
+documented counter-examples are unchanged.
+
+**Measured** (`bench/run.sh`, laptop shared with other builds during the runs, load
+average 12–25; `bench/results/20261110-05*-c1-*.json`):
+
+| | before (`56e9e85`) | after | |
+|---|---|---|---|
+| flat out, events/s | 19,344 · 18,347 · 15,838 | 15,940 · 14,885 · 15,631 | runs alternated; the spread between runs of one build is as large as the gap |
+| flat out, ack p50 / p99 ms | 52 / 284 · 69 / 305 · 41 / 1,399 | 123 / 491 · 102 / 959 · 69 / 396 | |
+| flat out, peak RSS | 1.71–1.81 GB | 1.90–1.99 GB | +5–10 %; see below |
+| paced 1,000 streams, events/s | 989 | 989 · 985 | |
+| paced, ack p50 / p99 ms | 1,028 / 2,050 | 1,028 / 2,064 · 1,030 / 2,050 | the batch hold |
+| paced, RSS per stream | 487 KB | 495 KB · 493 KB | one run under load read 805 KB |
+| 210 finished workers lingering (test VM) | 195 hibernated, 26 KB heap each | 210 hibernated, 7 KB each | |
+
+Paced, the shape production runs in, is unchanged. Flat out the after runs are 0–19 % lower
+than the before run next to them on a machine whose own noise was that large, with the
+workers' reductions equal (2.09 vs 2.12 G); the worker heap sampled at the peak is higher
+(344–436 MB vs 169–269 MB over 10,000 workers), which is the effect lists and deserves one
+profile on a quiet machine before it is called a regression or dismissed. **Open.**
+
+**For the next steps.** The session relies on this contract from the writer: every batch
+it took gets exactly one `{:batch_committed, ref}` or `{:batch_failed, ref, reason}` sent
+to the submitting process, `submit/2` returns the pid of the process whose death means
+"outcome unknown", and batches of one invocation commit in submission order. A commit
+pipeline with more than one process per shard must keep a single pid whose death covers
+every stage (or link the stages). Admission control has one place to refuse a push before
+it is absorbed (`Session.push/4`, next to back-pressure) and one status mapping
+(`PublishBuildEventServer`); `Ingest.push_all/3` (HTTP upload, seed) skips `Limits`.

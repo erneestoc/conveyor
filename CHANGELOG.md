@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Security: an invocation id belongs to its project.** An API key of one project that
+  knew a build id of another could append events to that build and mark it finished over
+  gRPC. Stream and lifecycle requests for an id owned by another project now get NOT_FOUND
+  and write nothing. Background jobs carry the project and load the build inside it.
+- **Stream session (PLAN §26.2):** the ingest protocol is one pure module
+  (`Conveyor.Ingest.Session`: inputs in, effects out) with the worker process as wiring;
+  its rules are tested as tables of the TLA+ scenarios. Fixed with it: a worker no longer
+  waits for ever when its writer process dies (the stream fails with UNAVAILABLE and Bazel
+  resends); a failed batch ends the gRPC stream at once instead of after the client stops
+  sending, and is never reported as a sequence gap; a client that resumes within
+  `INGEST_LINGER_MS` of an idle disconnect keeps its worker and its build finishes as
+  finished, not `disconnected`; a database error while recording the finish notification is
+  UNAVAILABLE; acknowledgements echo the stream id; `PUT /api/v1/invocations/:id/bep`
+  commits a file in a few batches instead of one batch hold per event.
+  `Invocations.get!/1` is removed (use `get/2` with `project_ids`).
+
 - **Derived rows nothing read are no longer stored (PLAN §26.1):** `named_sets` rows and
   `targets.output_groups` were written for every build and read by nothing (the raw BEP
   stream keeps the same data). Flat-out bench: WAL 721 → 662 bytes/event, storage

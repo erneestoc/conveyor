@@ -6,7 +6,9 @@ each running at most one worker per invocation (load the row, absorb in order, b
 commit through the compare-and-set fence on `last_event_seq`), acknowledgements that only
 travel over the open connection, takeovers, idle exits, and the two lifecycle
 notifications landing on any node. Chaos is bounded: connection drops and one commit that
-fails for a non-fence reason (a database hiccup after the retries).
+fails for a non-fence reason (a database hiccup after the retries) or is lost with its
+writer process (`WriterDown`, 2026-11-09: the writer of a live node dies holding the batch,
+which did or did not commit; the worker's monitor reports it and the worker stops).
 
 Properties checked by TLC:
 
@@ -17,7 +19,7 @@ Properties checked by TLC:
 | `Completes` (liveness) | with bounded chaos, the stream finishes and the lifecycle is recorded |
 
 Three configurations, all with two nodes, three events plus the marker, two drops and one
-failed commit (about 630k distinct states, a few seconds each):
+failed commit (about 920k distinct states, a few seconds each):
 
 | Config | Knobs | Result |
 |---|---|---|
@@ -25,10 +27,26 @@ failed commit (about 630k distinct states, a few seconds each):
 | `Ingest_current.cfg` | the dedup rule the code shipped with: a resend is acknowledged at once when it is below the sequence the worker *expects* | `Durability` violated in 7 steps: absorb 1, drop, reconnect to the same node, resend 1, acknowledged while its batch is still in flight; a failed commit then loses it for good, and Bazel never resends what it believes stored |
 | `Ingest_pre_m10.cfg` | the attempt-started notification starts a worker; a fenced finish is not recorded | `Completes` violated: the finish lands on the stray worker's node, is fenced and never recorded (the builds the AWS trial left `in_progress`) |
 
-The fix for the first row is in `Conveyor.Ingest.Worker`: a resend is acknowledged
+The fix for the first row is in `Conveyor.Ingest.Session.push/4`: a resend is acknowledged
 immediately only when `seq <= committed_seq`; between `committed_seq` and `expected_seq`
 the new connection is registered as a waiter on the batch that carries the event, so the
-ack follows the commit (`worker_test.exs`, "a resend of an absorbed, uncommitted event").
+ack follows the commit (`session_test.exs`, "a resend of an absorbed, unflushed event" and
+"a resend of an event at the writer").
+
+The protocol lives in one pure module, so the mapping is by function:
+
+| Action | Code |
+|---|---|
+| `StartWorker` | `Worker.load_or_create/3` → `Session.loaded/2` |
+| `Push` (dedup, `Absorb`, takeover, reject) | `Ingest.push/3` → `Session.push/4`; takeover is the `:reload` effect followed by `Session.loaded/2` |
+| `Flush` | `Session.timer(s, :flush)` (or the batch size, or the marker) → `{:submit, batch}` |
+| `Commit` | `Writer` (`fenced_update!/3`) → `Session.committed/2`, fenced → `Session.failed/3` |
+| `DbFail` | `Session.failed/3` |
+| `WriterDown` | the worker's monitor → `Session.writer_down/1` |
+| `Exit` | `Session.timer(s, :linger)`; the idle disconnect before it is `Session.timer(s, :idle)` |
+| `LifecycleStarted`, `LifecycleFinished` | `Ingest.lifecycle/2` → `Session.lifecycle/3` on a live worker, the row directly otherwise |
+
+`session_test.exs` runs the model's scenarios as tables of inputs and expected effects.
 
 ## Blob lifecycle (`Blobs.tla`)
 
@@ -190,10 +208,11 @@ Not modelled: the drain on shutdown beyond what the ingest model's exits cover.
 
 TLC needs Java and `tla2tools.jar` (`TLA_TOOLS=/path/to/tla2tools.jar`, default
 `~/tla/tla2tools.jar` from https://github.com/tlaplus/tlaplus/releases). Re-run the model
-when the worker or writer protocol changes; keep the spec's actions aligned with
-`worker.ex` (`handle_call({:push, …})`, `takeover/2`, `handle_info({:batch_committed…})`),
-`writer.ex` (`fenced_update!/3`) and `ingest.ex` (`lifecycle/2`).
+when the session or writer protocol changes; keep the spec's actions aligned with
+`session.ex` (table above), `writer.ex` (`fenced_update!/3`, the delivery contract of
+`submit/2`) and `ingest.ex` (`lifecycle/2`).
 
 Not modelled: several invocations, the writer's group commit across invocations (the
-fence is per row), backpressure, the log cap, retries inside the writer (a `DbFail` is the
+fence is per row), backpressure, tenancy (one project), the linger and the resume after an
+idle disconnect (all four are table tests of the session), the log cap, retries inside the writer (a `DbFail` is the
 exhausted retry), and the contents of events.
