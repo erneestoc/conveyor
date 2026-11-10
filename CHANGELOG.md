@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Derived rows nothing read are no longer stored (PLAN §26.1):** `named_sets` rows and
+  `targets.output_groups` were written for every build and read by nothing (the raw BEP
+  stream keeps the same data). Flat-out bench: WAL 721 → 662 bytes/event, storage
+  30.2 → 28.4 KB/build on the small fixtures; on real builds `named_sets` was about a third
+  of the database. `Invocations.named_sets/1` and the `NamedSet` schema are removed.
+  **Follow-up owed in the next release:** a migration dropping table `named_sets` and column
+  `targets.output_groups` (not in this one: old nodes still write both during a rolling
+  deploy). Existing rows stay until then; `TRUNCATE named_sets` is safe once all nodes run
+  this release.
 - **Linearity run (PLAN §25):** six nodes and an 8-vCPU database in blob mode, flat out
   to 66k events/s and paced at 5,000 streams: the database's CPU is linear at ≈ 0.6 % per
   1,000 events/s on 8 vCPUs, the gp3 volume is the first ceiling, and `max_wal_size` 16 GB

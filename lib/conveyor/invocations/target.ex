@@ -14,7 +14,6 @@ defmodule Conveyor.Invocations.Target do
     field :status, :string, default: "configured"
     field :test_status, :string
     field :failure_message, :string
-    field :output_groups, :map, default: %{}
     field :first_seen_at, :utc_datetime_usec
     field :completed_at, :utc_datetime_usec
     field :duration_ms, :integer

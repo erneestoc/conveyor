@@ -174,22 +174,8 @@ defmodule Conveyor.Ingest.Normalizer do
     {increment(state, :targets_configured), Batch.upsert_target(batch, target_key(attrs), attrs)}
   end
 
-  defp handle(
-         :named_set_of_files,
-         %{id: %{id: {:named_set, %{id: set_id}}}, payload: {:named_set_of_files, ns}},
-         _seq,
-         state,
-         batch
-       ) do
-    attrs = %{
-      set_id: set_id,
-      files: %{"files" => Enum.map(ns.files, &file_map/1)},
-      child_set_ids: Enum.map(ns.file_sets, & &1.id)
-    }
-
-    {state, Batch.add_named_set(batch, attrs)}
-  end
-
+  # `NamedSetOfFiles` events and `TargetComplete.output_group` are not normalized: nothing reads
+  # the file-set graph, and the raw event stream keeps it for a feature that would.
   defp handle(
          :completed,
          %{id: %{id: {:target_completed, tid}}, payload: {:completed, c}},
@@ -203,17 +189,6 @@ defmodule Conveyor.Ingest.Normalizer do
       aspect: tid.aspect || "",
       status: if(c.success, do: "success", else: "failed"),
       failure_message: failure_message(c.failure_detail),
-      output_groups: %{
-        "groups" =>
-          Enum.map(
-            c.output_group,
-            &%{
-              "name" => &1.name,
-              "file_sets" => Enum.map(&1.file_sets, fn fs -> fs.id end),
-              "incomplete" => &1.incomplete
-            }
-          )
-      },
       completed_at: DateTime.utc_now()
     }
 

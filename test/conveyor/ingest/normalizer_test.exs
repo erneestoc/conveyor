@@ -66,7 +66,8 @@ defmodule Conveyor.Ingest.NormalizerTest do
     assert map_size(batch.targets) == 5
     assert Enum.all?(Map.values(batch.targets), &(&1.status == "success"))
     assert map_size(batch.tests) == 5, "pass + 3 shards + uses_greeting"
-    assert batch.named_sets != []
+    refute Map.has_key?(batch, :named_sets)
+    refute Enum.any?(Map.values(batch.targets), &Map.has_key?(&1, :output_groups))
     assert batch.metrics.build_metrics["actionSummary"]["actionsExecuted"] != nil
     assert Map.has_key?(batch.metrics.tool_logs, "command.profile.gz")
     assert inv.profile_uri =~ ~r/command.*\.profile\.gz$/ and inv.profile_status == "referenced"

@@ -24,7 +24,6 @@ defmodule Conveyor.Ingest.Writer do
     Invocation,
     LogSegment,
     Metrics,
-    NamedSet,
     Target,
     TestResult
   }
@@ -274,7 +273,6 @@ defmodule Conveyor.Ingest.Writer do
       targets: merged_rows(batches, :targets),
       tests: merged_rows(batches, :tests),
       actions: flat_rows(batches, :actions),
-      named_sets: flat_rows(batches, :named_sets),
       metrics: metrics_rows(batches, now),
       tag_counts: tag_counts(batches)
     }
@@ -295,13 +293,6 @@ defmodule Conveyor.Ingest.Writer do
         Repo.insert_all(Action, plan.actions,
           on_conflict: :nothing,
           conflict_target: [:invocation_id, :seq]
-        )
-
-    if plan.named_sets != [],
-      do:
-        Repo.insert_all(NamedSet, plan.named_sets,
-          on_conflict: :nothing,
-          conflict_target: [:invocation_id, :set_id]
         )
 
     upsert_grouped(Metrics, plan.metrics, [:invocation_id], [:inserted_at])

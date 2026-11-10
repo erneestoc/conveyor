@@ -487,7 +487,7 @@ defmodule Conveyor.Bench do
     cols |> Enum.zip(row) |> Map.new(fn {k, v} -> {k, v} end)
   end
 
-  @tables ~w(invocations event_segments log_segments targets test_results actions named_sets invocation_metrics tag_keys)
+  @tables ~w(invocations event_segments log_segments targets test_results actions invocation_metrics tag_keys)
 
   defp table_sizes do
     %{rows: rows} =

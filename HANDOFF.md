@@ -87,8 +87,8 @@ lib/conveyor/
   ingest/status.ex      exit code → status, categories
   ingest/retry.ex       backoff for DBConnection/Postgrex transient errors
   ingest/verify.ex      oracle: contiguous segments, counts, log offsets, final status
-  invocations.ex        read side: list(project_id/statuses/query/before), events/raw_frames/log/log_segments/targets/test_results/actions/metrics/named_sets/facets/failed_targets/slowest_tests/events_page/day
-  invocations/*.ex      schemas (Invocation, Target, TestResult, Action, Metrics, NamedSet, TagKey, EventSegment, LogSegment)
+  invocations.ex        read side: list(project_id/statuses/query/before), events/raw_frames/log/log_segments/targets/test_results/actions/metrics/facets/failed_targets/slowest_tests/events_page/day
+  invocations/*.ex      schemas (Invocation, Target, TestResult, Action, Metrics, TagKey, EventSegment, LogSegment)
   projects.ex           projects + api keys (create/verify/rotate/revoke/touch/expiring); ApiKeyCache (ETS + PubSub invalidation); Segments defaults
   query.ex, query/parser.ex, query/values.ex   search language
   metrics/{scope,dashboard,tests}.ex           dashboard queries
@@ -248,7 +248,14 @@ ack timeout, resends fence, fences deadlock, every tier amplifies; the fix is st
 headroom (or Aurora) plus the upsert ordering already landed; a server-side guard (shed
 new streams when the writer's group latency passes a threshold) is worth a design note.
 (3) `named_sets` is 12 GB and `targets` 13 GB for ≈ 300k load-test builds (≈ 40 KB per
-build each): the per-build storage item for the next cost pass. (4) ≈ 50k load-test invocations abandoned by the failed paced levels: `Workers.SweepStale`
+build each): the per-build storage item for the next cost pass. **Done 2026-11-09 (PLAN
+§26.1):** `named_sets` rows and `targets.output_groups` are no longer written (nothing read
+them). **Owed in the release after the one that ships this:** one migration, generated with
+`mix ecto.gen.migration drop_named_sets_and_output_groups`, that drops table `named_sets`
+and column `targets.output_groups`. It must not ship in the same release: migrations run on
+the first new node while old nodes still insert into both. Until then the existing rows
+stay; `TRUNCATE named_sets` by hand is safe once every node runs the new release and
+returns the space at once (on the trial: 12 GB). (4) ≈ 50k load-test invocations abandoned by the failed paced levels: `Workers.SweepStale`
 marks them `disconnected` within two idle windows and build retention removes them; they
 were left in place (a bulk delete on the demo-shape `db.t3.micro` is not worth it). Scratchpad scripts of the run (`ramp2.sh`, `run_level.sh`,
 `measure.sh` with object counts and disk metrics, `refetch.sh`, `pgwal.exs`, `pgio.exs`,

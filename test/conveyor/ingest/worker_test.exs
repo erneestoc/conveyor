@@ -105,7 +105,19 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert length(Invocations.targets(inv)) == 5
     assert length(Invocations.test_results(inv)) == 5
     assert Invocations.actions(inv) != [] and Invocations.metrics(inv).build_metrics != %{}
-    assert map_size(Invocations.named_sets(inv)) > 0
+    # The file-set graph stays in the raw events only (PLAN §26.1): no derived rows.
+    assert Enum.any?(events, &match?(%{payload: {:named_set_of_files, _}}, &1))
+
+    assert %{rows: [[0, 0]]} =
+             Conveyor.Repo.query!(
+               """
+               SELECT (SELECT count(*) FROM named_sets WHERE invocation_id = $1),
+                      (SELECT count(*) FROM targets
+                       WHERE invocation_id = $1 AND output_groups <> '{}')
+               """,
+               [Ecto.UUID.dump!(id)]
+             )
+
     assert [%{byte_offset: 0, line_offset: 0} | _] = Invocations.log_segments(inv)
     Conveyor.Ingest.TagCounter.flush()
     assert Enum.any?(Invocations.tag_keys(ctx.project_id, limit: 50), &(&1.key == "scenario"))

@@ -74,7 +74,6 @@ defmodule Conveyor.Ingest.BatchTest do
       |> Batch.upsert_target({"//a", ""}, %{status: "success"})
       |> Batch.upsert_test({"//a", "", 1, 1, 1}, %{status: "PASSED"})
       |> Batch.add_action(%{seq: 1})
-      |> Batch.add_named_set(%{set_id: "0"})
       |> Batch.put_metrics(%{tool_logs: %{}})
       |> Batch.put_metrics(%{build_metrics: %{}})
       |> Batch.set_invocation(%{status: "failed"})

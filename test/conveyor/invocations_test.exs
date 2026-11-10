@@ -62,7 +62,7 @@ defmodule Conveyor.InvocationsTest do
     assert Invocations.targets(inv.id) == [] and Invocations.test_results(inv.id) == [] and
              Invocations.actions(inv.id) == []
 
-    assert Invocations.metrics(inv.id) == nil and Invocations.named_sets(inv.id) == %{}
+    assert Invocations.metrics(inv.id) == nil
     assert Invocation.statuses() |> length() == 6
   end
 end

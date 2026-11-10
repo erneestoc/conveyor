@@ -207,7 +207,8 @@ log_segments        -- Progress stdout/stderr, same batching; range-partitioned 
 targets
   invocation_id, label, aspect text, configuration_id text (attribute, not part of the key: TargetConfigured carries no configuration, so a target is one row per label+aspect and the last configuration wins)
   kind text, status text (configured|success|failed), test_status text, test_size text
-  first_seen_at, completed_at, failure_message text, output_groups jsonb
+  first_seen_at, completed_at, failure_message text
+  (output_groups jsonb: no longer written, dropped in a later release, §26.1)
   UNIQUE (invocation_id, label, aspect)
 
 test_results
@@ -224,7 +225,7 @@ actions   -- ActionExecuted
 invocation_metrics  -- 1:1, full BuildMetrics + BuildToolLogs as jsonb for the Metrics tab
   invocation_id PK, build_metrics jsonb, action_data jsonb, runner_counts jsonb, worker_metrics jsonb, tool_logs jsonb
 
-named_sets  -- NamedSetOfFiles, resolved lazily
+named_sets  -- NamedSetOfFiles. No longer written (§26.1): nothing read it; table dropped in a later release
   invocation_id, set_id text, files jsonb, child_set_ids text[]   PK(invocation_id, set_id)
 
 tag_keys    -- facets / autocomplete
@@ -442,7 +443,7 @@ Queries run over `invocations` denormalized columns with `percentile_cont` group
 2. **Group commit.** N writer shards (≈ scheduler count) each commit one transaction every 20–50 ms containing batches from many invocations, via `COPY ... FROM STDIN` (Postgrex streams) for segments and multi-row `INSERT ... ON CONFLICT` for structured tables. One fsync per writer flush instead of one per invocation batch. Writers are the only DB-writing processes on the hot path; the pool is sized for them plus read traffic.
 3. **Backpressure instead of buffering.** Worker → writer handoff is a bounded `call`. If the writer is behind, workers block, the gRPC handler stops reading, HTTP/2 flow control fills, and Bazel slows its upload (it keeps its own buffer and, with `wait_for_upload_complete`, waits at the end of the build). Nothing is dropped; the system degrades to "slower acks", never to "lost data". Queue depth and blocked-time are exported metrics with alerting thresholds.
 4. **Cheap fan-out.** Ingest never blocks on the UI. Broadcasts are per-invocation digests (≤ 4/s) and a global list digest (≤ 1/s) that carries only changed summaries; detail topics are only published while someone is subscribed (`Phoenix.Tracker`-style presence check). The list LiveView applies digests in memory; nothing re-queries per event.
-5. **Bounded per-stream memory.** Workers keep only the current batch, the counters, and the named-set map (capped; overflow spills to `named_sets`). Idle workers hibernate; finished workers exit after the linger period. 1,000 streams ≈ a few hundred MB.
+5. **Bounded per-stream memory.** Workers keep only the current batch, the counters, (no named-set map: the file-set graph is not kept, §26.1). Idle workers hibernate; finished workers exit after the linger period. 1,000 streams ≈ a few hundred MB.
 6. **Postgres layout.** Daily range partitions for segments (retention = drop partition), monthly for invocations, GIN on tags with `jsonb_path_ops`, `fillfactor` tuned for the counter updates on `invocations` (HOT updates), per-table autovacuum settings, `wal_compression`, large `max_wal_size`, checkpoint tuning. Documented in `docs/postgres.md` with a sizing calculator.
 7. **Storage math (defaults).** 5k builds/h × 2 MB compressed raw ≈ 10 GB/h ⇒ raw retention of 3–7 days ≈ 1–2 TB; structured data is ~2–5% of that and lives 90 days+. `STORE_RAW_EVENTS=all|logs_only|none` lets an operator trade the Raw tab/reprocessing for disk. Cold tiering to S3 is post-v1.
 8. **One BEAM, many processes.** gRPC, workers, writers and LiveView all run in one VM; CPU-bound decoding parallelizes across schedulers naturally.
@@ -1093,3 +1094,50 @@ reads (the boundary test `project_boundary_test.exs` becomes the shard-boundary 
 (second repo on a second database) and the fleet level with two shards; (6) docs. Model:
 none needed for routing itself; `Blobs.tla`/`Archive.tla` are per project and unaffected.
 
+
+## 26. Architecture review 2026-11-09
+
+One subsection per candidate of the review that was acted on.
+
+### 26.1 Derived rows nothing reads (candidate 5)
+
+**Removed.** The ingest path no longer normalizes the file-set graph: the `NamedSetOfFiles`
+handler in `Ingest.Normalizer`, `Batch.add_named_set/2` and the batch's `named_sets` list,
+the writer's `named_sets` insert, `Invocations.named_sets/1`, the `NamedSet` schema, and the
+`output_groups` attribute of a completed target (and its field in the `Target` schema).
+Checked before removing: no LiveView, template, controller, worker or artifact path read
+either. `Conveyor.Artifacts` resolves test.log/test.xml from `test_results.log_uri`,
+`xml_uri` and `files`, and the profile from `invocation_metrics.tool_logs`, all filled from
+`TestResult`/`BuildToolLogs` directly (`Normalizer.file_map/1` stays for those). The only
+readers were three test assertions and the bench's table-size list. The raw BEP stream
+still holds every `NamedSetOfFiles` event, so an output-files feature can derive the graph
+on read.
+
+**Measured** (laptop, `bench/run.sh`, flat out, 200 streams × 10,000 builds of the seven
+recorded fixtures, one run each, `bench/results/20261110-0435*-c5-before.json` and
+`…0436*-c5-after.json`):
+
+| | before | after | |
+|---|---|---|---|
+| WAL bytes/event | 721.4 | 661.6 | −8 % |
+| storage/build | 30.2 KB | 28.4 KB | −6 % |
+| `named_sets` | 15.8 MB | not written | |
+| `targets` | 9.7 MB | 7.7 MB | −21 % |
+| Postgres exec time | 9.5 s | 5.1 s | |
+| round trips/flush | 10.0 | 9.3 | |
+| events/s | 18,957 | 19,577 | within run-to-run noise |
+
+The fixtures are small builds (≈ 2 named sets and 2 targets each), so this understates
+real builds: on the real corpus (`20261001-070900-real-corpus-1.json`) `named_sets` was
+369 MB of a ≈ 1.1 GB total across the listed tables for 10,000 builds, and on the trial
+database 12 GB of 39 GB. `targets` on real builds shrinks by the `output_groups` share
+only; its 2–3 upserts per target and the label in the index are untouched (not measured
+here on the real corpus).
+
+**Deferred drop.** No migration in this release. Migrations run on the first new node while
+old nodes still serve (docs/production.md "Rollouts"), and old nodes insert into
+`named_sets` and write `targets.output_groups`; dropping either now would fail their
+flushes. `output_groups` is `NOT NULL DEFAULT '{}'`, so new nodes omitting it is safe. The
+next release drops the table and the column in one migration (HANDOFF §7 has the exact
+note); a regression test (`worker_test.exs`, "persists a full build") asserts an ingested
+fixture leaves both empty.

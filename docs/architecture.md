@@ -49,7 +49,7 @@ Browser ──HTTPS / WebSocket──▶ node C ─────┘         S3 (p
 | Table | Content |
 |---|---|
 | `invocations` | one row per build: status, timings, counters, tags, options, cache stats. Updated a few times per build (fenced). |
-| `targets`, `test_results`, `actions`, `named_sets`, `invocation_metrics` | normalized rows keyed by invocation, upserted with partial column sets |
+| `targets`, `test_results`, `actions`, `invocation_metrics` | normalized rows keyed by invocation, upserted with partial column sets. The file-set graph (`NamedSetOfFiles`, `TargetComplete.output_group`) is not normalized: it stays in the raw BEP stream. The `named_sets` table and `targets.output_groups` column still exist, unwritten, until the release that drops them |
 | `event_segments` | the raw BEP stream, zstd-compressed batches, partitioned by day |
 | `log_segments` | the build log text, zstd-compressed batches with byte and line offsets, partitioned by day |
 | `tag_keys` | tag facet counts per project, maintained by a per-node counter, rebuilt after deletes |

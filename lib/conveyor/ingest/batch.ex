@@ -26,7 +26,6 @@ defmodule Conveyor.Ingest.Batch do
             targets: %{},
             tests: %{},
             actions: [],
-            named_sets: [],
             metrics: nil,
             invocation: %{},
             tag_keys: %{},
@@ -88,9 +87,6 @@ defmodule Conveyor.Ingest.Batch do
   @spec add_action(t(), map()) :: t()
   def add_action(batch, attrs), do: %{batch | actions: [attrs | batch.actions]}
 
-  @spec add_named_set(t(), map()) :: t()
-  def add_named_set(batch, attrs), do: %{batch | named_sets: [attrs | batch.named_sets]}
-
   @spec put_metrics(t(), map()) :: t()
   def put_metrics(batch, attrs), do: %{batch | metrics: Map.merge(batch.metrics || %{}, attrs)}
 
@@ -140,7 +136,6 @@ defmodule Conveyor.Ingest.Batch do
       targets: Map.merge(a.targets, b.targets, fn _k, x, y -> Map.merge(x, y) end),
       tests: Map.merge(a.tests, b.tests, fn _k, x, y -> Map.merge(x, y) end),
       actions: b.actions ++ a.actions,
-      named_sets: b.named_sets ++ a.named_sets,
       metrics: merge_metrics(a.metrics, b.metrics),
       invocation: Map.merge(a.invocation, b.invocation),
       tag_keys: Map.merge(a.tag_keys, b.tag_keys, fn _k, x, y -> x + y end),
@@ -184,7 +179,7 @@ defmodule Conveyor.Ingest.Batch do
   @spec empty?(t()) :: boolean()
   def empty?(%__MODULE__{} = b) do
     b.events == [] and b.log == [] and b.targets == %{} and b.tests == %{} and b.actions == [] and
-      b.named_sets == [] and b.metrics == nil and b.invocation == %{} and b.last_seq < b.first_seq and
+      b.metrics == nil and b.invocation == %{} and b.last_seq < b.first_seq and
       b.tag_keys == %{}
   end
 

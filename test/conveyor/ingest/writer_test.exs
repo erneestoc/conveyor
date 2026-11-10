@@ -39,7 +39,6 @@ defmodule Conveyor.Ingest.WriterTest do
           status: "PASSED"
         })
         |> Batch.add_action(%{seq: 1, mnemonic: "Genrule", success: false})
-        |> Batch.add_named_set(%{set_id: "0", files: %{}})
         |> Batch.put_metrics(%{tool_logs: %{"a" => "b"}})
         |> Batch.set_invocation(%{command: "build", targets_configured: 1})
         |> Batch.count_tags(%{"k" => "v"})

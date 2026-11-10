@@ -10,7 +10,6 @@ defmodule Conveyor.Invocations do
     Invocation,
     LogSegment,
     Metrics,
-    NamedSet,
     TagKey,
     Target,
     TestResult
@@ -151,11 +150,6 @@ defmodule Conveyor.Invocations do
 
   @spec metrics(Invocation.t() | String.t()) :: Metrics.t() | nil
   def metrics(inv), do: Repo.get(Metrics, id(inv))
-
-  @spec named_sets(Invocation.t() | String.t()) :: %{String.t() => NamedSet.t()}
-  def named_sets(inv) do
-    Repo.all(from n in NamedSet, where: n.invocation_id == ^id(inv)) |> Map.new(&{&1.set_id, &1})
-  end
 
   @doc "Every raw BEP event of an invocation, decoded, in sequence order."
   @spec events(Invocation.t()) :: [BuildEventStream.BuildEvent.t()]
