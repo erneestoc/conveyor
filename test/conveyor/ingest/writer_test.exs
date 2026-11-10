@@ -325,6 +325,31 @@ defmodule Conveyor.Ingest.WriterTest do
     for id <- tl(ids), do: assert(Repo.get!(Invocation, id).last_event_seq == 1)
   end
 
+  @tag :capture_log
+  test "the fence is judged before any child row is written", %{id: id, project: project} do
+    # Stale (the row is at 0, the batch expects 41) and unwritable (the mnemonic is too
+    # long for its column): the verdict is the fence, reached before the insert that would
+    # have failed, and the batch next to it commits.
+    stale =
+      batch(id, project, 42, fn b ->
+        b
+        |> Batch.add_event(42, "progress", "y")
+        |> Batch.add_action(%{seq: 42, mnemonic: String.duplicate("x", 300)})
+      end)
+
+    other = Conveyor.Bep.Replay.uuid()
+    Repo.insert!(%Invocation{id: other, project_id: project.id, started_at: DateTime.utc_now()})
+    good = batch(other, project, 1, &Batch.add_event(&1, 1, "started", "x"))
+
+    writer = WriterPool.for_invocation(id)
+    Writer.submit(writer, stale)
+    Writer.submit(writer, good)
+    stale_ref = stale.ref
+    good_ref = good.ref
+    assert_receive {:batch_failed, ^stale_ref, {:fenced, 41}}, 2_000
+    assert_receive {:batch_committed, ^good_ref}, 2_000
+  end
+
   test "a batch that ends a stream is committed without waiting for the writer's hold", %{
     id: id,
     project: project

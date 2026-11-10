@@ -5,9 +5,11 @@ defmodule Conveyor.Ingest.Writer do
   transaction and notifies each submitter. If the group fails, batches are retried one by
   one so a single fenced invocation cannot block the others.
 
-  Inside the transaction the group is written table by table: one statement per table and
-  column set for segments, targets, tests, actions, named sets and metrics, then one fenced
-  invocation update per set of dirty columns (`UPDATE … FROM unnest(...)`, PLAN §24 item 1).
+  Inside the transaction the fence goes first: one fenced invocation update per set of dirty
+  columns (`UPDATE … FROM unnest(...)`, PLAN §24 item 1, rows in id order), so a group with
+  a stale batch aborts before it writes a child row. Then the group is written table by
+  table: one statement per table and column set for segments, targets, tests, actions and
+  metrics.
   Batches of one invocation that follow each other are merged first, so an invocation
   costs one segment, one log row and one update row per flush however many batches it
   submitted. Round trips grow with the number of tables, not batches.
@@ -297,9 +299,14 @@ defmodule Conveyor.Ingest.Writer do
     }
   end
 
-  # Writes a planned group inside the current transaction, ending with one fenced update per
-  # batch in submission order. Raises on failure.
+  # Writes a planned group inside the current transaction. The fenced updates go first: a
+  # group with a stale batch aborts before it has written a child row (or its WAL), and the
+  # invocation rows, locked in id order, are the first locks every node's group takes for a
+  # build, so two groups that hold the same build queue on its row instead of interleaving
+  # their child upserts. Raises on failure.
   defp apply_plan!(plan, batches) do
+    update_invocations!(batches)
+
     if plan.event_rows != [],
       do: Repo.insert_all(EventSegment, plan.event_rows, on_conflict: :nothing)
 
@@ -315,7 +322,6 @@ defmodule Conveyor.Ingest.Writer do
         )
 
     upsert_grouped(Metrics, plan.metrics, [:invocation_id], [:inserted_at])
-    update_invocations!(batches)
     :ok
   end
 
@@ -374,11 +380,26 @@ defmodule Conveyor.Ingest.Writer do
   defp update_invocations!(batches) do
     now = DateTime.utc_now()
 
-    batches
-    |> Enum.group_by(&dirty_columns/1)
-    |> Enum.each(fn {columns, group} ->
-      group |> unique_rounds() |> Enum.each(&fenced_update!(columns, &1, now))
-    end)
+    # Every statement runs before the verdict, so one attempt names every fenced unit of
+    # the group and the retry without them is not fenced again by a unit it left in.
+    fenced =
+      batches
+      |> Enum.group_by(&dirty_columns/1)
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.flat_map(fn {columns, group} ->
+        group |> unique_rounds() |> Enum.flat_map(&fenced_update(columns, &1, now))
+      end)
+
+    case fenced do
+      [] ->
+        :ok
+
+      [b | _] ->
+        raise Fenced,
+          invocation_id: b.invocation_id,
+          expected: b.first_seq - 1,
+          units: Enum.map(fenced, &{&1.invocation_id, &1.first_seq})
+    end
   end
 
   defp dirty_columns(%Batch{invocation: changes}),
@@ -399,7 +420,10 @@ defmodule Conveyor.Ingest.Writer do
 
   @fixed [{"id", "uuid"}, {"expected", "bigint"}, {"last_seq", "bigint"}, {"now", "timestamptz"}]
 
-  defp fenced_update!(columns, batches, now) do
+  # Returns the batches whose row did not match (fenced). Rows travel in id order: the
+  # statement locks the invocation rows in that order on every node.
+  defp fenced_update(columns, batches, now) do
+    batches = Enum.sort_by(batches, &Ecto.UUID.dump!(&1.invocation_id))
     typed = Enum.map(columns, &{Atom.to_string(&1), Invocation.__schema__(:type, &1)})
 
     params =
@@ -441,16 +465,7 @@ defmodule Conveyor.Ingest.Writer do
     %{rows: rows} = Repo.query!(sql, params, cache_statement: name)
     updated = MapSet.new(rows, fn [id] -> id end)
 
-    case Enum.reject(batches, &MapSet.member?(updated, Ecto.UUID.dump!(&1.invocation_id))) do
-      [] ->
-        :ok
-
-      [b | _] = fenced ->
-        raise Fenced,
-          invocation_id: b.invocation_id,
-          expected: b.first_seq - 1,
-          units: Enum.map(fenced, &{&1.invocation_id, &1.first_seq})
-    end
+    Enum.reject(batches, &MapSet.member?(updated, Ecto.UUID.dump!(&1.invocation_id)))
   end
 
   # Element types of the unnest arrays per Ecto type. A list inside an array parameter
