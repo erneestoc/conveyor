@@ -51,9 +51,28 @@ defmodule Conveyor.Ingest.Writer do
 
   def name(shard), do: {:via, Registry, {Conveyor.Ingest.Registry, {:writer, shard}}}
 
-  @doc "Queues a batch; the caller receives `{:batch_committed, ref}` or `{:batch_failed, ref, reason}`."
-  @spec submit(GenServer.name(), Batch.t()) :: :ok
-  def submit(writer, %Batch{} = batch), do: GenServer.cast(writer, {:submit, batch, self()})
+  @doc """
+  Queues a batch. The delivery contract with the submitter:
+
+    * the writer sends the caller exactly one of `{:batch_committed, ref}` or
+      `{:batch_failed, ref, reason}` (`reason` is `{:fenced, seq}` or the error) for every
+      batch it took, and it does so before it handles anything else;
+    * the only way an outcome is never sent is the writer process going away. `submit/2`
+      returns the writer's pid so the caller can monitor it; a `:DOWN` with batches
+      outstanding means their outcome is unknown (a batch may have committed), and
+      `{:error, :writer_down}` means the batch was never queued.
+  """
+  @spec submit(GenServer.name(), Batch.t()) :: {:ok, pid()} | {:error, :writer_down}
+  def submit(writer, %Batch{} = batch) do
+    case GenServer.whereis(writer) do
+      pid when is_pid(pid) ->
+        GenServer.cast(pid, {:submit, batch, self()})
+        {:ok, pid}
+
+      nil ->
+        {:error, :writer_down}
+    end
+  end
 
   @impl true
   def init(opts) do

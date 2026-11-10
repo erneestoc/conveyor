@@ -14,7 +14,7 @@ defmodule Conveyor.Ingest.Worker do
 
   alias Conveyor.Bep.Event
   alias Conveyor.Ingest
-  alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, WriterPool}
+  alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, Writer, WriterPool}
   alias Conveyor.Watch
 
   # Columns a worker holds only until the build is finalized and never puts on list topics.
@@ -95,6 +95,7 @@ defmodule Conveyor.Ingest.Worker do
       batch:
         Batch.new(id, ctx.project_id, day, inv.last_event_seq + 1, inv.log_bytes, inv.log_lines),
       inflight: %{},
+      writer: nil,
       blocked: [],
       committed_seq: inv.last_event_seq,
       flush_timer: nil,
@@ -350,7 +351,7 @@ defmodule Conveyor.Ingest.Worker do
     if Batch.empty?(batch) and batch.waiters == [] do
       %{state | norm: norm}
     else
-      WriterPool.for_invocation(state.invocation_id) |> Conveyor.Ingest.Writer.submit(batch)
+      state = submit(state, batch)
 
       next =
         Batch.new(
@@ -364,6 +365,27 @@ defmodule Conveyor.Ingest.Worker do
 
       %{state | norm: norm, batch: next, inflight: Map.put(state.inflight, batch.ref, batch)}
     end
+  end
+
+  # Hands a batch to the invocation's writer shard and watches that writer: the writer
+  # answers every batch it holds before it returns to its loop, so the only way to lose an
+  # outcome is the writer process going away, which the monitor reports (see `:DOWN`).
+  defp submit(state, batch) do
+    case Writer.submit(WriterPool.for_invocation(state.invocation_id), batch) do
+      {:ok, pid} ->
+        watch_writer(state, pid)
+
+      {:error, :writer_down} ->
+        send(self(), {:batch_failed, batch.ref, :writer_down})
+        state
+    end
+  end
+
+  defp watch_writer(%{writer: {pid, _ref}} = state, pid), do: state
+
+  defp watch_writer(state, pid) do
+    with {_old, ref} <- state.writer, do: Process.demonitor(ref, [:flush])
+    %{state | writer: {pid, Process.monitor(pid)}}
   end
 
   # Finalization happens in the batch that carries the end-of-stream marker, so the final
@@ -437,13 +459,32 @@ defmodule Conveyor.Ingest.Worker do
     {:noreply, state}
   end
 
-  def handle_info({:batch_failed, ref, reason}, state) do
-    {batch, _} = Map.pop(state.inflight, ref)
-    notify_waiters(batch, {:error, reason})
+  # One failed batch fails everything behind it: later batches cannot commit before it
+  # (the fence), so every waiter of every batch in flight is told now, in sequence order.
+  def handle_info({:batch_failed, _ref, reason}, state) do
+    state.inflight
+    |> Map.values()
+    |> Enum.sort_by(& &1.first_seq)
+    |> Enum.each(&notify_waiters(&1, {:error, reason}))
+
     Enum.each(state.blocked, &GenServer.reply(&1, {:error, reason}))
     Logger.error("invocation #{state.invocation_id}: batch commit failed: #{inspect(reason)}")
     {:stop, :normal, %{state | inflight: %{}, blocked: []}}
   end
+
+  # The writer went away (crash, restart, shutdown). Whatever it held is lost to this
+  # worker and the outcome of a batch it was committing is unknown: it may be in the row.
+  # So the worker does what it does for any failed batch, fails the stream and stops; the
+  # client resends from its last acknowledgement and the next worker starts from the row,
+  # which acknowledges what did commit (dedup) and absorbs the rest.
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{writer: {pid, ref}} = state) do
+    case Map.keys(state.inflight) do
+      [] -> {:noreply, %{state | writer: nil}}
+      [first | _] -> handle_info({:batch_failed, first, :writer_down}, %{state | writer: nil})
+    end
+  end
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
 
   def handle_info(:idle_timeout, state) do
     if state.finalized or state.inflight != %{} do
@@ -456,7 +497,7 @@ defmodule Conveyor.Ingest.Worker do
       norm = Normalizer.disconnect(state.norm)
       {changes, norm} = Normalizer.take_dirty(norm)
       batch = state.batch |> Batch.set_invocation(changes) |> Map.put(:finalize, true)
-      WriterPool.for_invocation(state.invocation_id) |> Conveyor.Ingest.Writer.submit(batch)
+      state = submit(state, batch)
 
       next =
         Batch.new(
