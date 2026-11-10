@@ -53,6 +53,39 @@ defmodule Conveyor.RawStore.CodecTest do
     assert [] |> Codec.stream(:decompress) |> Enum.to_list() == []
   end
 
+  test "a chunk larger than zstd's own buffer goes through whole, in both directions" do
+    # One call of the streaming API handles about 128 KB of output and hands back the
+    # input it did not get to: a large incompressible chunk on the way in, a small chunk
+    # that expands a lot on the way out. Both read back as fewer bytes or crashed.
+    random = :crypto.strong_rand_bytes(1_500_000)
+    text = String.duplicate("the same line again\n", 100_000)
+
+    for {chunks, opts} <- [
+          {[random], []},
+          {[text], []},
+          {["head", random, text, "tail"], [dictionary: true]}
+        ] do
+      whole = IO.iodata_to_binary(chunks)
+
+      compressed =
+        chunks |> Codec.stream(:compress, opts) |> Enum.to_list() |> IO.iodata_to_binary()
+
+      assert Codec.decompress(compressed) == whole
+
+      # The compressed text is a few hundred bytes that expand to two megabytes.
+      assert [compressed] |> Codec.stream(:decompress) |> Enum.to_list() |> IO.iodata_to_binary() ==
+               whole
+
+      halves = [
+        binary_part(compressed, 0, 20),
+        binary_part(compressed, 20, byte_size(compressed) - 20)
+      ]
+
+      assert halves |> Codec.stream(:decompress) |> Enum.to_list() |> IO.iodata_to_binary() ==
+               whole
+    end
+  end
+
   test "frames: a message behind its varint length, split whole or as the bytes arrive" do
     messages = [
       "",

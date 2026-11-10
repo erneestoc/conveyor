@@ -88,9 +88,16 @@ defmodule Conveyor.RawStore.Codec do
 
   defp feed(nil, data, mode, opts), do: feed(context(mode, data, opts), data, mode, opts)
 
-  defp feed(ctx, data, _mode, _opts) do
-    {:continue, out} = :zstd.stream(ctx, data)
-    {[IO.iodata_to_binary(out)], {:zstd, ctx, ""}}
+  defp feed(ctx, data, _mode, _opts), do: {pump(ctx, data), {:zstd, ctx, ""}}
+
+  # One call handles about 128 KB of output and hands back the input it did not get to
+  # (a large chunk on the way in, a chunk that expands a lot on the way out): feed the
+  # remainder again until all of it is taken.
+  defp pump(ctx, data) do
+    case :zstd.stream(ctx, data) do
+      {:continue, out} -> [IO.iodata_to_binary(out)]
+      {:continue, remainder, out} -> [IO.iodata_to_binary(out) | pump(ctx, remainder)]
+    end
   end
 
   defp context(:compress, _data, opts) do

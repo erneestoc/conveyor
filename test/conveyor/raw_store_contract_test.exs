@@ -56,6 +56,23 @@ defmodule Conveyor.RawStoreContractTest do
       end
     end
 
+    test "a build of megabytes reads the same from segments, from ranges and from its blobs", %{
+      project: project
+    } do
+      compaction!(true)
+      text = String.duplicate("a log line like the one before it\n", 30_000)
+
+      for mode <- [:postgres, :blob] do
+        a = build!(project)
+        [a] = append!([{a, [:crypto.strong_rand_bytes(300_000), "small"], text}], mode)
+        [a] = append!([{a, [String.duplicate("x", 400_000)], text}], mode)
+        a = finish!(a)
+        assert_reads!(a)
+        assert {:ok, :archived} = RawStore.compact(a.inv.id, later())
+        assert_reads!(a)
+      end
+    end
+
     test "a build that is still running reads what has been committed, as one consistent log size",
          %{project: project} do
       a = build!(project)
