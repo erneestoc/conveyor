@@ -40,6 +40,24 @@ defmodule Conveyor.Invocations do
   def get!(id), do: Repo.get!(Invocation, id)
 
   @doc """
+  Arguments for a background job about an invocation: the id and its project, so the
+  worker loads the build inside the project it was enqueued for (`for_job/1`).
+  """
+  @spec job_args(Invocation.t()) :: %{invocation_id: String.t(), project_id: integer()}
+  def job_args(%Invocation{id: id, project_id: project_id}),
+    do: %{invocation_id: id, project_id: project_id}
+
+  @doc """
+  The invocation a job's arguments name, or nil. Scoped by the project the job carries;
+  jobs enqueued before the arguments carried one are looked up by id alone.
+  """
+  @spec for_job(map()) :: Invocation.t() | nil
+  def for_job(%{"invocation_id" => id, "project_id" => project_id}) when is_integer(project_id),
+    do: get(id, project_ids: [project_id])
+
+  def for_job(%{"invocation_id" => id}), do: get(id)
+
+  @doc """
   Newest-first page of invocations. Options: `:project_id`, `:project_ids` (`:all` or the
   list a scope may read), `:status`, `:statuses` (list), `:limit` (default 50), `:before`
   (`{started_at, id}` cursor), `:query` (a parsed `Conveyor.Query` AST) with `:now` as the

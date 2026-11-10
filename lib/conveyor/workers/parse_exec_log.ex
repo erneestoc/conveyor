@@ -14,8 +14,8 @@ defmodule Conveyor.Workers.ParseExecLog do
   def timeout(_job), do: :timer.minutes(10)
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"invocation_id" => id}}) do
-    with %{} = inv <- Invocations.get(id) || {:cancel, :no_invocation},
+  def perform(%Oban.Job{args: %{"invocation_id" => _} = args}) do
+    with %{} = inv <- Invocations.for_job(args) || {:cancel, :no_invocation},
          %{} = artifact <-
            Enum.find(Artifacts.list(inv), &ExecLog.name?(&1.name)) || {:cancel, :no_log},
          {:ok, binary} <- Blobs.read(inv.project_id, artifact.digest),

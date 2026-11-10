@@ -284,7 +284,12 @@ defmodule Conveyor.ExecLog do
   @spec available(Invocation.t(), Conveyor.Blobs.Blob.t()) :: :ok
   def available(%Invocation{} = inv, _blob) do
     set_status(inv, "available")
-    %{invocation_id: inv.id} |> Conveyor.Workers.ParseExecLog.new() |> Oban.insert!()
+
+    inv
+    |> Conveyor.Invocations.job_args()
+    |> Conveyor.Workers.ParseExecLog.new()
+    |> Oban.insert!()
+
     :ok
   end
 

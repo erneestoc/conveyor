@@ -364,7 +364,10 @@ defmodule Conveyor.Seed do
 
     :ok = Conveyor.Artifacts.profile_available(inv, blob)
 
-    Conveyor.Workers.ProfileSummary.perform(%Oban.Job{args: %{"invocation_id" => inv.id}})
+    Conveyor.Workers.ProfileSummary.perform(%Oban.Job{
+      args: %{"invocation_id" => inv.id, "project_id" => inv.project_id}
+    })
+
     :ok
   end
 

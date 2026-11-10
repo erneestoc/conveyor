@@ -9,8 +9,8 @@ defmodule Conveyor.Workers.FetchProfile do
   alias Conveyor.Invocations
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"invocation_id" => id}}) do
-    case Invocations.get(id) do
+  def perform(%Oban.Job{args: %{"invocation_id" => _} = args}) do
+    case Invocations.for_job(args) do
       nil -> {:cancel, :no_invocation}
       %{profile_status: "available"} -> :ok
       inv -> finish(Artifacts.fetch_profile(inv))

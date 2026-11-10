@@ -154,8 +154,13 @@ defmodule Conveyor.ExecLogTest do
 
     :ok = ExecLog.available(inv, blob)
     assert Repo.get!(Invocation, inv.id).exec_log_status == "available"
-    assert_enqueued(worker: ParseExecLog, args: %{invocation_id: inv.id})
-    assert {:ok, 12} = perform_job(ParseExecLog, %{invocation_id: inv.id})
+    args = %{invocation_id: inv.id, project_id: inv.project_id}
+    assert_enqueued(worker: ParseExecLog, args: args)
+
+    assert {:cancel, :no_invocation} =
+             perform_job(ParseExecLog, %{args | project_id: inv.project_id + 1})
+
+    assert {:ok, 12} = perform_job(ParseExecLog, args)
     assert_receive {:artifacts_changed, _}
     assert Repo.get!(Invocation, inv.id).exec_log_status == "parsed"
 

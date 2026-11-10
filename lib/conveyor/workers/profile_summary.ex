@@ -6,9 +6,9 @@ defmodule Conveyor.Workers.ProfileSummary do
   alias Conveyor.Invocations.Metrics
 
   @impl Oban.Worker
-  def perform(%Oban.Job{args: %{"invocation_id" => id}}) do
+  def perform(%Oban.Job{args: %{"invocation_id" => _} = args}) do
     with %{profile_blob: digest} = inv when is_binary(digest) <-
-           Invocations.get(id) || {:cancel, :no_invocation},
+           Invocations.for_job(args) || {:cancel, :no_invocation},
          {:ok, chunks} <- Blobs.stream(inv.project_id, digest) do
       summary = chunks |> Profile.events() |> Profile.summarize()
       now = DateTime.utc_now()

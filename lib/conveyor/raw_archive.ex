@@ -48,10 +48,10 @@ defmodule Conveyor.RawArchive do
   `segments`, finished more than `after_hours` ago, and their row unchanged for two idle
   windows (a late finish notification or anything else touching the row waits a round).
   Only builds whose partition still exists are considered. One page of `limit`; pass the
-  last `{finished_at, id}` of a page as `cursor` for the next (`all_candidates/1` walks them).
+  last row of a page as `cursor` for the next (`all_candidates/1` walks them).
   """
-  @spec candidates(DateTime.t(), pos_integer(), {DateTime.t(), Ecto.UUID.t()} | nil) ::
-          [{DateTime.t(), Ecto.UUID.t()}]
+  @spec candidates(DateTime.t(), pos_integer(), tuple() | nil) ::
+          [{DateTime.t(), Ecto.UUID.t(), project_id :: integer()}]
   def candidates(now \\ DateTime.utc_now(), limit \\ 1000, cursor \\ nil) do
     case due_query(now) do
       nil ->
@@ -66,12 +66,14 @@ defmodule Conveyor.RawArchive do
         |> after_cursor(cursor)
         |> order_by([i], [i.finished_at, i.id])
         |> limit(^limit)
-        |> select([i], {i.finished_at, i.id})
+        |> select([i], {i.finished_at, i.id, i.project_id})
         |> Repo.all()
     end
   end
 
   defp after_cursor(query, nil), do: query
+
+  defp after_cursor(query, {at, id, _project_id}), do: after_cursor(query, {at, id})
 
   defp after_cursor(query, {at, id}),
     do: where(query, [i], i.finished_at > ^at or (i.finished_at == ^at and i.id > ^id))
@@ -82,7 +84,12 @@ defmodule Conveyor.RawArchive do
   hour).
   """
   @spec all_candidates(DateTime.t(), pos_integer()) :: [Ecto.UUID.t()]
-  def all_candidates(now \\ DateTime.utc_now(), page \\ 1000) do
+  def all_candidates(now \\ DateTime.utc_now(), page \\ 1000),
+    do: now |> all_due(page) |> Enum.map(&elem(&1, 0))
+
+  @doc "As `all_candidates/2`, each id with its project: what an archive job is enqueued with."
+  @spec all_due(DateTime.t(), pos_integer()) :: [{Ecto.UUID.t(), integer()}]
+  def all_due(now \\ DateTime.utc_now(), page \\ 1000) do
     Stream.unfold(:start, fn
       :done ->
         nil
@@ -94,7 +101,9 @@ defmodule Conveyor.RawArchive do
           rows -> {rows, List.last(rows)}
         end
     end)
-    |> Enum.flat_map(fn rows -> Enum.map(rows, &elem(&1, 1)) end)
+    |> Enum.flat_map(fn rows ->
+      Enum.map(rows, fn {_at, id, project_id} -> {id, project_id} end)
+    end)
   end
 
   @doc """
@@ -172,6 +181,8 @@ defmodule Conveyor.RawArchive do
     do: if(due?(inv, now), do: run(inv), else: {:ok, :not_due})
 
   def archive(%Invocation{}, _now), do: {:ok, :already_archived}
+
+  def archive(:gone, _now), do: {:ok, :not_found}
 
   def archive(id, now) when is_binary(id) do
     case Repo.get(Invocation, id) do

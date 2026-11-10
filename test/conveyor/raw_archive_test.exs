@@ -191,8 +191,13 @@ defmodule Conveyor.RawArchiveTest do
 
     assert {:ok, %{enqueued: n}} = perform_job(ArchiveRaw, %{})
     assert n >= 1
-    assert_enqueued(worker: ArchiveRaw, args: %{id: id})
-    assert {:ok, :archived} = perform_job(ArchiveRaw, %{id: id})
+    project_id = Repo.get!(Invocation, id).project_id
+    assert_enqueued(worker: ArchiveRaw, args: %{id: id, project_id: project_id})
+    # A job that names another project finds nothing; one from before the arguments
+    # carried the project (the id alone) still runs.
+    assert {:ok, :not_found} = perform_job(ArchiveRaw, %{id: id, project_id: project_id + 1})
+    assert {:ok, :archived} = perform_job(ArchiveRaw, %{id: id, project_id: project_id})
+    assert {:ok, :already_archived} = perform_job(ArchiveRaw, %{id: id})
 
     Application.put_env(:conveyor, RawArchive, enabled: false)
     assert {:ok, :disabled} = perform_job(ArchiveRaw, %{})

@@ -33,9 +33,17 @@ defmodule Conveyor.Workers.ProfileSummaryTest do
 
     Conveyor.Watch.subscribe(Conveyor.Ingest.invocation_topic(inv.id))
     :ok = Artifacts.profile_available(inv, blob)
-    assert_enqueued(worker: ProfileSummary, args: %{invocation_id: inv.id})
+    # The job carries the build's project and loads it inside that project; a job that
+    # names another project finds nothing. Jobs enqueued before the arguments carried the
+    # project (the id alone, as in the rest of this file) still run.
+    args = %{invocation_id: inv.id, project_id: inv.project_id}
+    assert args == Invocations.job_args(inv)
+    assert_enqueued(worker: ProfileSummary, args: args)
 
-    assert :ok = perform_job(ProfileSummary, %{invocation_id: inv.id})
+    assert {:cancel, :no_invocation} =
+             perform_job(ProfileSummary, %{args | project_id: inv.project_id + 1})
+
+    assert :ok = perform_job(ProfileSummary, args)
     assert %{"event_count" => 1297} = Invocations.metrics(inv).profile_summary
     assert_receive {:artifacts_changed, _}
 

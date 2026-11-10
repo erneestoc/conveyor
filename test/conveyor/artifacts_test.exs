@@ -195,7 +195,12 @@ defmodule Conveyor.ArtifactsTest do
 
       inv = insert_invocation(project, %{profile_status: "referenced", profile_uri: uri})
       :ok = Artifacts.on_finalized(inv.id)
-      assert_enqueued(worker: FetchProfile, args: %{invocation_id: inv.id})
+      args = %{invocation_id: inv.id, project_id: inv.project_id}
+      assert_enqueued(worker: FetchProfile, args: args)
+
+      assert {:cancel, :no_invocation} =
+               perform_job(FetchProfile, %{args | project_id: inv.project_id + 1})
+
       assert :ok = perform_job(FetchProfile, %{invocation_id: inv.id})
       assert %{profile_status: "available", profile_blob: digest} = Repo.get!(Invocation, inv.id)
       assert {:ok, ^data} = Blobs.read(project.id, digest)

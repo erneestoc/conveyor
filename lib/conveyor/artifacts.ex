@@ -189,7 +189,8 @@ defmodule Conveyor.Artifacts do
   end
 
   defp enqueue_profile_fetch(inv) do
-    %{invocation_id: inv.id}
+    inv
+    |> Conveyor.Invocations.job_args()
     |> Conveyor.Workers.FetchProfile.new()
     |> Oban.insert()
 
@@ -253,7 +254,10 @@ defmodule Conveyor.Artifacts do
       set: [profile_blob: blob.digest, profile_status: "available"]
     )
 
-    %{invocation_id: inv.id} |> Conveyor.Workers.ProfileSummary.new() |> Oban.insert()
+    inv
+    |> Conveyor.Invocations.job_args()
+    |> Conveyor.Workers.ProfileSummary.new()
+    |> Oban.insert()
 
     Conveyor.Watch.broadcast(
       Conveyor.Ingest.invocation_topic(inv.id),
