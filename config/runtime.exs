@@ -264,10 +264,12 @@ if config_env() == :prod do
 end
 
 # RAW_LOG=blob|postgres (PLAN §25 step 2), RAW_LOG_FLUSH_MS: the writer's hold in blob mode,
-# RAW_LOG_FLUSH_BYTES: pending batch bytes that flush a shard before its hold.
+# RAW_LOG_FLUSH_BYTES: pending batch bytes that flush a shard before its hold,
+# RAW_LOG_FSYNC=false: disk objects are not synced before the ack (not crash-safe).
 if mode = System.get_env("RAW_LOG") do
   config :conveyor, Conveyor.RawLog,
     mode: if(mode == "blob", do: :blob, else: :postgres),
     flush_ms: String.to_integer(System.get_env("RAW_LOG_FLUSH_MS", "1000")),
-    flush_bytes: String.to_integer(System.get_env("RAW_LOG_FLUSH_BYTES", "4194304"))
+    flush_bytes: String.to_integer(System.get_env("RAW_LOG_FLUSH_BYTES", "4194304")),
+    fsync: System.get_env("RAW_LOG_FSYNC", "true") in ~w(true 1)
 end

@@ -134,7 +134,8 @@ defmodule Conveyor.RawLog do
 
   @doc """
   Registers and writes an object. The row goes first in its own transaction; the bytes
-  are durable when this returns `:ok`.
+  are durable when this returns `:ok` (on disk: written under a temporary name, synced,
+  renamed, the directory synced; see `fsync?/0`).
   """
   @spec put(String.t(), iodata()) :: :ok | {:error, term()}
   def put(key, iodata) do
@@ -142,9 +143,7 @@ defmodule Conveyor.RawLog do
 
     case adapter() do
       {:disk, dir} ->
-        path = Path.join(dir, key)
-        File.mkdir_p!(Path.dirname(path))
-        File.write(path, iodata)
+        put_file(dir, Path.join(dir, key), iodata, fsync?())
 
       {:s3, opts} ->
         Conveyor.Blobs.S3.put_object(
@@ -154,6 +153,72 @@ defmodule Conveyor.RawLog do
         )
     end
   end
+
+  # The acknowledgement follows this write, so `:ok` means the object survives a crash of
+  # the machine: the bytes go to a temporary name and are synced, the rename makes the
+  # object appear whole or not at all, and the directory is synced so the name is on disk
+  # too (as are the directories this call had to create).
+  defp put_file(root, path, iodata, sync?) do
+    dir = Path.dirname(path)
+    tmp = path <> ".tmp-" <> Integer.to_string(System.unique_integer([:positive]))
+
+    result =
+      with :ok <- ensure_dir(root, dir, sync?),
+           {:ok, io} <- :file.open(tmp, [:write, :raw, :binary]),
+           :ok <- write_and_close(io, iodata, sync?),
+           :ok <- :file.rename(tmp, path) do
+        if sync?, do: sync_dir(dir), else: :ok
+      end
+
+    if result != :ok, do: File.rm(tmp)
+    result
+  end
+
+  defp write_and_close(io, iodata, sync?) do
+    with :ok <- :file.write(io, iodata),
+         :ok <- if(sync?, do: :file.sync(io), else: :ok) do
+      :file.close(io)
+    else
+      error ->
+        :file.close(io)
+        error
+    end
+  end
+
+  defp ensure_dir(root, dir, sync?) do
+    if File.dir?(dir) do
+      :ok
+    else
+      with :ok <- File.mkdir_p(dir) do
+        if sync?, do: sync_up(Path.dirname(dir), root), else: :ok
+      end
+    end
+  end
+
+  # New directories are entries of their parents: sync those up to the store's root.
+  defp sync_up(dir, root) do
+    with :ok <- sync_dir(dir) do
+      if dir == root or not String.starts_with?(dir, root),
+        do: :ok,
+        else: sync_up(Path.dirname(dir), root)
+    end
+  end
+
+  defp sync_dir(dir) do
+    with {:ok, io} <- :file.open(dir, [:read, :raw, :directory]) do
+      result = :file.sync(io)
+      :file.close(io)
+      result
+    end
+  end
+
+  @doc """
+  Whether a disk put is synced before it returns (`RAW_LOG_FSYNC`, default true). Without
+  it an acknowledged batch can lose its bytes when the machine (not just the node) dies
+  before the page cache is written; only for stores where that is acceptable.
+  """
+  @spec fsync?() :: boolean()
+  def fsync?, do: Keyword.get(Application.get_env(:conveyor, __MODULE__, []), :fsync, true)
 
   @doc "Reads `length` bytes at `offset` of an object."
   @spec get_range(String.t(), non_neg_integer(), pos_integer()) ::
