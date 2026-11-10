@@ -182,7 +182,10 @@ defmodule Conveyor.Invocations do
       else: segment_frames(inv)
   end
 
-  @doc "True once the build's raw events and log live in the blob store."
+  @doc """
+  True once the build's raw events and log live in the blob store: the one definition
+  every reader goes by (`raw_status` alone is not it: the events blob must be referenced).
+  """
   @spec archived?(Invocation.t()) :: boolean()
   def archived?(%Invocation{raw_status: "archived", raw_blob: blob}) when is_binary(blob),
     do: true
@@ -234,15 +237,15 @@ defmodule Conveyor.Invocations do
   metadata (`log_segments/1`) to stream exactly that snapshot.
   """
   @spec stream_log(Invocation.t(), [LogSegment.t()] | nil) :: Enumerable.t()
-  def stream_log(inv, segments \\ nil)
+  def stream_log(%Invocation{} = inv, segments \\ nil) do
+    cond do
+      not archived?(inv) -> stream_log_segments(inv, segments)
+      inv.log_blob == nil -> []
+      true -> stream_blob(inv, inv.log_blob)
+    end
+  end
 
-  def stream_log(%Invocation{log_blob: nil} = inv, _segments) when inv.raw_status == "archived",
-    do: []
-
-  def stream_log(%Invocation{raw_status: "archived", log_blob: digest} = inv, _segments),
-    do: stream_blob(inv, digest)
-
-  def stream_log(%Invocation{id: id} = inv, segments) do
+  defp stream_log_segments(%Invocation{id: id} = inv, segments) do
     day = day(inv)
     segments = segments || log_segments(inv)
 
@@ -266,22 +269,26 @@ defmodule Conveyor.Invocations do
   archived log is one piece, described by the row's totals.
   """
   @spec log_segments(Invocation.t()) :: [LogSegment.t()]
-  def log_segments(%Invocation{raw_status: "archived", log_bytes: 0}), do: []
-
-  def log_segments(%Invocation{raw_status: "archived"} = inv) do
-    [
-      %LogSegment{
-        first_seq: 1,
-        last_seq: inv.last_event_seq,
-        byte_offset: 0,
-        line_offset: 0,
-        byte_size: inv.log_bytes,
-        line_count: inv.log_lines
-      }
-    ]
+  def log_segments(%Invocation{} = inv) do
+    cond do
+      not archived?(inv) -> log_segment_rows(inv)
+      inv.log_bytes == 0 -> []
+      true -> [archived_log_segment(inv)]
+    end
   end
 
-  def log_segments(%Invocation{id: id} = inv) do
+  defp archived_log_segment(%Invocation{} = inv) do
+    %LogSegment{
+      first_seq: 1,
+      last_seq: inv.last_event_seq,
+      byte_offset: 0,
+      line_offset: 0,
+      byte_size: inv.log_bytes,
+      line_count: inv.log_lines
+    }
+  end
+
+  defp log_segment_rows(%Invocation{id: id} = inv) do
     Repo.all(
       from s in LogSegment,
         where: s.invocation_id == ^id and s.day == ^day(inv),

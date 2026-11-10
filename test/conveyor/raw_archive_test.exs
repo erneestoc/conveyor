@@ -74,6 +74,26 @@ defmodule Conveyor.RawArchiveTest do
     assert {:ok, :not_found} = RawArchive.archive(Ecto.UUID.generate(), later)
   end
 
+  test "archived means the events blob is referenced: one definition for every reader", %{
+    ctx: ctx
+  } do
+    id = ingest_fixture!("build_only_verbose", ctx)
+    before = Repo.get!(Invocation, id)
+    expected = snapshot(before)
+    segments = Invocations.log_segments(before)
+    assert length(segments) >= 1 and before.log_bytes > 0
+
+    # A status without its blob (written by hand, or by a writer that died between two
+    # statements it should not have split): the events were read from the segments while
+    # the log read as empty.
+    Repo.update_all(from(i in Invocation, where: i.id == ^id), set: [raw_status: "archived"])
+    inv = Repo.get!(Invocation, id)
+    refute Invocations.archived?(inv)
+    assert snapshot(inv) == expected
+    assert Invocations.log_segments(inv) == segments
+    assert :ok = Verify.check(id, sent(inv))
+  end
+
   test "a run sees every due build, not one page", %{ctx: ctx, later: later} do
     ids =
       for f <- ~w(clean_build_and_test build_failure test_failure), do: ingest_fixture!(f, ctx)
