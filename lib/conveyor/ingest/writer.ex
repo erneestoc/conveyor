@@ -2,8 +2,9 @@ defmodule Conveyor.Ingest.Writer do
   @moduledoc """
   Group-commit writer. Workers submit batches; every `writer_flush_ms` (or sooner when the
   queue is large) the writer commits all pending batches from many invocations in one
-  transaction and notifies each submitter. If the group fails, batches are retried one by
-  one so a single fenced invocation cannot block the others.
+  transaction and notifies each submitter. A group is planned and, in blob mode, stored as
+  one object once; what happens after a failed transaction (retry, the group without its
+  fenced units, halves, or failing the group) is `Conveyor.Ingest.Writer.Policy`.
 
   Inside the transaction the fence goes first: one fenced invocation update per set of dirty
   columns (`UPDATE … FROM unnest(...)`, PLAN §24 item 1, rows in id order), so a group with
@@ -18,7 +19,8 @@ defmodule Conveyor.Ingest.Writer do
 
   require Logger
 
-  alias Conveyor.Ingest.{Batch, Retry, TagCounter}
+  alias Conveyor.Ingest.{Batch, TagCounter}
+  alias Conveyor.Ingest.Writer.Policy
 
   alias Conveyor.Invocations.{
     Action,
@@ -35,14 +37,13 @@ defmodule Conveyor.Ingest.Writer do
 
   defmodule Fenced do
     @moduledoc """
-    Raised when an invocation row no longer matches a batch's expected sequence. `units`
-    lists every `{invocation_id, first_seq}` the statement fenced, so a group can be retried
-    without them.
+    Raised inside the group transaction when invocation rows no longer match the sequence
+    their units expect. `units` lists the key of every unit the statements fenced, so the
+    group can be attempted again without them.
     """
-    defexception [:invocation_id, :expected, units: []]
+    defexception units: []
 
-    def message(e),
-      do: "invocation #{e.invocation_id} fenced: last_event_seq is not #{e.expected}"
+    def message(e), do: "#{length(e.units)} units fenced: last_event_seq moved"
   end
 
   @target_key [:invocation_id, :label, :aspect]
@@ -87,6 +88,8 @@ defmodule Conveyor.Ingest.Writer do
        flush_ms:
          if(RawLog.blob_mode?(), do: RawLog.flush_ms(), else: config(:writer_flush_ms, 20)),
        max_pending: config(:writer_max_pending, 256),
+       # Waits between attempts while the database or the store is unavailable (Policy).
+       retry_delays: config(:writer_retry_delays, [50, 200, 800]),
        # Blob mode only: the hold is long, so a shard under load flushes by size instead.
        bytes: 0,
        max_bytes: if(RawLog.blob_mode?(), do: RawLog.flush_bytes(), else: nil)
@@ -132,7 +135,7 @@ defmodule Conveyor.Ingest.Writer do
     pending = Enum.reverse(state.pending)
     started = System.monotonic_time()
 
-    results = commit_pending(pending, state.shard)
+    results = commit(pending, state.shard, state.retry_delays)
 
     Enum.each(results, fn
       {batch, from, :ok} -> send(from, {:batch_committed, batch.ref})
@@ -152,150 +155,201 @@ defmodule Conveyor.Ingest.Writer do
     %{state | pending: [], count: 0, bytes: 0, timer: nil}
   end
 
-  # A failure anywhere in the group rolls everything back. A fenced invocation (a stale
-  # worker: another node took the build over, routine while a balancer moves streams during
-  # a deploy) fails its own batches and the rest of the group is committed again without
-  # it, so a fence costs one extra transaction rather than one per batch: redoing a group of
-  # 256 batches one by one made the writer fall hundreds of thousands of batches behind
-  # during the fleet test's rolling deploy. Any other failure falls back to batch by batch.
-  defp commit_pending(pending, shard) do
-    case commit_group(pending, shard) do
-      :ok ->
-        Enum.map(pending, fn {batch, from} -> {batch, from, :ok} end)
+  # One group, one outcome per batch. The group is planned once: its batches are merged
+  # into units, each unit's segments are compressed once, and in blob mode their bytes are
+  # stored as one object, once. Every attempt after that (a retry, the group without its
+  # fenced units, a half of it) is a transaction over a subset of the units that points at
+  # the same object and byte ranges; an evicted unit's bytes stay in the object,
+  # unreferenced. What follows a failed attempt is `Writer.Policy`'s decision.
+  defp commit(entries, shard, retry_delays) do
+    units = entries |> Enum.map(&elem(&1, 0)) |> Batch.units()
 
-      {:error, %Fenced{units: units}} ->
-        # A fenced unit takes the batches of its invocation from that sequence on with it:
-        # they could not commit before it did, and the worker exits on the first fence.
-        {fenced, rest} =
-          Enum.split_with(pending, fn {b, _} ->
-            Enum.any?(units, fn {id, first} -> b.invocation_id == id and b.first_seq >= first end)
-          end)
+    keys = Enum.map(units, &elem(&1, 0))
 
-        failed =
-          Enum.map(fenced, fn {batch, from} ->
-            :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{
-              invocation_id: batch.invocation_id
-            })
+    group = %{
+      shard: shard,
+      keys: keys,
+      units: Map.new(units, fn {key, unit, _refs} -> {key, unit} end),
+      segments: {:planned, Map.new(units, fn {key, unit, _refs} -> {key, segments(unit)} end)}
+    }
 
-            {batch, from, {:error, {:fenced, batch.first_seq - 1}}}
-          end)
+    verdicts = keys |> Policy.new(retry_delays: retry_delays) |> run(group)
+    by_ref = for {key, _unit, refs} <- units, ref <- refs, into: %{}, do: {ref, verdicts[key]}
 
-        failed ++ if(rest == [], do: [], else: commit_pending(rest, shard))
+    report_failures(shard, verdicts)
+    Enum.map(entries, fn {batch, from} -> {batch, from, result(batch, by_ref[batch.ref])} end)
+  end
 
-      {:error, _} ->
-        Enum.map(pending, fn {batch, from} -> {batch, from, commit_single(batch, shard)} end)
+  defp run(policy, group) do
+    case Policy.next(policy) do
+      {:done, verdicts} ->
+        verdicts
+
+      {:attempt, keys, policy} ->
+        {outcome, group} = attempt(keys, group)
+
+        if outcome != :committed do
+          # Every failed attempt is redone in some form; count it, a failure in every flush
+          # would raise the write cost silently otherwise.
+          :telemetry.execute([:conveyor, :ingest, :writer, :group_failed], %{count: 1}, %{
+            shard: group.shard,
+            batches: length(keys),
+            kind: kind(outcome),
+            reason: reason(outcome)
+          })
+        end
+
+        {policy, delay} = Policy.record(policy, outcome)
+        if delay > 0, do: Process.sleep(delay)
+        run(policy, group)
     end
   end
 
-  # Transient database errors are retried with backoff first (Conveyor.Ingest.Retry).
-  defp commit_group(pending, shard) do
-    units = pending |> Enum.map(&elem(&1, 0)) |> Batch.coalesce()
-    plan = units |> plan() |> store_object!(shard)
+  defp kind({:fenced, _keys}), do: :fenced
+  defp kind({:error, class, _reason}), do: class
 
-    result =
-      Retry.with_backoff(
-        fn ->
-          case Repo.transaction(fn -> apply_plan!(plan, units) end, timeout: 60_000) do
-            {:ok, _} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
-        end,
-        label: "writer group commit"
-      )
+  defp reason({:fenced, keys}), do: "#{length(keys)} fenced"
+  defp reason({:error, _class, reason}), do: reason
 
+  defp attempt(keys, group) do
+    case store(group) do
+      {:ok, %{segments: {:stored, segments}} = group} ->
+        units = Enum.map(keys, &{&1, Map.fetch!(group.units, &1)})
+        plan = units |> Enum.map(&elem(&1, 1)) |> plan(Enum.map(keys, &Map.fetch!(segments, &1)))
+        {transact(plan, units), group}
+
+      {:error, reason} ->
+        {{:error, :unavailable, reason}, group}
+    end
+  end
+
+  defp transact(plan, units) do
+    Repo.transaction(fn -> apply_plan!(plan, units) end, timeout: 60_000)
     # Tag counts are rows shared by every invocation of a project. Updating them inside the
     # group transaction made every shard queue on the same row locks for the whole commit
     # (measured: >90 % of active backends waiting on tag_keys), so they go to the node's
     # TagCounter after the commit.
-    if result == :ok, do: TagCounter.add(plan.tag_counts)
-    result
+    TagCounter.add(plan.tag_counts)
+    :committed
   rescue
-    e ->
-      # The group is redone (without the fenced invocations, or batch by batch); count it,
-      # a failure in every flush would raise the write cost silently otherwise.
-      :telemetry.execute([:conveyor, :ingest, :writer, :group_failed], %{count: 1}, %{
-        batches: length(pending),
-        reason: Exception.message(e)
-      })
-
-      {:error, e}
+    e in Fenced -> {:fenced, e.units}
+    e -> {:error, error_class(e), Exception.message(e)}
   end
 
-  defp commit_single(batch, shard) do
-    plan = [batch] |> plan() |> store_object!(shard)
+  # What the policy needs to know about a failed transaction: is the database refusing
+  # work, is another transaction in the way, or is it this group's rows.
+  defp error_class(%DBConnection.ConnectionError{}), do: :unavailable
 
-    result =
-      Retry.with_backoff(
-        fn ->
-          case Repo.transaction(fn -> apply_plan!(plan, [batch]) end, timeout: 60_000) do
-            {:ok, _} -> :ok
-            {:error, reason} -> {:error, reason}
-          end
-        end,
-        label: "writer commit #{batch.invocation_id}"
-      )
+  defp error_class(%Postgrex.Error{postgres: %{code: code}})
+       when code in [:too_many_connections, :cannot_connect_now, :admin_shutdown],
+       do: :unavailable
 
-    if result == :ok, do: TagCounter.add(plan.tag_counts)
-    result
-  rescue
-    e in Fenced ->
-      :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{
-        invocation_id: batch.invocation_id
-      })
+  defp error_class(%Postgrex.Error{postgres: %{code: code}})
+       when code in [:serialization_failure, :deadlock_detected],
+       do: :contention
 
-      {:error, {:fenced, e.expected}}
+  defp error_class(_), do: :data
 
-    e ->
-      Logger.error(
-        "batch for #{batch.invocation_id} (#{batch.first_seq}..#{batch.last_seq}) failed: #{Exception.message(e)}"
-      )
+  defp result(_batch, :committed), do: :ok
+  defp result(batch, :fenced), do: {:error, {:fenced, batch.first_seq - 1}}
+  defp result(_batch, {:failed, reason}), do: {:error, reason}
 
-      {:error, Exception.message(e)}
-  end
+  defp report_failures(shard, verdicts) do
+    for {{id, _n}, :fenced} <- verdicts do
+      :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{invocation_id: id})
+    end
 
-  # Blob mode (PLAN §25 step 2): the group's payloads go into one raw-log object before
-  # the transaction, and the rows carry the byte range. A failed put raises, so the group
-  # takes the usual fallback and a batch that cannot be stored fails its worker.
-  defp store_object!(%{event_rows: [], log_rows: []} = plan, _shard), do: plan
+    case for {_key, {:failed, reason}} <- verdicts, do: reason do
+      [] ->
+        :ok
 
-  defp store_object!(plan, shard) do
-    if RawLog.blob_mode?() do
-      {plan, key, body} = RawLog.objectify(plan, shard)
-      bytes = IO.iodata_length(body)
-
-      case RawLog.put(key, body) do
-        :ok ->
-          :telemetry.execute([:conveyor, :raw_log, :put], %{count: 1, bytes: bytes}, %{
-            shard: shard
-          })
-
-          plan
-
-        {:error, reason} ->
-          :telemetry.execute([:conveyor, :raw_log, :put_failed], %{count: 1}, %{shard: shard})
-          raise "raw log put #{key} failed: #{inspect(reason)}"
-      end
-    else
-      plan
+      [reason | _] = failed ->
+        Logger.error(
+          "writer shard #{inspect(shard)}: #{length(failed)} of #{map_size(verdicts)} units failed: #{inspect(reason)}"
+        )
     end
   end
 
+  # Blob mode (PLAN §25 step 2): the group's payloads go into one raw-log object before
+  # the first transaction, and the rows carry the byte range. The object is put once per
+  # group: a put that failed is tried again under the same key by the next attempt.
+  defp store(%{segments: {:stored, _}} = group), do: {:ok, group}
+
+  defp store(%{segments: {:planned, segments}} = group) do
+    if RawLog.blob_mode?() and Enum.any?(segments, fn {_key, rows} -> rows != {nil, nil} end) do
+      keys = group.keys
+      rows = Enum.map(keys, &Map.fetch!(segments, &1))
+
+      {plan, key, body} =
+        RawLog.objectify(
+          %{
+            event_rows: for({row, _} <- rows, row != nil, do: row),
+            log_rows: for({_, row} <- rows, row != nil, do: row)
+          },
+          group.shard
+        )
+
+      store(%{group | segments: {:objectified, zip(keys, rows, plan), key, body}})
+    else
+      {:ok, %{group | segments: {:stored, segments}}}
+    end
+  end
+
+  defp store(%{segments: {:objectified, segments, key, body}} = group) do
+    case RawLog.put(key, body) do
+      :ok ->
+        :telemetry.execute(
+          [:conveyor, :raw_log, :put],
+          %{count: 1, bytes: IO.iodata_length(body)},
+          %{shard: group.shard}
+        )
+
+        {:ok, %{group | segments: {:stored, segments}}}
+
+      {:error, reason} ->
+        :telemetry.execute([:conveyor, :raw_log, :put_failed], %{count: 1}, %{shard: group.shard})
+        {:error, "raw log put #{key} failed: #{inspect(reason)}"}
+    end
+  end
+
+  # `RawLog.objectify/2` keeps the order of the rows it is given: hand each unit its rows
+  # back.
+  defp zip(keys, rows, plan) do
+    {segments, {[], []}} =
+      keys
+      |> Enum.zip(rows)
+      |> Enum.map_reduce({plan.event_rows, plan.log_rows}, fn {key, {event, log}},
+                                                              {events, logs} ->
+        {event, events} = if event, do: {hd(events), tl(events)}, else: {nil, events}
+        {log, logs} = if log, do: {hd(logs), tl(logs)}, else: {nil, logs}
+        {{key, {event, log}}, {events, logs}}
+      end)
+
+    Map.new(segments)
+  end
+
+  # The segment rows of a unit, compressed: `{event row | nil, log row | nil}`.
+  defp segments(%Batch{} = unit),
+    do: {Batch.event_segment_row(unit), Batch.log_segment_row(unit)}
+
   @doc """
-  The rows every table receives for a group of batches, merged across the batches. Pure and
-  computed outside the transaction (segment compression happens here).
+  The rows every table receives for a group of units, merged across them. Pure; `segments`
+  are the units' segment rows when they were made before (they are compressed, and in blob
+  mode stored, once per group).
   """
-  @spec plan([Batch.t()]) :: map()
-  def plan(batches) do
+  @spec plan([Batch.t()], [{map() | nil, map() | nil}] | nil) :: map()
+  def plan(units, segments \\ nil) do
     now = DateTime.utc_now()
+    segments = segments || Enum.map(units, &segments/1)
 
     %{
-      event_rows: batches |> Enum.map(&Batch.event_segment_row/1) |> Enum.reject(&is_nil/1),
-      log_rows: batches |> Enum.map(&Batch.log_segment_row/1) |> Enum.reject(&is_nil/1),
-      targets: merged_rows(batches, :targets),
-      tests: merged_rows(batches, :tests),
-      actions: flat_rows(batches, :actions),
-      metrics: metrics_rows(batches, now),
-      tag_counts: tag_counts(batches)
+      event_rows: for({row, _} <- segments, row != nil, do: row),
+      log_rows: for({_, row} <- segments, row != nil, do: row),
+      targets: merged_rows(units, :targets),
+      tests: merged_rows(units, :tests),
+      actions: flat_rows(units, :actions),
+      metrics: metrics_rows(units, now),
+      tag_counts: tag_counts(units)
     }
   end
 
@@ -304,8 +358,8 @@ defmodule Conveyor.Ingest.Writer do
   # invocation rows, locked in id order, are the first locks every node's group takes for a
   # build, so two groups that hold the same build queue on its row instead of interleaving
   # their child upserts. Raises on failure.
-  defp apply_plan!(plan, batches) do
-    update_invocations!(batches)
+  defp apply_plan!(plan, units) do
+    update_invocations!(units)
 
     if plan.event_rows != [],
       do: Repo.insert_all(EventSegment, plan.event_rows, on_conflict: :nothing)
@@ -377,42 +431,35 @@ defmodule Conveyor.Ingest.Writer do
   # arrays through unnest, and an id missing from RETURNING is a fenced batch. One statement
   # must not touch an invocation twice (the row it would see is undefined), so batches of
   # the same invocation left separate by `Batch.coalesce/1` go in successive rounds.
-  defp update_invocations!(batches) do
+  defp update_invocations!(units) do
     now = DateTime.utc_now()
 
     # Every statement runs before the verdict, so one attempt names every fenced unit of
     # the group and the retry without them is not fenced again by a unit it left in.
     fenced =
-      batches
-      |> Enum.group_by(&dirty_columns/1)
+      units
+      |> Enum.group_by(fn {_key, unit} -> dirty_columns(unit) end)
       |> Enum.sort_by(&elem(&1, 0))
       |> Enum.flat_map(fn {columns, group} ->
         group |> unique_rounds() |> Enum.flat_map(&fenced_update(columns, &1, now))
       end)
 
-    case fenced do
-      [] ->
-        :ok
-
-      [b | _] ->
-        raise Fenced,
-          invocation_id: b.invocation_id,
-          expected: b.first_seq - 1,
-          units: Enum.map(fenced, &{&1.invocation_id, &1.first_seq})
-    end
+    if fenced != [], do: raise(Fenced, units: fenced)
+    :ok
   end
 
   defp dirty_columns(%Batch{invocation: changes}),
     do: changes |> Map.take(Invocation.ingest_fields()) |> Map.keys() |> Enum.sort()
 
+  # Units in rounds that hold an invocation once each, in order.
   defp unique_rounds([]), do: []
 
-  defp unique_rounds(batches) do
-    {round, rest} =
-      Enum.reduce(batches, {[], []}, fn b, {round, rest} ->
-        if Enum.any?(round, &(&1.invocation_id == b.invocation_id)),
-          do: {round, [b | rest]},
-          else: {[b | round], rest}
+  defp unique_rounds(units) do
+    {round, rest, _seen} =
+      Enum.reduce(units, {[], [], MapSet.new()}, fn {{id, _n}, _unit} = u, {round, rest, seen} ->
+        if MapSet.member?(seen, id),
+          do: {round, [u | rest], seen},
+          else: {[u | round], rest, MapSet.put(seen, id)}
       end)
 
     [Enum.reverse(round) | unique_rounds(Enum.reverse(rest))]
@@ -420,10 +467,11 @@ defmodule Conveyor.Ingest.Writer do
 
   @fixed [{"id", "uuid"}, {"expected", "bigint"}, {"last_seq", "bigint"}, {"now", "timestamptz"}]
 
-  # Returns the batches whose row did not match (fenced). Rows travel in id order: the
-  # statement locks the invocation rows in that order on every node.
-  defp fenced_update(columns, batches, now) do
-    batches = Enum.sort_by(batches, &Ecto.UUID.dump!(&1.invocation_id))
+  # Returns the keys of the units whose row did not match (fenced). Rows travel in id
+  # order: the statement locks the invocation rows in that order on every node.
+  defp fenced_update(columns, units, now) do
+    units = Enum.sort_by(units, fn {{id, _n}, _unit} -> Ecto.UUID.dump!(id) end)
+    batches = Enum.map(units, &elem(&1, 1))
     typed = Enum.map(columns, &{Atom.to_string(&1), Invocation.__schema__(:type, &1)})
 
     params =
@@ -465,7 +513,9 @@ defmodule Conveyor.Ingest.Writer do
     %{rows: rows} = Repo.query!(sql, params, cache_statement: name)
     updated = MapSet.new(rows, fn [id] -> id end)
 
-    Enum.reject(batches, &MapSet.member?(updated, Ecto.UUID.dump!(&1.invocation_id)))
+    for {{id, _n} = key, _unit} <- units,
+        not MapSet.member?(updated, Ecto.UUID.dump!(id)),
+        do: key
   end
 
   # Element types of the unnest arrays per Ecto type. A list inside an array parameter

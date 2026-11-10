@@ -46,6 +46,7 @@ config :conveyor, Conveyor.Ingest,
   linger_ms: 0,
   batch_flush_ms: 5,
   writer_flush_ms: 2,
+  writer_retry_delays: [5, 10, 20],
   broadcast_interval_ms: 10
 
 config :conveyor, Oban, testing: :manual

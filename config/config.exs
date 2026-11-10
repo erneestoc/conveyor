@@ -29,6 +29,9 @@ config :conveyor, Conveyor.Ingest,
   writer_flush_ms: 20,
   # a shard flushes early once this many batches wait; otherwise after writer_flush_ms
   writer_max_pending: 256,
+  # waits between a group's attempts while the database or the store is unavailable
+  # (Conveyor.Ingest.Writer.Policy); after the last one the group fails
+  writer_retry_delays: [50, 200, 800],
   # tag_keys counts are coalesced per node and written once per interval
   tag_flush_ms: 1000,
   broadcast_interval_ms: 250

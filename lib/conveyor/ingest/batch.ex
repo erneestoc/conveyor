@@ -149,28 +149,49 @@ defmodule Conveyor.Ingest.Batch do
   def contiguous?(%__MODULE__{} = a, %__MODULE__{} = b),
     do: a.invocation_id == b.invocation_id and b.first_seq == a.last_seq + 1
 
-  @doc """
-  Merges each batch into the last unit of its invocation when it continues it, keeping the
-  units in order of first appearance. A non-contiguous batch of one invocation (a resumed
-  stream after a takeover) starts a new unit, so a flush can hold two units for one
-  invocation; the writer keeps those in separate statements.
+  @typedoc """
+  The name of a unit within one group: the invocation and the unit's position among that
+  invocation's units (0 for the first). Unique in the group whatever the sequences are.
   """
-  @spec coalesce([t()]) :: [t()]
-  def coalesce(batches) do
+  @type unit_key :: {String.t(), non_neg_integer()}
+
+  @doc """
+  The units of a group of batches, in order of first appearance: each batch is merged into
+  the last unit of its invocation when it continues it. A batch that does not (a resumed
+  stream after a takeover, or a second worker for the build) starts a new unit, so a group
+  can hold several units for one invocation; the writer keeps those in separate statements.
+  Each unit comes with its key and the refs of the batches merged into it.
+  """
+  @spec units([t()]) :: [{unit_key(), t(), [reference()]}]
+  def units(batches) do
     {units_by_id, order} =
       Enum.reduce(batches, {%{}, []}, fn b, {by_id, order} ->
         case Map.fetch(by_id, b.invocation_id) do
-          {:ok, [last | rest]} ->
-            units = if contiguous?(last, b), do: [merge(last, b) | rest], else: [b, last | rest]
+          {:ok, [{last, refs} | rest]} ->
+            units =
+              if contiguous?(last, b),
+                do: [{merge(last, b), [b.ref | refs]} | rest],
+                else: [{b, [b.ref]}, {last, refs} | rest]
+
             {Map.put(by_id, b.invocation_id, units), order}
 
           :error ->
-            {Map.put(by_id, b.invocation_id, [b]), [b.invocation_id | order]}
+            {Map.put(by_id, b.invocation_id, [{b, [b.ref]}]), [b.invocation_id | order]}
         end
       end)
 
-    order |> Enum.reverse() |> Enum.flat_map(&Enum.reverse(units_by_id[&1]))
+    order
+    |> Enum.reverse()
+    |> Enum.flat_map(fn id ->
+      units_by_id[id]
+      |> Enum.reverse()
+      |> Enum.with_index(fn {unit, refs}, n -> {{id, n}, unit, Enum.reverse(refs)} end)
+    end)
   end
+
+  @doc "The merged batches of `units/1`, without their keys."
+  @spec coalesce([t()]) :: [t()]
+  def coalesce(batches), do: batches |> units() |> Enum.map(&elem(&1, 1))
 
   defp merge_metrics(nil, m), do: m
   defp merge_metrics(m, nil), do: m
