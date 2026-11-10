@@ -1,0 +1,92 @@
+{
+ "what": "RawStore compaction of the 1,500 builds of the paced blob-mode bench run c3-before-paced-blob (disk adapter): ranged reads of raw-log objects counted at [:conveyor,:raw_log,:get_range]",
+ "runs": {
+  "per_build_before": {
+   "events": 64273,
+   "gets": 23570,
+   "builds": 1500,
+   "objects": 2063,
+   "event_rows": 16182,
+   "log_rows": 7388,
+   "outcomes": {
+    "{:ok, :archived}": 1500
+   },
+   "event_range_rows": 16182,
+   "event_objects": 2063,
+   "log_range_rows": 7388,
+   "log_objects": 1709,
+   "get_bytes": 15104027,
+   "gets_per_build": 15.713333333333333,
+   "gets_per_event": 0.36671697291242045,
+   "archive_ms": 2054,
+   "ms_per_build": 1.3693333333333333,
+   "concurrency": 8
+  },
+  "batch_200": {
+   "events": 64273,
+   "gets": 5438,
+   "builds": 1500,
+   "objects": 2063,
+   "event_rows": 16182,
+   "log_rows": 7388,
+   "outcomes": {
+    "{:ok, :archived}": 1500
+   },
+   "event_range_rows": 16182,
+   "event_objects": 2063,
+   "log_range_rows": 7388,
+   "log_objects": 1709,
+   "get_bytes": 60622713,
+   "gets_per_build": 3.6253333333333333,
+   "gets_per_event": 0.08460784466261105,
+   "archive_ms": 2562,
+   "ms_per_build": 1.708,
+   "concurrency": 4
+  },
+  "batch_500": {
+   "events": 64273,
+   "gets": 3461,
+   "builds": 1500,
+   "objects": 2063,
+   "event_rows": 16182,
+   "log_rows": 7388,
+   "outcomes": {
+    "{:ok, :archived}": 1500
+   },
+   "event_range_rows": 16182,
+   "event_objects": 2063,
+   "log_range_rows": 7388,
+   "log_objects": 1709,
+   "get_bytes": 33612161,
+   "gets_per_build": 2.3073333333333332,
+   "gets_per_event": 0.053848427800164925,
+   "archive_ms": 2583,
+   "ms_per_build": 1.722,
+   "concurrency": 4
+  },
+  "one_batch_default": {
+   "events": 64273,
+   "gets": 2063,
+   "builds": 1500,
+   "objects": 2063,
+   "event_rows": 16182,
+   "log_rows": 7388,
+   "outcomes": {
+    "{:ok, :archived}": 1500
+   },
+   "verified": {
+    "ok": 1500
+   },
+   "event_range_rows": 16182,
+   "event_objects": 2063,
+   "log_range_rows": 7388,
+   "log_objects": 1709,
+   "get_bytes": 15104027,
+   "gets_per_build": 1.3753333333333333,
+   "gets_per_event": 0.03209745927527889,
+   "archive_ms": 3450,
+   "ms_per_build": 2.3,
+   "concurrency": 4
+  }
+ }
+}

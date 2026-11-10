@@ -3,7 +3,7 @@ defmodule Conveyor.RawStore.Expiry do
   When each form of a build's raw bytes may go: the date rules, stated once. They are
   pure functions of a clock and the configuration; `Conveyor.RawStore` asks them and the
   maintenance workers execute the answer (`RawStore.expire_partitions/1`,
-  `expire_objects/2`, `due_for_compaction/1`).
+  `expire_objects/2`, `compact_due/2`).
 
   With `R` = `RETENTION_RAW_DAYS` (default 14) and `H` = `RAW_ARCHIVE_AFTER_HOURS`
   (default 24):

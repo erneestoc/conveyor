@@ -78,16 +78,78 @@ defmodule Conveyor.RawLog do
   Fills `col` (`:payload` or `:data`) of segment rows, in order: rows that carry the bytes
   are left alone; rows that carry a byte range are fetched, and consecutive rows of the
   same object with contiguous or near-contiguous ranges are fetched with one `get_range/3`
-  and split by each row's offset and length (PLAN §25 step 2 "Reads").
+  and split by each row's offset and length (PLAN §25 step 2 "Reads"). A row whose range
+  is in `prefetched` (`prefetch/1`) takes its bytes from there.
   """
-  @spec fetch_rows!([map()], :payload | :data) :: [map()]
-  def fetch_rows!(rows, col) do
+  @spec fetch_rows!([map()], :payload | :data, prefetched()) :: [map()]
+  def fetch_rows!(rows, col, prefetched \\ %{}) do
     rows
+    |> Enum.map(&from_prefetched(&1, col, prefetched))
     |> Enum.chunk_while([], &chunk_rows(&1, &2, col), fn
       [] -> {:cont, []}
       run -> {:cont, Enum.reverse(run), []}
     end)
     |> Enum.flat_map(&fetch_run!(&1, col))
+  end
+
+  defp from_prefetched(row, _col, prefetched) when map_size(prefetched) == 0, do: row
+
+  defp from_prefetched(row, col, prefetched) do
+    case Map.fetch(prefetched, {row.object_key, row.object_offset, row.object_length}) do
+      {:ok, bytes} -> Map.put(row, col, bytes)
+      :error -> row
+    end
+  end
+
+  @typedoc "Byte ranges read ahead of the rows that name them: `{key, offset, length}` to bytes."
+  @type prefetched :: %{{String.t(), non_neg_integer(), pos_integer()} => binary()}
+
+  @doc """
+  Reads byte ranges object by object: the ranges of each object, whichever rows or builds
+  they belong to, are sorted and read with as few ranged reads as the coalescing rule
+  allows (one, when they are near each other, as the pieces of one group commit are).
+  For a reader of many builds that share objects (compaction of builds that ran at the
+  same time), where reading build by build costs one ranged read per row.
+
+  A range that cannot be read is left out: the reader of its row will ask again and
+  report the error for that row alone.
+  """
+  @spec prefetch([{String.t(), non_neg_integer(), pos_integer()}]) :: prefetched()
+  def prefetch(ranges) do
+    ranges
+    |> Enum.uniq()
+    |> Enum.group_by(&elem(&1, 0))
+    |> Task.async_stream(fn {key, ranges} -> fetch_object(key, Enum.sort(ranges)) end,
+      max_concurrency: 8,
+      timeout: :infinity
+    )
+    |> Enum.reduce(%{}, fn {:ok, fetched}, acc -> Map.merge(acc, fetched) end)
+  end
+
+  defp fetch_object(key, ranges) do
+    ranges
+    |> Enum.map(fn {key, offset, length} ->
+      %{object_key: key, object_offset: offset, object_length: length, bytes: nil}
+    end)
+    |> Enum.chunk_while([], &chunk_rows(&1, &2, :bytes), fn
+      [] -> {:cont, []}
+      run -> {:cont, Enum.reverse(run), []}
+    end)
+    |> Enum.reduce(%{}, fn [first | _] = run, acc ->
+      last = List.last(run)
+      offset = first.object_offset
+
+      case get_range(key, offset, last.object_offset + last.object_length - offset) do
+        {:ok, bin} ->
+          Enum.reduce(run, acc, fn row, acc ->
+            bytes = binary_part(bin, row.object_offset - offset, row.object_length)
+            Map.put(acc, {key, row.object_offset, row.object_length}, :binary.copy(bytes))
+          end)
+
+        {:error, _reason} ->
+          acc
+      end
+    end)
   end
 
   # A run is a list (newest first) of rows that share an object and read as one range.

@@ -25,12 +25,14 @@ defmodule Conveyor.RawStore.Segments do
   one partition), each query retried on transient database errors.
 
   Options: `:from` (first `first_seq` wanted), `:upto` (last `first_seq` wanted: a
-  snapshot taken earlier), `:only` (a list of `first_seq`: exactly those rows).
+  snapshot taken earlier), `:only` (a list of `first_seq`: exactly those rows),
+  `:prefetched` (byte ranges read ahead with `ranges/1` and `RawLog.prefetch/1`).
   """
   @spec stream(Invocation.t(), kind(), keyword()) :: Enumerable.t()
   def stream(%Invocation{} = inv, kind, opts \\ []) do
     {schema, col, fields} = table(kind)
     base = base(inv, schema, opts)
+    prefetched = Keyword.get(opts, :prefetched, %{})
 
     Stream.resource(
       fn -> Keyword.get(opts, :from, 1) - 1 end,
@@ -57,17 +59,17 @@ defmodule Conveyor.RawStore.Segments do
 
           case rows do
             [] -> {:halt, :done}
-            rows when length(rows) < @page -> {fill(rows, col), :done}
-            rows -> {fill(rows, col), List.last(rows).first_seq}
+            rows when length(rows) < @page -> {fill(rows, col, prefetched), :done}
+            rows -> {fill(rows, col, prefetched), List.last(rows).first_seq}
           end
       end,
       fn _ -> :ok end
     )
   end
 
-  defp fill(rows, col) do
+  defp fill(rows, col, prefetched) do
     rows
-    |> RawLog.fetch_rows!(col)
+    |> RawLog.fetch_rows!(col, prefetched)
     |> Enum.map(fn row ->
       row |> Map.drop([col | RawLog.object_fields()]) |> Map.put(:bytes, Map.fetch!(row, col))
     end)
@@ -90,6 +92,34 @@ defmodule Conveyor.RawStore.Segments do
 
   defp table(:events), do: {EventSegment, :payload, [:count]}
   defp table(:log), do: {LogSegment, :data, [:byte_offset, :byte_size]}
+
+  @doc """
+  The byte ranges the segment rows of several builds point at, per build: what an
+  object-first reader hands to `Conveyor.RawLog.prefetch/1`. Rows that carry their bytes
+  have none.
+  """
+  @spec ranges([Invocation.t()]) :: %{
+          Ecto.UUID.t() => [{String.t(), non_neg_integer(), pos_integer()}]
+        }
+  def ranges([]), do: %{}
+
+  def ranges(invs) do
+    ids = Enum.map(invs, & &1.id)
+    days = invs |> Enum.map(&Invocations.day/1) |> Enum.uniq()
+
+    for schema <- [EventSegment, LogSegment],
+        {id, key, offset, length} <-
+          Repo.all(
+            from(s in schema,
+              where: s.invocation_id in ^ids and s.day in ^days and not is_nil(s.object_key),
+              select: {s.invocation_id, s.object_key, s.object_offset, s.object_length}
+            ),
+            timeout: :timer.minutes(5)
+          ),
+        reduce: %{} do
+      acc -> Map.update(acc, id, [{key, offset, length}], &[{key, offset, length} | &1])
+    end
+  end
 
   @doc "What the rows say they hold, without their bytes: `{first_seq, last_seq, count}` per event row."
   @spec event_index(Invocation.t()) :: [{pos_integer(), pos_integer(), pos_integer()}]

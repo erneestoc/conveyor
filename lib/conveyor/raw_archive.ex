@@ -1,7 +1,7 @@
 defmodule Conveyor.RawArchive do
   @moduledoc """
   Compaction, the third form of `Conveyor.RawStore` (callers use `RawStore.compact/2`,
-  `due_for_compaction/1`): moves a finished build's raw BEP events and log out of the
+  `compact_due/2`): moves a finished build's raw BEP events and log out of the
   segment rows (and the raw-log objects they may point into) into the blob store, one
   object each, a day after the build finished. Every acknowledgement stays a Postgres
   commit; this only changes where history lives.
@@ -27,7 +27,7 @@ defmodule Conveyor.RawArchive do
 
   require Logger
 
-  alias Conveyor.{Blobs, Repo}
+  alias Conveyor.{Blobs, RawLog, Repo}
   alias Conveyor.Invocations.Invocation
   alias Conveyor.RawStore.{Codec, Expiry, Segments}
   alias Conveyor.Storage.Partitions
@@ -46,7 +46,8 @@ defmodule Conveyor.RawArchive do
   `segments`, finished more than `after_hours` ago, and their row unchanged for two idle
   windows (a late finish notification or anything else touching the row waits a round).
   Only builds whose partition still exists are considered. One page of `limit`; pass the
-  last row of a page as `cursor` for the next (`all_due/2` walks them).
+  last row of a page as `cursor` for the next (`RawStore.compact_due/2` walks them: a run
+  must not stop at one page).
   """
   @spec candidates(DateTime.t(), pos_integer(), tuple() | nil) ::
           [{DateTime.t(), Ecto.UUID.t(), project_id :: integer()}]
@@ -76,27 +77,18 @@ defmodule Conveyor.RawArchive do
   defp after_cursor(query, {at, id}),
     do: where(query, [i], i.finished_at > ^at or (i.finished_at == ^at and i.id > ^id))
 
-  @doc """
-  Every due build with its project, page by page: what an archive job is enqueued with (a
-  run must not stop at one page: a fixed page per 15-minute run capped the archive at 96k
-  builds a day while one node drains 20–30k an hour).
-  """
-  @spec all_due(DateTime.t(), pos_integer()) :: [{Ecto.UUID.t(), integer()}]
-  def all_due(now \\ DateTime.utc_now(), page \\ 1000) do
-    Stream.unfold(:start, fn
-      :done ->
-        nil
+  # What archiving reads of a build's row (the wide columns stay in the database).
+  @archive_fields ~w(id project_id inserted_at raw_status stream_finished status finished_at
+                     event_count log_bytes)a
 
-      cursor ->
-        case candidates(now, page, if(cursor == :start, do: nil, else: cursor)) do
-          [] -> nil
-          rows when length(rows) < page -> {rows, :done}
-          rows -> {rows, List.last(rows)}
-        end
-    end)
-    |> Enum.flat_map(fn rows ->
-      Enum.map(rows, fn {_at, id, project_id} -> {id, project_id} end)
-    end)
+  @doc "The rows of the given builds (the columns archiving reads), in the order of the ids; a build deleted meanwhile is left out."
+  @spec load([Ecto.UUID.t()]) :: [Invocation.t()]
+  def load(ids) do
+    rows =
+      Repo.all(from i in Invocation, where: i.id in ^ids, select: struct(i, ^@archive_fields))
+      |> Map.new(&{&1.id, &1})
+
+    for id <- ids, row = rows[id], do: row
   end
 
   @doc """
@@ -156,21 +148,84 @@ defmodule Conveyor.RawArchive do
   `:skipped` when the segments do not match the row — the build is marked and keeps its
   segments until the partition goes), or `{:error, reason}` to retry.
   """
-  @spec archive(Ecto.UUID.t() | Invocation.t(), DateTime.t()) :: {:ok, atom()} | {:error, term()}
-  def archive(inv_or_id, now \\ DateTime.utc_now())
+  @spec archive(Ecto.UUID.t() | Invocation.t() | :gone, DateTime.t(), RawLog.prefetched()) ::
+          {:ok, atom()} | {:error, term()}
+  def archive(inv_or_id, now \\ DateTime.utc_now(), prefetched \\ %{})
 
-  def archive(%Invocation{raw_status: "segments"} = inv, now),
-    do: if(due?(inv, now), do: run(inv), else: {:ok, :not_due})
+  def archive(%Invocation{raw_status: "segments"} = inv, now, prefetched),
+    do: if(due?(inv, now), do: run(inv, prefetched), else: {:ok, :not_due})
 
-  def archive(%Invocation{}, _now), do: {:ok, :already_archived}
+  def archive(%Invocation{}, _now, _prefetched), do: {:ok, :already_archived}
 
-  def archive(:gone, _now), do: {:ok, :not_found}
+  def archive(:gone, _now, _prefetched), do: {:ok, :not_found}
 
-  def archive(id, now) when is_binary(id) do
+  def archive(id, now, prefetched) when is_binary(id) do
     case Repo.get(Invocation, id) do
       nil -> {:ok, :not_found}
-      inv -> archive(inv, now)
+      inv -> archive(inv, now, prefetched)
     end
+  end
+
+  # Compressed bytes read ahead per batch, and builds archived at once within one.
+  @prefetch_budget 64 * 1024 * 1024
+  @batch_concurrency 4
+
+  @doc """
+  Archives several builds, object-first: the byte ranges their segment rows point at are
+  read once per object for the whole batch (`RawLog.prefetch/1`) instead of once per row
+  per build, then each build goes through `archive/3` on its own, with the protocol and
+  the outcomes of a build archived alone. Builds that ran at the same time share their
+  raw-log objects (an object holds a group commit of many builds), so the reads of a batch
+  are about its objects, not its rows.
+
+  The bytes read ahead are bounded (`budget`, 64 MB of compressed bytes by default): a
+  batch that points at more is
+  cut into consecutive smaller ones, and a build that exceeds it alone is read row by row.
+  Returns `{id, outcome}` per build, in order; a build that raises is `{:error, exception}`.
+  """
+  @spec archive_batch([Invocation.t()], DateTime.t(), pos_integer()) ::
+          [{Ecto.UUID.t(), {:ok, atom()} | {:error, term()}}]
+  def archive_batch(invs, now \\ DateTime.utc_now(), budget \\ @prefetch_budget) do
+    ranges = Segments.ranges(Enum.filter(invs, &(&1.raw_status == "segments" and due?(&1, now))))
+
+    invs
+    |> Enum.chunk_while(
+      {[], 0},
+      fn inv, {batch, bytes} ->
+        size = ranges |> Map.get(inv.id, []) |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+
+        if batch != [] and bytes + size > budget,
+          do: {:cont, Enum.reverse(batch), {[inv], size}},
+          else: {:cont, {[inv | batch], bytes + size}}
+      end,
+      fn
+        {[], _} -> {:cont, []}
+        {batch, _} -> {:cont, Enum.reverse(batch), []}
+      end
+    )
+    |> Enum.flat_map(&archive_prefetched(&1, ranges, now, budget))
+  end
+
+  defp archive_prefetched(invs, ranges, now, budget) do
+    wanted = Enum.flat_map(invs, &Map.get(ranges, &1.id, []))
+    bytes = wanted |> Enum.map(&elem(&1, 2)) |> Enum.sum()
+    prefetched = if bytes <= budget, do: RawLog.prefetch(wanted), else: %{}
+
+    invs
+    |> Task.async_stream(
+      fn inv ->
+        mine = Map.take(prefetched, Map.get(ranges, inv.id, []))
+
+        try do
+          {inv.id, archive(inv, now, mine)}
+        rescue
+          error -> {inv.id, failed(inv, error)}
+        end
+      end,
+      max_concurrency: @batch_concurrency,
+      timeout: :infinity
+    )
+    |> Enum.map(fn {:ok, result} -> result end)
   end
 
   defp due?(%Invocation{} = inv, now) do
@@ -179,11 +234,11 @@ defmodule Conveyor.RawArchive do
       DateTime.compare(inv.finished_at, Expiry.compaction_due_before(now, after_hours())) != :gt
   end
 
-  defp run(%Invocation{} = inv) do
+  defp run(%Invocation{} = inv, prefetched) do
     started = System.monotonic_time()
 
-    with {:ok, events} <- put_events(inv),
-         {:ok, log} <- put_log(inv),
+    with {:ok, events} <- put_events(inv, prefetched),
+         {:ok, log} <- put_log(inv, prefetched),
          {:ok, outcome} <- reference(inv, events, log) do
       bytes = events.size + ((log && log.size) || 0)
 
@@ -204,12 +259,12 @@ defmodule Conveyor.RawArchive do
 
   # Segments → one compressed `--build_event_binary_file`. The frames and the rows' counts
   # must both equal the row's `event_count`, or the segments are not the whole build.
-  defp put_events(%Invocation{} = inv) do
+  defp put_events(%Invocation{} = inv, prefetched) do
     counts = :counters.new(2, [])
 
     chunks =
       inv
-      |> Segments.stream(:events)
+      |> Segments.stream(:events, prefetched: prefetched)
       |> Stream.map(fn %{count: count, bytes: payload} ->
         data = Codec.decompress(payload)
         :counters.add(counts, 1, length(Codec.frames(data)))
@@ -233,14 +288,14 @@ defmodule Conveyor.RawArchive do
   end
 
   # The log text → one compressed object; none for a build without log output.
-  defp put_log(%Invocation{log_bytes: 0}), do: {:ok, nil}
+  defp put_log(%Invocation{log_bytes: 0}, _prefetched), do: {:ok, nil}
 
-  defp put_log(%Invocation{} = inv) do
+  defp put_log(%Invocation{} = inv, prefetched) do
     counts = :counters.new(1, [])
 
     chunks =
       inv
-      |> Segments.stream(:log)
+      |> Segments.stream(:log, prefetched: prefetched)
       |> Stream.map(fn %{bytes: data} ->
         text = Codec.decompress(data)
         :counters.add(counts, 1, byte_size(text))

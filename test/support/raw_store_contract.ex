@@ -262,7 +262,9 @@ defmodule Conveyor.RawStoreContract do
 
     # Not due yet: the builds finished a moment ago.
     assert {:ok, :not_due} = RawStore.compact(a.inv.id, now)
-    refute {a.inv.id, project.id} in RawStore.due_for_compaction(now)
+
+    assert %{archived: 0, skipped: 0, lost: 0, failed: 0, remaining?: false} =
+             RawStore.compact_due(now)
 
     # Past raw retention the day stays, and its objects with it: finished builds on it
     # are not compacted (Archive.tla DropGuard; RawLog.tla, the oldest-partition bound).
@@ -273,17 +275,16 @@ defmodule Conveyor.RawStoreContract do
     assert_reads!(a)
 
     # A day later both are due; compacting one of them is not enough to free the day.
-    due = RawStore.due_for_compaction(later, 1)
-    assert {a.inv.id, project.id} in due and {b.inv.id, project.id} in due
     assert RawStore.compaction_overdue_seconds(later) > 0
     assert {:ok, :archived} = RawStore.compact(a.inv.id, later)
     archived = assert_reads!(a)
     assert archived.updated_at == before.updated_at
     assert {:ok, :already_archived} = RawStore.compact(a.inv.id, later)
-    refute {a.inv.id, project.id} in RawStore.due_for_compaction(later)
     refute partition("event_segments", today) in RawStore.expire_partitions(past_retention)
 
-    assert {:ok, :archived} = RawStore.compact(b.inv, later)
+    # A run compacts what is left that is due, and then nothing is.
+    assert %{archived: 1, failed: 0, remaining?: false} = RawStore.compact_due(later)
+    assert %{archived: 0} = RawStore.compact_due(later)
     assert_reads!(b)
 
     # Now the day goes, then the objects; the builds read the same from their blobs.

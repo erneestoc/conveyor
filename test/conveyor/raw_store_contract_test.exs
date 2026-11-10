@@ -205,6 +205,19 @@ defmodule Conveyor.RawStoreContractTest do
       assert_reads!(a)
     end
 
+    @tag :capture_log
+    test "a run whose reads fail archives nothing, counts every build as failed and leaves them due",
+         %{project: project} do
+      {a, b} = two_builds!(project, [:blob])
+      Application.put_env(:conveyor, :flaky_object_reads, true)
+      assert %{archived: 0, failed: 2, remaining?: false} = RawStore.compact_due(later())
+      Application.delete_env(:conveyor, :flaky_object_reads)
+      assert_reads!(a)
+      assert %{archived: 2, failed: 0} = RawStore.compact_due(later())
+      assert_reads!(a)
+      assert_reads!(b)
+    end
+
     test "an archived build whose blob is gone reads as an error, never as an empty build", %{
       project: project
     } do
@@ -369,28 +382,102 @@ defmodule Conveyor.RawStoreContractTest do
       assert {:ok, :skipped} = RawStore.compact(a.inv.id, later())
     end
 
-    test "the worker enqueues every due build with its project, archives by id and idles when off",
+    test "a run compacts every due build whatever the page, breaking ties between equal finish times",
+         %{project: project} do
+      {a, b} = two_builds!(project, [:blob, :postgres])
+      assert a.inv.finished_at == b.inv.finished_at
+
+      assert %{archived: 2, skipped: 0, lost: 0, failed: 0, remaining?: false} =
+               RawStore.compact_due(later(), page: 1)
+
+      assert_reads!(a)
+      assert_reads!(b)
+    end
+
+    test "builds that share objects are compacted with one ranged read per object, not per row",
+         %{project: project} do
+      adapter!(Counting)
+      builds = for _ <- 1..6, do: build!(project)
+
+      # Five group commits, every build in each: 5 objects, 6 × 5 event rows and as many log rows.
+      builds =
+        Enum.reduce(1..5, builds, fn g, builds ->
+          append!(Enum.map(builds, &{&1, ["event #{g}"], "line #{g}\n"}), :blob)
+        end)
+
+      at = DateTime.utc_now()
+      builds = Enum.map(builds, &finish!(&1, at))
+
+      # One build alone: a ranged read per row (events and log are apart in each object).
+      {{:ok, :archived}, alone} =
+        Counting.count(fn -> RawStore.compact(hd(builds).inv.id, later()) end)
+
+      assert alone.get_range == 10
+
+      # The other five together: every object once.
+      {result, together} = Counting.count(fn -> RawStore.compact_due(later()) end)
+      assert %{archived: 5, failed: 0} = result
+      assert together.get_range == 5
+      Enum.each(builds, &assert_reads!/1)
+    end
+
+    test "a batch reads ahead no more than its budget: cut into smaller ones, or row by row", %{
+      project: project
+    } do
+      adapter!(Counting)
+      builds = for _ <- 1..3, do: build!(project)
+      big = :crypto.strong_rand_bytes(2_000)
+      builds = append!(Enum.map(builds, &{&1, [big], ""}), :blob)
+      builds = Enum.map(builds, &finish!/1)
+
+      # A budget of one build's bytes: three batches of one, a read each.
+      {result, counts} =
+        Counting.count(fn -> RawStore.compact_due(later(), prefetch_bytes: 2_100) end)
+
+      assert %{archived: 3} = result
+      assert counts.get_range == 3
+      Enum.each(builds, &assert_reads!/1)
+
+      # Less than one build's bytes: nothing is read ahead, the build is read row by row.
+      [c] = append!([{build!(project), [big], "log\n"}], :blob)
+      c = finish!(c)
+      assert %{archived: 1} = RawStore.compact_due(later(), prefetch_bytes: 10)
+      assert_reads!(c)
+    end
+
+    test "the job compacts what is due, snoozes when the deadline ends its run, and idles when off",
          %{project: project} do
       old = DateTime.add(DateTime.utc_now(), -3, :day)
-      a = build!(project, old)
-      [a] = append!([{a, ["m"], "log\n"}], :blob)
-      a = finish!(a, old)
 
-      assert {:ok, %{enqueued: n}} = perform_job(ArchiveRaw, %{})
-      assert n >= 1
-      assert_enqueued(worker: ArchiveRaw, args: %{id: a.inv.id, project_id: project.id})
-      # A job that names another project finds nothing; one from before the arguments
-      # carried the project (the id alone) still runs.
-      assert {:ok, :not_found} =
-               perform_job(ArchiveRaw, %{id: a.inv.id, project_id: project.id + 1})
+      [a, b] =
+        for _ <- 1..2 do
+          [x] = append!([{build!(project, old), ["m"], "log\n"}], :blob)
+          finish!(x, old)
+        end
 
-      assert {:ok, :archived} = perform_job(ArchiveRaw, %{id: a.inv.id, project_id: project.id})
-      assert {:ok, :already_archived} = perform_job(ArchiveRaw, %{id: a.inv.id})
+      previous = Application.get_env(:conveyor, ArchiveRaw)
+      on_exit(fn -> Application.put_env(:conveyor, ArchiveRaw, previous || []) end)
+      Application.put_env(:conveyor, ArchiveRaw, deadline_ms: 0, page: 1)
+      assert {:snooze, 1} = perform_job(ArchiveRaw, %{})
+      Application.put_env(:conveyor, ArchiveRaw, [])
+      assert {:ok, %{archived: 1, remaining?: false}} = perform_job(ArchiveRaw, %{})
       assert_reads!(a)
+      assert_reads!(b)
+
+      # One build by id (the jobs enqueued per build before, or by hand): a job that names
+      # another project finds nothing; one that carries the id alone still runs.
+      [c] = append!([{build!(project, old), ["m"], ""}], :postgres)
+      c = finish!(c, old)
+
+      assert {:ok, :not_found} =
+               perform_job(ArchiveRaw, %{id: c.inv.id, project_id: project.id + 1})
+
+      assert {:ok, :archived} = perform_job(ArchiveRaw, %{id: c.inv.id, project_id: project.id})
+      assert {:ok, :already_archived} = perform_job(ArchiveRaw, %{id: c.inv.id})
 
       compaction!(false)
       assert {:ok, :disabled} = perform_job(ArchiveRaw, %{})
-      assert {:cancel, :disabled} = perform_job(ArchiveRaw, %{id: a.inv.id})
+      assert {:cancel, :disabled} = perform_job(ArchiveRaw, %{id: c.inv.id})
     end
 
     test "the hourly partition job keeps a day that holds an unarchived finished build", %{

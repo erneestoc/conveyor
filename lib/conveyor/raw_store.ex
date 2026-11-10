@@ -21,8 +21,9 @@ defmodule Conveyor.RawStore do
       pipeline's store step, `Conveyor.Ingest.Writer.Store`), `event_segment/3` and
       `log_segment/3` for the rows that describe them, `write_mode/0`;
     * **read** — `frames/1`, `bep/1`, `events_page/3`, `log/1`;
-    * **compact** — `compact/2` moves a finished build to form 3, `due_for_compaction/1`
-      says which builds are due, `compaction_overdue_seconds/1` how late the oldest is;
+    * **compact** — `compact_due/2` moves every finished build that is due to form 3
+      (`compact/2` one of them), `compaction_overdue_seconds/1` says how late the oldest
+      is;
     * **expire** — `expire_partitions/1` and `expire_objects/2` delete what may go at a
       given clock, `expiry_backlog/1` says what is late; the rules themselves are
       `Conveyor.RawStore.Expiry`, in one place;
@@ -242,21 +243,66 @@ defmodule Conveyor.RawStore do
   defdelegate compaction?, to: RawArchive, as: :enabled?
 
   @doc """
-  The finished builds whose bytes are due to be compacted at `now`, oldest finish first,
-  each with its project: what a compaction job is enqueued with. All of them, read `page`
-  at a time.
-  """
-  @spec due_for_compaction(DateTime.t(), pos_integer()) :: [{Ecto.UUID.t(), integer()}]
-  def due_for_compaction(now \\ DateTime.utc_now(), page \\ 1000),
-    do: RawArchive.all_due(now, page)
-
-  @doc """
   How long the oldest build due for compaction has waited past its time, in seconds (0
   when none is due). A value that keeps growing means compaction is failing or not
   keeping up, and the expiry of segment partitions is being held back meanwhile.
   """
   @spec compaction_overdue_seconds(DateTime.t()) :: non_neg_integer()
   def compaction_overdue_seconds(now \\ DateTime.utc_now()), do: RawArchive.overdue_seconds(now)
+
+  @doc """
+  Compacts every build that is due at `now`, oldest finish first, in batches of `:page`
+  builds (default 2,000) until none is left or `:deadline_ms` (default nine minutes) has
+  passed; `remaining?` says the deadline ended the run (`:prefetch_bytes` bounds what a
+  batch reads ahead, 64 MB by default). Each batch reads the raw-log
+  objects its builds point into once for all of them, so builds that ran at the same time
+  cost about one ranged read per object they share, not one per segment row each
+  (PLAN §26.5, H1). Every build is still compacted by `compact/2`'s protocol and counted
+  under its outcome; `failed` builds stay due for the next run.
+  """
+  @spec compact_due(DateTime.t(), keyword()) :: %{
+          archived: non_neg_integer(),
+          skipped: non_neg_integer(),
+          lost: non_neg_integer(),
+          failed: non_neg_integer(),
+          remaining?: boolean()
+        }
+  def compact_due(now \\ DateTime.utc_now(), opts \\ []) do
+    page = Keyword.get(opts, :page, 2_000)
+    deadline = System.monotonic_time(:millisecond) + Keyword.get(opts, :deadline_ms, 540_000)
+    tally = %{archived: 0, skipped: 0, lost: 0, failed: 0, remaining?: false}
+    compact_pages(now, nil, page, deadline, opts, tally)
+  end
+
+  defp compact_pages(now, cursor, page, deadline, opts, tally) do
+    case RawArchive.candidates(now, page, cursor) do
+      [] ->
+        tally
+
+      due ->
+        tally =
+          due
+          |> Enum.map(fn {_finished_at, id, _project_id} -> id end)
+          |> RawArchive.load()
+          |> RawArchive.archive_batch(now, Keyword.get(opts, :prefetch_bytes, 64 * 1024 * 1024))
+          |> Enum.reduce(tally, fn
+            {_id, {:ok, outcome}}, tally when is_map_key(tally, outcome) ->
+              Map.update!(tally, outcome, &(&1 + 1))
+
+            {_id, {:ok, _nothing_to_do}}, tally ->
+              tally
+
+            {_id, {:error, _reason}}, tally ->
+              Map.update!(tally, :failed, &(&1 + 1))
+          end)
+
+        cond do
+          length(due) < page -> tally
+          System.monotonic_time(:millisecond) >= deadline -> %{tally | remaining?: true}
+          true -> compact_pages(now, List.last(due), page, deadline, opts, tally)
+        end
+    end
+  end
 
   @doc """
   Compacts one build: its segments (and byte ranges) become one blob for the events and
