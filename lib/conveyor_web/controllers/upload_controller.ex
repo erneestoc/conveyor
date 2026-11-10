@@ -202,22 +202,24 @@ defmodule ConveyorWeb.UploadController do
     marker =
       {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
 
-    all =
-      events
-      |> Enum.with_index(1)
-      |> Enum.map(fn {event, seq} -> Replay.ordered_event(stream_id, seq, event) end)
-      |> Kernel.++([Replay.ordered_event(stream_id, length(events) + 1, marker)])
+    stream =
+      (events ++ [marker])
+      |> Stream.with_index(1)
+      |> Stream.map(fn {event, seq} -> Replay.ordered_event(stream_id, seq, event) end)
 
-    Enum.reduce_while(all, {:ok, length(events)}, fn obe, acc ->
-      case Ingest.push_sync(ctx, obe, 30_000) do
-        :ok ->
-          {:cont, acc}
+    # One stream, acknowledged at the end (waiting for each event's commit cost a batch
+    # hold per event: two seconds each in production).
+    case Ingest.push_all(ctx, stream, 30_000) do
+      :ok ->
+        {:ok, length(events)}
 
-        {:error, reason} ->
-          {:halt,
-           {:error, 503, "ingest failed at event #{obe.sequence_number}: #{inspect(reason)}"}}
-      end
-    end)
+      # Created under another project between the check above and the first event.
+      {:error, {_seq, :not_found}} ->
+        {:error, 404, "no invocation #{uuid} in project #{key.project.slug}"}
+
+      {:error, {seq, reason}} ->
+        {:error, 503, "ingest failed at event #{seq}: #{inspect(reason)}"}
+    end
   end
 
   defp error(conn, status, message) do

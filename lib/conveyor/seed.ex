@@ -213,34 +213,23 @@ defmodule Conveyor.Seed do
     if DateTime.compare(at, now) == :gt, do: DateTime.add(at, -1, :day), else: at
   end
 
-  # Events are pushed the way the gRPC handler does, acknowledgements read as they come,
-  # so a build of a thousand events costs a few commits rather than a thousand round trips
-  # (waiting for each event's commit took minutes per real build on a networked database).
+  # Pushed as one stream (`Ingest.push_all/3`): waiting for each event's commit took
+  # minutes per real build on a networked database.
   defp ingest!(ctx, events) do
     id = Replay.uuid()
     stream_id = %V1.StreamId{build_id: Replay.uuid(), invocation_id: id, component: :TOOL}
-    last = length(events) + 1
-
-    events
-    |> Enum.with_index(1)
-    |> Enum.each(fn {event, seq} ->
-      :ok = Ingest.push(ctx, Replay.ordered_event(stream_id, seq, event), self())
-    end)
 
     marker =
       {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
 
-    :ok = Ingest.push(ctx, Replay.ordered_event(stream_id, last, marker), self())
-    await_acks!(last)
-    id
-  end
+    stream =
+      (events ++ [marker])
+      |> Stream.with_index(1)
+      |> Stream.map(fn {event, seq} -> Replay.ordered_event(stream_id, seq, event) end)
 
-  # Acks arrive in sequence order; the final marker's ack means every event committed.
-  defp await_acks!(last) do
-    receive do
-      {:ack, ^last} -> :ok
-      {:ack, _} -> await_acks!(last)
-      {:ack_failed, seq, reason} -> raise "seed event #{seq} not stored: #{inspect(reason)}"
+    case Ingest.push_all(ctx, stream, :infinity) do
+      :ok -> id
+      {:error, {seq, reason}} -> raise "seed event #{seq} not stored: #{inspect(reason)}"
     end
   end
 

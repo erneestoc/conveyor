@@ -69,6 +69,43 @@ defmodule Conveyor.Ingest do
     end
   end
 
+  @doc """
+  Pushes a whole stream the way the gRPC handler does, events first and acknowledgements
+  read as they come, and returns once the last one is committed: a file of a thousand
+  events costs a few commits rather than a thousand batch holds. The calling process
+  receives the acknowledgements. `timeout` bounds the wait for each next acknowledgement.
+  On an error nothing after the reported sequence was accepted; what committed before it
+  stays (a retry resumes through dedup).
+  """
+  @spec push_all(Context.t(), Enumerable.t(V1.OrderedBuildEvent.t()), timeout()) ::
+          :ok | {:error, {seq :: non_neg_integer(), reason :: term()}}
+  def push_all(%Context{} = ctx, events, timeout \\ 30_000) do
+    pushed =
+      Enum.reduce_while(events, {:ok, 0}, fn obe, _acc ->
+        case push(ctx, obe, self()) do
+          :ok -> {:cont, {:ok, obe.sequence_number}}
+          {:error, reason} -> {:halt, {:error, {obe.sequence_number, reason}}}
+        end
+      end)
+
+    case pushed do
+      {:ok, 0} -> :ok
+      {:ok, last} -> await_acks(last, timeout)
+      {:error, _} = error -> error
+    end
+  end
+
+  # Acks arrive in sequence order; the last one means every event before it committed.
+  defp await_acks(last, timeout) do
+    receive do
+      {:ack, ^last} -> :ok
+      {:ack, _seq} -> await_acks(last, timeout)
+      {:ack_failed, seq, reason} -> {:error, {seq, reason}}
+    after
+      timeout -> {:error, {last, :timeout}}
+    end
+  end
+
   @doc "Handles a lifecycle event (`PublishLifecycleEvent`)."
   @spec lifecycle(Context.t(), V1.OrderedBuildEvent.t()) :: :ok | {:error, term()}
   # The attempt-started notification makes the build visible before its first event. It

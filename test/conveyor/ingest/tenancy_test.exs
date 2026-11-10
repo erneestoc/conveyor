@@ -46,6 +46,12 @@ defmodule Conveyor.Ingest.TenancyTest do
                Ingest.push_sync(intruder, Replay.ordered_event(stream_id(id), seq, payload))
     end
 
+    assert {:error, {4, :not_found}} =
+             Ingest.push_all(intruder, [
+               Replay.ordered_event(stream_id(id), 4, Enum.at(events, 3)),
+               Replay.ordered_event(stream_id(id), 5, @marker)
+             ])
+
     assert {:error, :not_found} =
              Ingest.lifecycle(intruder, Replay.ordered_event(stream_id(id), 1, @started))
 

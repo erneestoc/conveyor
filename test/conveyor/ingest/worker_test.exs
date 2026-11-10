@@ -241,8 +241,10 @@ defmodule Conveyor.Ingest.WorkerTest do
       set: [last_event_seq: 99]
     )
 
-    assert {:error, {:fenced, 3}} =
-             Ingest.push_sync(ctx, Replay.ordered_event(stream_id(id), 4, Enum.at(events, 3)))
+    assert :ok = Ingest.push_all(ctx, [])
+
+    assert {:error, {4, {:fenced, 3}}} =
+             Ingest.push_all(ctx, [Replay.ordered_event(stream_id(id), 4, Enum.at(events, 3))])
 
     assert :ok = await_worker_exit(id)
   end

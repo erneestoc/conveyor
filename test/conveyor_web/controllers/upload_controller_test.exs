@@ -232,7 +232,23 @@ defmodule ConveyorWeb.UploadControllerTest do
 
     body = events |> Fixture.encode_all() |> IO.iodata_to_binary()
 
+    # The file is pushed as a stream and acknowledged at the end: it costs a few commits,
+    # not one batch hold per event.
+    test_pid = self()
+
+    :telemetry.attach(
+      "upload-batches",
+      [:conveyor, :ingest, :batch, :committed],
+      fn _, _, %{invocation_id: id}, _ -> send(test_pid, {:batch, id}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach("upload-batches") end)
+
     resp = put_raw(conn, ~p"/api/v1/invocations/#{uuid}/bep", body, headers) |> json_response(202)
+    {:messages, messages} = Process.info(self(), :messages)
+    batches = Enum.count(messages, &(&1 == {:batch, uuid}))
+    assert batches >= 1 and batches * 4 <= length(events)
     assert resp["invocation_id"] == uuid
     assert resp["events"] == length(events)
     assert resp["url"] =~ "/invocation/#{uuid}"
