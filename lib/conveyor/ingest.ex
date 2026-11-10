@@ -1,9 +1,14 @@
 defmodule Conveyor.Ingest do
   @moduledoc """
   Entry point of the ingest pipeline. The gRPC layer authenticates a stream into a
-  `Context` and pushes ordered events here; a per-invocation worker orders, normalizes and
-  batches them, and a group-commit writer persists them. `push/2` returns only after the
-  event is durable, so the caller can acknowledge it.
+  `Context` and pushes ordered events here; a per-invocation worker runs the stream's
+  session (`Conveyor.Ingest.Session`: order, dedup, batches, back-pressure), and a
+  group-commit writer persists the batches. `push/3` returns once the event is accepted;
+  the acknowledgement follows the commit as a message to the acker.
+
+  An invocation id belongs to the project that created it: for a context of another
+  project every function here answers as if the build did not exist (`{:error, :not_found}`,
+  or `:ok` without effect for the finish notification) and writes nothing.
   """
 
   alias Conveyor.Ingest.Worker
@@ -14,6 +19,8 @@ defmodule Conveyor.Ingest do
     Who is sending: the project (always decided server-side) and the API key, if any.
     `registry` and `worker_supervisor` name the ingest instance the stream lands on; tests
     start a second instance against the same database to exercise cross-node fencing.
+    `session` overrides the node's session configuration (`Conveyor.Ingest.session_config/0`)
+    for the worker this context starts.
     """
     defstruct project_id: nil,
               project_slug: nil,
@@ -23,6 +30,7 @@ defmodule Conveyor.Ingest do
               instance_name: nil,
               peer: nil,
               limits: nil,
+              session: nil,
               registry: Conveyor.Ingest.Registry,
               worker_supervisor: Conveyor.Ingest.WorkerSupervisor
 
@@ -216,6 +224,30 @@ defmodule Conveyor.Ingest do
         end
     end
   end
+
+  @doc """
+  The node's stream session configuration, read from the application environment once per
+  session start (`config :conveyor, Conveyor.Ingest`).
+  """
+  @spec session_config() :: Conveyor.Ingest.Session.Config.t()
+  def session_config do
+    env = Application.get_env(:conveyor, __MODULE__, [])
+    defaults = %Conveyor.Ingest.Session.Config{}
+
+    overrides =
+      for {key, default} <- Map.from_struct(defaults), do: {key, Keyword.get(env, key, default)}
+
+    struct(defaults, overrides)
+  end
+
+  @doc """
+  The idle window of a stream session. A live session changes its row with every commit and
+  marks its build disconnected itself after one window without events, so a row unchanged
+  for two windows has no session anywhere: the rule the stale sweep, build retention and
+  the raw archive rely on (`docs/spec/Retention.tla`).
+  """
+  @spec idle_timeout_ms() :: non_neg_integer()
+  def idle_timeout_ms, do: session_config().idle_timeout_ms
 
   @doc "Configuration value of the ingest pipeline."
   @spec config(atom(), term()) :: term()

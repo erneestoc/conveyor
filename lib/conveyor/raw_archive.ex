@@ -58,7 +58,7 @@ defmodule Conveyor.RawArchive do
         []
 
       query ->
-        idle_ms = Conveyor.Ingest.config(:idle_timeout_ms, 600_000)
+        idle_ms = Conveyor.Ingest.idle_timeout_ms()
         recent = DateTime.add(now, -2 * idle_ms, :millisecond)
 
         query

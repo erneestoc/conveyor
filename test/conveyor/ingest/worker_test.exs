@@ -1,4 +1,10 @@
 defmodule Conveyor.Ingest.WorkerTest do
+  @moduledoc """
+  The worker end to end: recorded builds through the real session, writer and database.
+  The protocol's rules (dedup, gaps, takeover, back-pressure, idle, linger, finalize) are
+  tested on `Conveyor.Ingest.Session` in `session_test.exs`; what is left here is what only
+  the process can show: the row, the writer, timers that really fire, hibernation.
+  """
   use Conveyor.IngestCase, async: false
 
   import Ecto.Query
@@ -21,13 +27,6 @@ defmodule Conveyor.Ingest.WorkerTest do
     end)
   end
 
-  # Tests run with no linger; this one needs the worker to stay for a moment.
-  defp with_linger(ms) do
-    env = Application.get_env(:conveyor, Conveyor.Ingest)
-    Application.put_env(:conveyor, Conveyor.Ingest, Keyword.put(env, :linger_ms, ms))
-    on_exit(fn -> Application.put_env(:conveyor, Conveyor.Ingest, env) end)
-  end
-
   defp finish(ctx, id, seq) do
     marker =
       {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
@@ -35,9 +34,29 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert :ok = Ingest.push_sync(ctx, Replay.ordered_event(stream_id(id), seq, marker))
   end
 
+  defp session(overrides), do: struct(Ingest.session_config(), overrides)
+
+  # Waits (without sleeping the test) until the worker has gone into hibernation.
+  defp hibernated?(pid, tries \\ 100) do
+    case Process.info(pid, :current_function) do
+      {:current_function, {mod, fun, _}}
+      when {mod, fun} in [{:erlang, :hibernate}, {:gen_server, :loop_hibernate}] ->
+        true
+
+      _ when tries > 0 ->
+        receive do
+        after
+          20 -> hibernated?(pid, tries - 1)
+        end
+
+      _ ->
+        false
+    end
+  end
+
   @tag :capture_log
   test "persists a full build, finalizes and exits after lingering", %{ctx: ctx} do
-    with_linger(2_000)
+    ctx = %{ctx | session: session(linger_ms: 2_000)}
     id = Replay.uuid()
     events = events("clean_build_and_test")
     Conveyor.Watch.subscribe(Ingest.project_topic(ctx.project_id))
@@ -66,9 +85,7 @@ defmodule Conveyor.Ingest.WorkerTest do
     # A finished worker hibernates on its next quiet tick and drops the wide columns it
     # will never read again (PLAN §24 item 5); it still answers.
     pid = worker_pid(id)
-    Process.sleep(400)
-    {:current_function, {mod, fun, _}} = Process.info(pid, :current_function)
-    assert {mod, fun} in [{:erlang, :hibernate}, {:gen_server, :loop_hibernate}]
+    assert hibernated?(pid)
     summary = Worker.summary(ctx.project_id, id)
     assert summary.finalized and not Map.has_key?(summary, :options)
 
@@ -128,7 +145,8 @@ defmodule Conveyor.Ingest.WorkerTest do
   end
 
   @tag :capture_log
-  test "deduplicates resent events, rejects gaps, and rehydrates after a restart", %{ctx: ctx} do
+  test "a worker that restarts resumes from the row; resends and gaps are judged against it",
+       %{ctx: ctx} do
     id = Replay.uuid()
     events = events("test_failure")
     push_all(ctx, id, Enum.take(events, 10))
@@ -158,15 +176,11 @@ defmodule Conveyor.Ingest.WorkerTest do
   } do
     id = Replay.uuid()
     events = events("build_failure")
-    previous = Application.get_env(:conveyor, Ingest)
-    Application.put_env(:conveyor, Ingest, Keyword.put(previous, :idle_timeout_ms, 50))
-    on_exit(fn -> Application.put_env(:conveyor, Ingest, previous) end)
 
-    push_all(ctx, id, Enum.take(events, 5))
+    push_all(%{ctx | session: session(idle_timeout_ms: 50)}, id, Enum.take(events, 5))
     assert :ok = await_worker_exit(id, 3_000)
     assert %{status: "disconnected", finished_at: %DateTime{}} = reload(id)
 
-    Application.put_env(:conveyor, Ingest, previous)
     push_all(ctx, id, events, 6)
     finish(ctx, id, length(events) + 1)
     assert :ok = await_worker_exit(id)
@@ -174,24 +188,38 @@ defmodule Conveyor.Ingest.WorkerTest do
   end
 
   @tag :capture_log
-  test "backpressure defers the push reply until a commit lands", %{ctx: ctx} do
+  test "a client back within the linger after an idle disconnect continues on the same worker",
+       %{ctx: ctx} do
     id = Replay.uuid()
-    events = events("clean_build_and_test")
-    previous = Application.get_env(:conveyor, Ingest)
+    events = events("build_failure")
+    n = length(events)
+    ctx = %{ctx | session: session(idle_timeout_ms: 100, linger_ms: 2_000)}
+    Conveyor.Watch.subscribe(Ingest.invocation_topic(id))
 
-    Application.put_env(
-      :conveyor,
-      Ingest,
-      previous |> Keyword.put(:max_unacked_events, 2) |> Keyword.put(:batch_flush_ms, 30)
-    )
+    push_all(ctx, id, Enum.take(events, 5))
+    worker = worker_pid(id)
+    ref = Process.monitor(worker)
+    assert_receive {:invocation_detail, %{invocation: %{status: "disconnected"}}}, 2_000
 
-    on_exit(fn -> Application.put_env(:conveyor, Ingest, previous) end)
+    # The whole rest of the stream, at once: no further idle window, and the worker (which
+    # reloads the row and drops the linger) is the one that finalizes the build.
+    rest =
+      events
+      |> Enum.with_index(1)
+      |> Enum.drop(5)
+      |> Enum.map(fn {event, seq} -> Replay.ordered_event(stream_id(id), seq, event) end)
 
-    for {event, seq} <- events |> Enum.take(6) |> Enum.with_index(1) do
-      assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), seq, event), self())
-    end
+    marker =
+      {:component_stream_finished, %V1.BuildEvent.BuildComponentStreamFinished{type: :FINISHED}}
 
-    for seq <- 1..6, do: assert_receive({:ack, ^seq}, 2_000)
+    assert :ok =
+             Ingest.push_all(ctx, rest ++ [Replay.ordered_event(stream_id(id), n + 1, marker)])
+
+    assert worker_pid(id) == worker
+    assert %{status: "failed", stream_finished: true, last_event_seq: last} = reload(id)
+    assert last == n + 1
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 5_000
+    assert :ok = Ingest.Verify.check(id, n)
   end
 
   @tag :capture_log
@@ -228,6 +256,10 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert {:error, :missing_invocation_id} = Ingest.push(ctx, obe, self())
     assert :ok = Ingest.lifecycle(ctx, obe)
     assert Ingest.config(:missing_key, :default) == :default
+
+    assert %Ingest.Session.Config{linger_ms: 0, max_unacked_events: 2_000} =
+             Ingest.session_config()
+
     assert Ingest.all_topic() == "invocations:all"
   end
 
@@ -247,72 +279,6 @@ defmodule Conveyor.Ingest.WorkerTest do
              Ingest.push_all(ctx, [Replay.ordered_event(stream_id(id), 4, Enum.at(events, 3))])
 
     assert :ok = await_worker_exit(id)
-  end
-
-  @tag :capture_log
-  test "a resend of an absorbed, uncommitted event is acknowledged only by its commit", %{
-    ctx: ctx
-  } do
-    id = Replay.uuid()
-    [e1, e2 | _] = events("clean_build_and_test")
-
-    # Absorb 1 and 2 without waiting for the commit; the acks go to another process.
-    sink = spawn(fn -> Process.sleep(:infinity) end)
-    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), sink)
-    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 2, e2), sink)
-
-    # A reconnected client resends 1: below the worker's expected sequence but not yet
-    # committed. The old rule acked it inside the call; now nothing arrives until the
-    # batch commits, and then the ack reaches this connection.
-    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), self())
-    refute_received {:ack, 1}
-    assert_receive {:ack, 1}, 5_000
-    assert reload(id).last_event_seq >= 1
-
-    # Once committed, a resend is acknowledged at once.
-    assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), 1, e1), self())
-    assert_received {:ack, 1}
-    Process.exit(sink, :kill)
-  end
-
-  @tag :capture_log
-  test "a client that resumes within the linger after an idle disconnect keeps its worker", %{
-    ctx: ctx
-  } do
-    id = Replay.uuid()
-    events = events("build_failure")
-    n = length(events)
-    previous = Application.get_env(:conveyor, Ingest)
-
-    Application.put_env(
-      :conveyor,
-      Ingest,
-      previous |> Keyword.put(:idle_timeout_ms, 50) |> Keyword.put(:linger_ms, 150)
-    )
-
-    on_exit(fn -> Application.put_env(:conveyor, Ingest, previous) end)
-    Conveyor.Watch.subscribe(Ingest.invocation_topic(id))
-
-    push_all(ctx, id, Enum.take(events, 5))
-    worker = worker_pid(id)
-    ref = Process.monitor(worker)
-    assert_receive {:invocation_detail, %{invocation: %{status: "disconnected"}}}, 2_000
-
-    # Back within the linger: no more idle timeouts from here on.
-    Application.put_env(:conveyor, Ingest, Keyword.put(previous, :linger_ms, 150))
-    assert :ok = Ingest.push_sync(ctx, Replay.ordered_event(stream_id(id), 6, Enum.at(events, 5)))
-
-    # The linger armed by the disconnect would have fired by now; the worker is the same.
-    refute_receive {:DOWN, ^ref, :process, ^worker, _}, 300
-    push_all(ctx, id, events, 7)
-    finish(ctx, id, n + 1)
-    assert worker_pid(id) in [worker, nil]
-
-    # The stream's end finalizes the build: it is no longer `disconnected`.
-    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 2_000
-    assert %{status: "failed", stream_finished: true, last_event_seq: last} = reload(id)
-    assert last == n + 1
-    assert :ok = Ingest.Verify.check(id, n)
   end
 
   @tag :capture_log

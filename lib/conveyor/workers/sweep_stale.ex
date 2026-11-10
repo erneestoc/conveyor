@@ -22,7 +22,7 @@ defmodule Conveyor.Workers.SweepStale do
   @doc "Marks stale in-progress builds disconnected; returns how many."
   @spec sweep(DateTime.t()) :: non_neg_integer()
   def sweep(now \\ DateTime.utc_now()) do
-    idle_ms = Conveyor.Ingest.config(:idle_timeout_ms, 600_000)
+    idle_ms = Conveyor.Ingest.idle_timeout_ms()
     stale = DateTime.add(now, -2 * idle_ms, :millisecond)
 
     {n, _} =

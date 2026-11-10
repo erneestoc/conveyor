@@ -1,29 +1,32 @@
 defmodule Conveyor.Ingest.Worker do
   @moduledoc """
-  One process per live invocation. Owns sequence ordering and deduplication, runs the
-  normalizer, accumulates batches, hands them to the writer shard, releases acks when
-  commits land, publishes coalesced PubSub digests, and finalizes the invocation when the
-  stream ends or goes idle.
+  One process per live invocation: the wiring around `Conveyor.Ingest.Session`. The session
+  module holds the protocol (order, dedup, batches, back-pressure, idle, linger, finalize)
+  as pure transitions; this process turns messages into its inputs and carries its effects
+  out: replies, acks to the connection's acker, batches to the writer shard, timers, the
+  row, PubSub, telemetry, logs.
 
-  State lives in Postgres: on start the worker rehydrates from the invocation row, so a
-  restart (or a takeover on another node) resumes from the last committed sequence.
+  What the process adds to the session's interface:
+
+    * **The row.** `load_or_create/3` reads or creates the invocation row, on start and for
+      every `:reload`; it is also where the tenancy rule lives. State lives in Postgres, so
+      a restart (or a takeover on another node) resumes from the last committed sequence.
+    * **Commit delivery.** A submitted batch always gets an outcome: the writer's
+      `{:batch_committed, ref}` or `{:batch_failed, ref, reason}`, or, when the writer
+      process goes away, the monitor's `:DOWN`, fed to the session as `writer_down/1`
+      (see `Conveyor.Ingest.Writer.submit/2`).
+    * **Timers.** Named timers armed and cancelled by effects; a timer that fires after it
+      was replaced or cancelled is dropped here and never reaches the session.
   """
   use GenServer, restart: :temporary
 
   require Logger
 
-  alias Conveyor.Bep.Event
   alias Conveyor.Ingest
-  alias Conveyor.Ingest.{Batch, Normalizer, Retry, Scrub, Writer, WriterPool}
-  alias Conveyor.Watch
-
-  # Columns a worker holds only until the build is finalized and never puts on list topics.
-  @wide_columns [:options, :workspace_status, :configurations]
-  # How long a refused worker (wrong project) stays to answer callers that hold its pid.
-  @refusal_ms 1_000
-  alias Conveyor.Invocations
+  alias Conveyor.Ingest.{Retry, Session, Writer, WriterPool}
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
+  alias Conveyor.Watch
   alias Google.Devtools.Build.V1, as: V1
 
   def start_link({ctx, invocation_id, stream_id}) do
@@ -51,72 +54,7 @@ defmodule Conveyor.Ingest.Worker do
   def summary(project_id, invocation_id),
     do: GenServer.call(via(project_id, invocation_id), :summary)
 
-  # --- init ---------------------------------------------------------------------------------
-
-  @impl true
-  def init({ctx, invocation_id, stream_id}) do
-    Process.flag(:trap_exit, false)
-    {:ok, %{ctx: ctx, invocation_id: invocation_id, stream_id: stream_id}, {:continue, :load}}
-  end
-
-  @impl true
-  def handle_continue(:load, %{ctx: ctx, invocation_id: id, stream_id: stream_id}) do
-    case Retry.with_backoff(fn -> load_or_create(ctx, id, stream_id) end,
-           label: "worker load #{id}"
-         ) do
-      {:ok, inv} ->
-        {:noreply, loaded(ctx, id, stream_id, inv)}
-
-      {:error, :not_found} ->
-        # The id belongs to another project. Give the name up at once, so the next lookup
-        # starts from the row again, answer the callers that already hold this pid, and go.
-        Registry.unregister(ctx.registry, {ctx.project_id, id})
-        {:noreply, %{refused: :not_found}, @refusal_ms}
-    end
-  end
-
-  defp loaded(ctx, id, stream_id, inv) do
-    norm =
-      Normalizer.new(inv,
-        keywords: ctx.keywords,
-        api_key_tags: ctx.api_key_tags,
-        max_log_bytes: (ctx.limits || Conveyor.Limits.defaults()).max_log_bytes
-      )
-
-    day = Invocations.day(inv)
-
-    state = %{
-      ctx: ctx,
-      invocation_id: id,
-      stream_id: stream_id,
-      day: day,
-      norm: norm,
-      expected_seq: inv.last_event_seq + 1,
-      batch:
-        Batch.new(id, ctx.project_id, day, inv.last_event_seq + 1, inv.log_bytes, inv.log_lines),
-      inflight: %{},
-      writer: nil,
-      blocked: [],
-      committed_seq: inv.last_event_seq,
-      flush_timer: nil,
-      idle_timer: nil,
-      broadcast_timer: nil,
-      dirty: fresh_dirty(),
-      stream_finished: inv.stream_finished,
-      lifecycle_finished: inv.lifecycle_finished,
-      finalized: inv.stream_finished,
-      # An idle disconnect was submitted and no event has arrived since.
-      disconnected: false,
-      # nil | timer reference | :due (expired with work in hand: stop when it drains)
-      linger: nil,
-      last_event_at: System.monotonic_time(:millisecond)
-    }
-
-    # A worker started for an already finished build (a late duplicate after a restart)
-    # only needs to answer what arrives during the linger window.
-    state = if state.finalized, do: start_linger(state), else: state
-    state |> reset_idle() |> mark_dirty(:summary) |> schedule_broadcast()
-  end
+  # --- the row ------------------------------------------------------------------------------
 
   # Insert first: a new build costs one statement; only a resumed or concurrently created
   # invocation (conflict) needs the read. Schema defaults match the column defaults.
@@ -191,533 +129,168 @@ defmodule Conveyor.Ingest.Worker do
     if inv.project_id == ctx.project_id, do: {:ok, inv}, else: {:error, :not_found}
   end
 
-  # --- calls --------------------------------------------------------------------------------
+  # --- inputs -------------------------------------------------------------------------------
+
+  @impl true
+  def init({ctx, invocation_id, stream_id}) do
+    session =
+      Session.new(ctx.session || Ingest.session_config(),
+        invocation_id: invocation_id,
+        project_id: ctx.project_id,
+        keywords: ctx.keywords,
+        api_key_tags: ctx.api_key_tags,
+        max_log_bytes: (ctx.limits || Conveyor.Limits.defaults()).max_log_bytes
+      )
+
+    worker = %{
+      ctx: ctx,
+      invocation_id: invocation_id,
+      stream_id: stream_id,
+      session: session,
+      # name => timer reference
+      timers: %{},
+      # {pid, monitor} of the writer shard holding this worker's batches
+      writer: nil,
+      # what the callback returns once the effects are carried out
+      next: :noreply
+    }
+
+    {:ok, worker, {:continue, :load}}
+  end
+
+  @impl true
+  def handle_continue(:load, w), do: w |> run(Session.loaded(w.session, load(w))) |> finish()
 
   # `acker` receives `{:ack, seq}` once the event is committed (or `{:ack_failed, seq, reason}`).
   # The call itself returns as soon as the event is absorbed, so the gRPC handler keeps
   # reading; when too much is unacknowledged the reply is deferred until the next commit,
   # which is the backpressure that eventually slows Bazel down through HTTP/2 flow control.
   @impl true
-  def handle_call(_request, _from, %{refused: reason} = state),
-    do: {:reply, {:error, reason}, state, @refusal_ms}
+  def handle_call({:push, %V1.OrderedBuildEvent{} = obe, acker}, from, w),
+    do: w |> run(Session.push(w.session, obe, acker, from)) |> finish()
 
-  def handle_call({:push, %V1.OrderedBuildEvent{sequence_number: seq} = obe, acker}, from, state) do
-    state = %{state | last_event_at: System.monotonic_time(:millisecond)} |> reset_idle()
+  def handle_call({:lifecycle, kind, _obe}, from, w),
+    do: w |> run(Session.lifecycle(w.session, kind, from)) |> finish()
 
-    cond do
-      seq <= state.committed_seq ->
-        # Already committed (client resend after a retry): ack immediately.
-        send(acker, {:ack, seq})
-        {:reply, :ok, state}
-
-      seq < state.expected_seq ->
-        # Absorbed but not committed: a client that reconnected to this node (after a
-        # drop or a balancer retry) resends what it never saw acknowledged. The ack must
-        # wait for the commit, on this connection; acking now would let a failed commit
-        # lose the event for good (docs/spec/Ingest.tla, Durability).
-        {:reply, :ok, await_commit(state, seq, acker)}
-
-      seq > state.expected_seq ->
-        case takeover(state, seq) do
-          {:ok, fresh} ->
-            handle_call({:push, obe, acker}, from, fresh)
-
-          {:error, state} ->
-            Logger.warning(
-              "invocation #{state.invocation_id}: got seq #{seq}, expected #{state.expected_seq}"
-            )
-
-            {:reply, {:error, :out_of_order}, state}
-        end
-
-      true ->
-        state = state |> resume() |> absorb(obe)
-
-        state = %{
-          state
-          | expected_seq: seq + 1,
-            batch: Batch.add_waiter(state.batch, {:ack, acker}, seq)
-        }
-
-        state = maybe_flush(state)
-
-        if unacked(state) > Ingest.config(:max_unacked_events, 2_000) do
-          {:noreply, %{state | blocked: [from | state.blocked]}}
-        else
-          {:reply, :ok, state}
-        end
-    end
-  end
-
-  def handle_call({:lifecycle, :invocation_attempt_started, _obe}, _from, state),
-    do: {:reply, :ok, state}
-
-  def handle_call({:lifecycle, :invocation_attempt_finished, _obe}, from, state) do
-    state = %{state | lifecycle_finished: true}
-    state = update_in(state.norm, &Normalizer.set(&1, %{lifecycle_finished: true}))
-    state = %{state | batch: Batch.add_waiter(state.batch, {:reply, from}, nil)}
-    {:noreply, flush(state)}
-  end
-
-  def handle_call(:summary, _from, state), do: {:reply, digest(state.norm, state), state}
-
-  # Behind a balancer a retried stream can land on a node whose worker was started by a
-  # lifecycle event and never saw the events another node committed. With nothing buffered
-  # or in flight, such a worker resumes from the row instead of rejecting the sequence.
-  defp takeover(%{inflight: inflight, batch: batch} = state, seq) do
-    if inflight == %{} and Batch.empty?(batch) do
-      fresh = reload(state)
-      if fresh.expected_seq == seq, do: {:ok, fresh}, else: {:error, fresh}
-    else
-      {:error, state}
-    end
-  end
-
-  # Drops every timer and starts again from the row. Only with nothing buffered or in flight.
-  defp reload(state) do
-    for {timer, msg} <- [
-          {state.idle_timer, :idle_timeout},
-          {state.flush_timer, :flush},
-          {state.broadcast_timer, :broadcast},
-          {state.linger, :linger_expired}
-        ],
-        is_reference(timer) do
-      Process.cancel_timer(timer)
-
-      receive do
-        ^msg -> :ok
-      after
-        0 -> :ok
-      end
-    end
-
-    # The row was this project's when the worker loaded it and never changes project.
-    {:ok, inv} =
-      Retry.with_backoff(
-        fn -> load_or_create(state.ctx, state.invocation_id, state.stream_id) end,
-        label: "worker reload #{state.invocation_id}"
-      )
-
-    %{loaded(state.ctx, state.invocation_id, state.stream_id, inv) | writer: state.writer}
-  end
-
-  # --- absorbing one event ---------------------------------------------------------------
-
-  defp absorb(state, %V1.OrderedBuildEvent{sequence_number: seq, event: event}) do
-    case Event.bes_kind(event) do
-      :bazel_event ->
-        case Event.unwrap(event) do
-          {:ok, bep} ->
-            {bep, changed?} = Scrub.event(bep)
-
-            bytes =
-              if changed?, do: BuildEventStream.BuildEvent.encode(bep), else: any_bytes(event)
-
-            kind = bep |> Event.payload_kind() |> to_string()
-            {norm, batch} = Normalizer.apply(state.norm, bep, seq, state.batch)
-            batch = Batch.add_event(batch, seq, kind, bytes)
-            %{state | norm: norm, batch: batch} |> mark_dirty_for(bep)
-
-          {:error, reason} ->
-            Logger.warning(
-              "invocation #{state.invocation_id} ##{seq}: undecodable bazel_event #{inspect(reason)}"
-            )
-
-            %{state | batch: Batch.add_marker(state.batch, seq)}
-        end
-
-      :component_stream_finished ->
-        %{state | stream_finished: true, batch: Batch.add_marker(state.batch, seq)}
-
-      _other ->
-        %{state | batch: Batch.add_marker(state.batch, seq)}
-    end
-  end
-
-  defp any_bytes(%V1.BuildEvent{event: {:bazel_event, %Google.Protobuf.Any{value: bytes}}}),
-    do: bytes
-
-  # --- batching and commits ---------------------------------------------------------------
-
-  defp maybe_flush(state) do
-    cond do
-      Batch.event_count(state.batch) >= Ingest.config(:batch_max_events, 500) ->
-        flush(state)
-
-      state.batch.event_bytes + state.batch.log_bytes >=
-          Ingest.config(:batch_max_bytes, 256 * 1024) ->
-        flush(state)
-
-      state.stream_finished ->
-        flush(state)
-
-      state.flush_timer == nil ->
-        %{
-          state
-          | flush_timer: Process.send_after(self(), :flush, Ingest.config(:batch_flush_ms, 50))
-        }
-
-      true ->
-        state
-    end
-  end
-
-  defp flush(state) do
-    if state.flush_timer, do: Process.cancel_timer(state.flush_timer)
-    state = %{state | flush_timer: nil}
-
-    {norm, batch} = prepare(state)
-
-    if Batch.empty?(batch) and batch.waiters == [] do
-      %{state | norm: norm}
-    else
-      state = submit(state, batch)
-
-      next =
-        Batch.new(
-          state.invocation_id,
-          state.ctx.project_id,
-          state.day,
-          state.expected_seq,
-          norm.inv[:log_bytes],
-          norm.inv[:log_lines]
-        )
-
-      %{state | norm: norm, batch: next, inflight: Map.put(state.inflight, batch.ref, batch)}
-    end
-  end
-
-  # Hands a batch to the invocation's writer shard and watches that writer: the writer
-  # answers every batch it holds before it returns to its loop, so the only way to lose an
-  # outcome is the writer process going away, which the monitor reports (see `:DOWN`).
-  defp submit(state, batch) do
-    case Writer.submit(WriterPool.for_invocation(state.invocation_id), batch) do
-      {:ok, pid} ->
-        watch_writer(state, pid)
-
-      {:error, :writer_down} ->
-        send(self(), {:batch_failed, batch.ref, :writer_down})
-        state
-    end
-  end
-
-  defp watch_writer(%{writer: {pid, _ref}} = state, pid), do: state
-
-  defp watch_writer(state, pid) do
-    with {_old, ref} <- state.writer, do: Process.demonitor(ref, [:flush])
-    %{state | writer: {pid, Process.monitor(pid)}}
-  end
-
-  # Finalization happens in the batch that carries the end-of-stream marker, so the final
-  # status and the last ack become durable together.
-  defp prepare(%{stream_finished: true, finalized: false} = state) do
-    norm = state.norm |> Normalizer.finalize() |> settle_profile(state.invocation_id)
-    {changes, norm} = Normalizer.take_dirty(norm)
-
-    batch =
-      state.batch
-      |> Batch.set_invocation(changes)
-      |> Batch.count_tags(norm.inv[:tags])
-      |> Map.put(:finalize, true)
-
-    {norm, batch}
-  end
-
-  defp prepare(state) do
-    {changes, norm} = Normalizer.take_dirty(state.norm)
-    {norm, Batch.set_invocation(state.batch, changes)}
-  end
-
-  # A profile Bazel wrote to a local file (the default without a remote cache) can never be
-  # fetched: record that in the final batch instead of a read and an update per build
-  # after the commit. Fetchable references are handled after the commit (see below).
-  defp settle_profile(%{inv: %{profile_status: "referenced", profile_uri: uri}} = norm, id)
-       when is_binary(uri) do
-    case Conveyor.Artifacts.Resource.parse_uri(uri) do
-      {:ok, _} ->
-        norm
-
-      {:error, reason} ->
-        Logger.info("invocation #{id}: profile unavailable: #{inspect(reason)}")
-        Normalizer.set(norm, %{profile_status: "unavailable"})
-    end
-  end
-
-  defp settle_profile(norm, _id), do: norm
+  def handle_call(:summary, _from, w), do: {:reply, Session.summary(w.session), w}
 
   @impl true
-  def handle_info(_msg, %{refused: _} = state), do: {:stop, :normal, state}
+  def handle_info({:batch_committed, ref}, w),
+    do: w |> run(Session.committed(w.session, ref)) |> finish()
 
-  def handle_info(:flush, state), do: {:noreply, flush(%{state | flush_timer: nil})}
-
-  def handle_info({:batch_committed, ref}, state) do
-    {batch, inflight} = Map.pop(state.inflight, ref)
-    notify_waiters(batch, :ok)
-
-    :telemetry.execute(
-      [:conveyor, :ingest, :batch, :committed],
-      %{events: Batch.event_count(batch)},
-      %{invocation_id: state.invocation_id}
-    )
-
-    state =
-      %{state | inflight: inflight, committed_seq: max(state.committed_seq, batch.last_seq)}
-      |> unblock()
-
-    state =
-      if batch.finalize and (state.stream_finished or state.disconnected) do
-        # Only a build that referenced a profile on a remote cache has work to schedule; the
-        # worker's own view of the row saves the read.
-        if state.norm.inv[:profile_status] == "referenced",
-          do: Conveyor.Artifacts.on_finalized(struct(Invocation, state.norm.inv))
-
-        %{state | finalized: true} |> mark_dirty(:summary) |> start_linger()
-      else
-        state
-      end
-
-    if state.linger == :due and quiet?(state),
-      do: {:stop, :normal, state},
-      else: {:noreply, state}
-  end
-
-  # One failed batch fails everything behind it: later batches cannot commit before it
-  # (the fence), so every waiter of every batch in flight is told now, in sequence order.
-  def handle_info({:batch_failed, _ref, reason}, state) do
-    state.inflight
-    |> Map.values()
-    |> Enum.sort_by(& &1.first_seq)
-    |> Enum.each(&notify_waiters(&1, {:error, reason}))
-
-    Enum.each(state.blocked, &GenServer.reply(&1, {:error, reason}))
-    Logger.error("invocation #{state.invocation_id}: batch commit failed: #{inspect(reason)}")
-    {:stop, :normal, %{state | inflight: %{}, blocked: []}}
-  end
+  def handle_info({:batch_failed, ref, reason}, w),
+    do: w |> run(Session.failed(w.session, ref, reason)) |> finish()
 
   # The writer went away (crash, restart, shutdown). Whatever it held is lost to this
   # worker and the outcome of a batch it was committing is unknown: it may be in the row.
-  # So the worker does what it does for any failed batch, fails the stream and stops; the
-  # client resends from its last acknowledgement and the next worker starts from the row,
-  # which acknowledges what did commit (dedup) and absorbs the rest.
-  def handle_info({:DOWN, ref, :process, pid, _reason}, %{writer: {pid, ref}} = state) do
-    case Map.keys(state.inflight) do
-      [] -> {:noreply, %{state | writer: nil}}
-      [first | _] -> handle_info({:batch_failed, first, :writer_down}, %{state | writer: nil})
+  def handle_info({:DOWN, ref, :process, pid, _reason}, %{writer: {pid, ref}} = w),
+    do: %{w | writer: nil} |> run(Session.writer_down(w.session)) |> finish()
+
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, w), do: {:noreply, w}
+
+  def handle_info({:timeout, ref, {:session, name}}, w) do
+    case Map.pop(w.timers, name) do
+      {^ref, timers} -> %{w | timers: timers} |> run(Session.timer(w.session, name)) |> finish()
+      # Replaced or cancelled after it fired.
+      _ -> {:noreply, w}
     end
   end
 
-  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state), do: {:noreply, state}
+  # --- effects ------------------------------------------------------------------------------
 
-  def handle_info(:idle_timeout, state) do
-    if state.finalized or state.inflight != %{} do
-      {:noreply, reset_idle(state)}
-    else
-      Logger.info(
-        "invocation #{state.invocation_id}: idle for #{Ingest.config(:idle_timeout_ms)} ms, marking disconnected"
-      )
+  defp run(w, {session, effects}), do: Enum.reduce(effects, %{w | session: session}, &effect/2)
 
-      norm = Normalizer.disconnect(state.norm)
-      {changes, norm} = Normalizer.take_dirty(norm)
-      batch = state.batch |> Batch.set_invocation(changes) |> Map.put(:finalize, true)
-      state = submit(state, batch)
+  defp finish(%{next: :noreply} = w), do: {:noreply, w}
+  defp finish(%{next: :hibernate} = w), do: {:noreply, %{w | next: :noreply}, :hibernate}
+  defp finish(%{next: {:stop, reason}} = w), do: {:stop, reason, w}
 
-      next =
-        Batch.new(
-          state.invocation_id,
-          state.ctx.project_id,
-          state.day,
-          state.expected_seq,
-          norm.inv[:log_bytes],
-          norm.inv[:log_lines]
-        )
+  defp effect({:reply, from, reply}, w) do
+    GenServer.reply(from, reply)
+    w
+  end
 
-      {:noreply,
-       %{
-         state
-         | norm: norm,
-           batch: next,
-           inflight: Map.put(state.inflight, batch.ref, batch),
-           disconnected: true
-       }}
+  defp effect({:ack, acker, seq}, w) do
+    send(acker, {:ack, seq})
+    w
+  end
+
+  defp effect({:nack, acker, seq, reason}, w) do
+    send(acker, {:ack_failed, seq, reason})
+    w
+  end
+
+  # The writer answers every batch it holds before it returns to its loop, so the only way
+  # to lose an outcome is the writer process going away, which the monitor reports.
+  defp effect({:submit, batch}, w) do
+    case Writer.submit(WriterPool.for_invocation(w.invocation_id), batch) do
+      {:ok, pid} -> watch_writer(w, pid)
+      {:error, :writer_down} -> run(w, Session.failed(w.session, batch.ref, :writer_down))
     end
   end
 
-  # A worker exits only when it is quiet (`Exit` in docs/spec/Ingest.tla): nothing
-  # buffered, nothing at the writer, nobody waiting. Otherwise it goes when that drains.
-  def handle_info(:linger_expired, state) do
-    if quiet?(state),
-      do: {:stop, :normal, state},
-      else: {:noreply, %{state | linger: :due}}
+  defp effect({:arm, name, ms}, w) do
+    w = cancel(w, name)
+    %{w | timers: Map.put(w.timers, name, :erlang.start_timer(ms, self(), {:session, name}))}
   end
 
-  # A broadcast tick with nothing in flight is the quiet moment of a stream: between paced
-  # events, and for the whole linger of a finished build. Hibernating there compacts the
-  # heap and releases the event binaries the batches referenced (PLAN §24 item 5); a
-  # finished worker also drops the wide columns it will never read again.
-  def handle_info(:broadcast, state) do
-    state = state |> Map.put(:broadcast_timer, nil) |> broadcast()
+  defp effect({:cancel, name}, w), do: cancel(w, name)
 
-    if state.inflight == %{} and Batch.empty?(state.batch),
-      do: {:noreply, slim(state), :hibernate},
-      else: {:noreply, state}
+  defp effect(:reload, w) do
+    w = Enum.reduce(Map.keys(w.timers), w, &cancel(&2, &1))
+    run(w, Session.loaded(w.session, load(w)))
   end
 
-  # Waiters are stored newest-first; acks must go out in ascending sequence order.
-  defp notify_waiters(%Batch{waiters: waiters}, reply) do
-    waiters
-    |> Enum.reverse()
-    |> Enum.each(fn
-      {{:reply, from}, _seq} -> GenServer.reply(from, reply)
-      {{:ack, pid}, seq} when reply == :ok -> send(pid, {:ack, seq})
-      {{:ack, pid}, seq} -> send(pid, {:ack_failed, seq, elem(reply, 1)})
-    end)
+  defp effect(:unregister, w) do
+    Registry.unregister(w.ctx.registry, {w.ctx.project_id, w.invocation_id})
+    w
   end
 
-  # Registers `acker` for the ack of an absorbed, uncommitted sequence: on the batch still
-  # being built, or on the in-flight batch that carries it.
-  defp await_commit(state, seq, acker) do
-    if seq >= state.batch.first_seq do
-      %{state | batch: Batch.add_waiter(state.batch, {:ack, acker}, seq)}
-    else
-      case Enum.find(state.inflight, fn {_ref, b} -> seq >= b.first_seq and seq <= b.last_seq end) do
-        {ref, b} -> put_in(state.inflight[ref], Batch.add_waiter(b, {:ack, acker}, seq))
-        nil -> state
-      end
+  defp effect({:broadcast, topic, message}, w) do
+    Watch.broadcast(topic, message)
+    w
+  end
+
+  defp effect({:telemetry, event, measurements, metadata}, w) do
+    :telemetry.execute(event, measurements, metadata)
+    w
+  end
+
+  defp effect({:log, level, message}, w) do
+    Logger.log(level, message)
+    w
+  end
+
+  defp effect({:finalized, inv}, w) do
+    Conveyor.Artifacts.on_finalized(struct(Invocation, inv))
+    w
+  end
+
+  defp effect(:hibernate, %{next: :noreply} = w), do: %{w | next: :hibernate}
+  defp effect(:hibernate, w), do: w
+  defp effect({:stop, reason}, w), do: %{w | next: {:stop, reason}}
+
+  defp cancel(w, name) do
+    case Map.pop(w.timers, name) do
+      {nil, _} ->
+        w
+
+      {ref, timers} ->
+        :erlang.cancel_timer(ref)
+        %{w | timers: timers}
     end
   end
 
-  defp unacked(state), do: state.expected_seq - 1 - state.committed_seq
+  defp watch_writer(%{writer: {pid, _ref}} = w, pid), do: w
 
-  defp unblock(%{blocked: []} = state), do: state
-
-  defp unblock(state) do
-    Enum.each(state.blocked, &GenServer.reply(&1, :ok))
-    %{state | blocked: []}
+  defp watch_writer(w, pid) do
+    with {_old, ref} <- w.writer, do: Process.demonitor(ref, [:flush])
+    %{w | writer: {pid, Process.monitor(pid)}}
   end
 
-  # --- timers -------------------------------------------------------------------------------
-
-  defp reset_idle(state) do
-    if state.idle_timer, do: Process.cancel_timer(state.idle_timer)
-
-    %{
-      state
-      | idle_timer:
-          Process.send_after(self(), :idle_timeout, Ingest.config(:idle_timeout_ms, 600_000))
-    }
-  end
-
-  defp start_linger(%{linger: nil} = state) do
-    %{
-      state
-      | linger: Process.send_after(self(), :linger_expired, Ingest.config(:linger_ms, 30_000))
-    }
-  end
-
-  defp start_linger(state), do: state
-
-  defp quiet?(state),
-    do: state.inflight == %{} and Batch.empty?(state.batch) and state.batch.waiters == []
-
-  # A client that comes back after an idle disconnect, while the worker lingers (or while
-  # the disconnect is still at the writer), continues a live build: the linger must not
-  # stop the worker under it, and the stream's end must finalize the build. Once the
-  # disconnect has committed the worker starts again from the row, as a new worker would
-  # (it may have dropped the wide columns already); before that its own view is current.
-  defp resume(%{disconnected: true, finalized: true} = state), do: reload(state)
-  defp resume(%{disconnected: true} = state), do: %{state | disconnected: false}
-  defp resume(state), do: state
-
-  # --- broadcasts ---------------------------------------------------------------------------
-
-  defp fresh_dirty, do: %{summary: false, targets: %{}, tests: %{}, actions: [], log: []}
-
-  defp mark_dirty(state, :summary),
-    do: %{state | dirty: %{state.dirty | summary: true}} |> schedule_broadcast()
-
-  defp mark_dirty_for(state, %BuildEventStream.BuildEvent{payload: {kind, _}} = bep) do
-    dirty = state.dirty
-
-    dirty =
-      case kind do
-        :progress ->
-          {:progress, p} = bep.payload
-          %{dirty | log: [p.stdout <> p.stderr | dirty.log]}
-
-        k when k in [:configured, :completed, :test_summary, :target_summary] ->
-          %{dirty | targets: Map.merge(dirty.targets, state.batch.targets), summary: true}
-
-        :test_result ->
-          %{dirty | tests: Map.merge(dirty.tests, state.batch.tests), summary: true}
-
-        :action ->
-          %{dirty | actions: Enum.take(state.batch.actions, 1) ++ dirty.actions, summary: true}
-
-        _ ->
-          %{dirty | summary: true}
-      end
-
-    %{state | dirty: dirty} |> schedule_broadcast()
-  end
-
-  defp schedule_broadcast(%{broadcast_timer: nil} = state) do
-    %{
-      state
-      | broadcast_timer:
-          Process.send_after(self(), :broadcast, Ingest.config(:broadcast_interval_ms, 250))
-    }
-  end
-
-  defp schedule_broadcast(state), do: state
-
-  defp broadcast(%{dirty: dirty} = state) do
-    id = state.invocation_id
-    project_id = state.ctx.project_id
-
-    if dirty.summary do
-      # List pages render a row per build: the wide columns (options, workspace status,
-      # configurations) are tens of KB each and stay out of list-level messages. With a
-      # watched project of thousands of live builds, every worker's tick lands on the
-      # viewer's node (fleet test: a 16 GB node killed within a minute).
-      summary = state.norm |> digest(state) |> Map.drop(@wide_columns)
-
-      Watch.broadcast(Ingest.project_topic(project_id), {:invocation_updated, summary})
-      Watch.broadcast(Ingest.all_topic(), {:invocation_updated, summary})
-    end
-
-    if dirty.summary or dirty.targets != %{} or dirty.tests != %{} or dirty.actions != [] do
-      detail = %{
-        invocation: digest(state.norm, state),
-        targets: Map.values(dirty.targets),
-        tests: Map.values(dirty.tests),
-        actions: Enum.reverse(dirty.actions)
-      }
-
-      Watch.broadcast(Ingest.invocation_topic(id), {:invocation_detail, detail})
-    end
-
-    if dirty.log != [] do
-      # Byte offset of these chunks in the stored log, so a viewer that loaded the log
-      # over HTTP can splice live appends exactly.
-      offset = max((state.norm.inv[:log_bytes] || 0) - IO.iodata_length(dirty.log), 0)
-
-      Watch.broadcast(Ingest.log_topic(id), {:log_chunks, Enum.reverse(dirty.log), offset})
-    end
-
-    %{state | dirty: fresh_dirty()}
-  end
-
-  defp slim(%{finalized: true} = state),
-    do: update_in(state.norm.inv, &Map.drop(&1, @wide_columns))
-
-  defp slim(state), do: state
-
-  defp digest(norm, state) do
-    norm.inv
-    |> Map.put(:id, state.invocation_id)
-    |> Map.put(:project_id, state.ctx.project_id)
-    |> Map.put(:last_event_seq, state.expected_seq - 1)
-    |> Map.put(:finalized, state.finalized)
+  defp load(w) do
+    Retry.with_backoff(fn -> load_or_create(w.ctx, w.invocation_id, w.stream_id) end,
+      label: "worker load #{w.invocation_id}"
+    )
   end
 
   defp blank_to_nil(""), do: nil

@@ -43,7 +43,7 @@ defmodule Conveyor.Workers.BuildRetention do
   @doc "Deletes a project's builds that started (or, lacking a start, were inserted) before `cutoff`."
   @spec delete_before(Project.t(), DateTime.t(), non_neg_integer()) :: non_neg_integer()
   def delete_before(%Project{id: project_id} = project, cutoff, acc) do
-    idle_ms = Conveyor.Ingest.config(:idle_timeout_ms, 600_000)
+    idle_ms = Conveyor.Ingest.idle_timeout_ms()
     recent = DateTime.add(DateTime.utc_now(), -2 * idle_ms, :millisecond)
 
     ids =
