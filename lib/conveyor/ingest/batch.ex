@@ -211,7 +211,7 @@ defmodule Conveyor.Ingest.Batch do
   the frames into the stored payload (a writer shard passes its own compressor).
   """
   @spec event_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def event_segment_row(%__MODULE__{} = b, compress \\ &RawStore.Codec.compress_bep/1) do
+  def event_segment_row(%__MODULE__{} = b, compress \\ RawStore.compressors().bep) do
     RawStore.event_segment(
       %{invocation_id: b.invocation_id, day: b.day, bytes: b.event_bytes},
       Enum.reverse(b.events),
@@ -221,7 +221,7 @@ defmodule Conveyor.Ingest.Batch do
 
   @doc "The `log_segments` row for this batch, or nil when it holds no log text."
   @spec log_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def log_segment_row(%__MODULE__{} = b, compress \\ &RawStore.Codec.compress/1) do
+  def log_segment_row(%__MODULE__{} = b, compress \\ RawStore.compressors().text) do
     RawStore.log_segment(
       %{
         invocation_id: b.invocation_id,

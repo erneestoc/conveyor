@@ -56,8 +56,8 @@ defmodule Conveyor.InvocationsTest do
     assert Invocations.day(%Invocation{}) == Date.utc_today()
     inv = Repo.insert!(%Invocation{id: inv.id, project_id: Projects.ensure_default_project!().id})
 
-    assert Invocations.events(inv) == [] and Invocations.log(inv) == "" and
-             Invocations.log_segments(inv) == []
+    assert Invocations.events(inv) == [] and Invocations.log(inv) == ""
+    assert Invocations.events_page(inv, 1, 10) == {[], 0}
 
     assert Invocations.targets(inv.id) == [] and Invocations.test_results(inv.id) == [] and
              Invocations.actions(inv.id) == []

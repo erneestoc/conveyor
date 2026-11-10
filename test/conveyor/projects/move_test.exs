@@ -28,9 +28,12 @@ defmodule Conveyor.Projects.MoveTest do
     :ok = Artifacts.profile_available(inv, profile)
     {:ok, notes} = Blobs.put(from, "notes #{System.unique_integer()}")
     {:ok, _} = Artifacts.attach(moved, "notes.txt", notes, "upload")
-    assert {:ok, :archived} = RawArchive.archive(moved, DateTime.add(DateTime.utc_now(), 2, :day))
+
+    assert {:ok, :archived} =
+             Conveyor.RawStore.compact(moved, DateTime.add(DateTime.utc_now(), 2, :day))
+
     inv = Repo.get!(Invocation, moved)
-    frames = Invocations.raw_frames(inv)
+    frames = Conveyor.RawStore.frames(inv)
     log = Invocations.log(inv)
 
     assert {:ok, %{builds: 1, blobs: 4}} =
@@ -45,7 +48,7 @@ defmodule Conveyor.Projects.MoveTest do
     for digest <- [profile.digest, notes.digest, inv.raw_blob, inv.log_blob],
         do: assert(Blobs.exists?(to, digest), "#{digest} not in the target")
 
-    assert Invocations.raw_frames(inv) == frames and Invocations.log(inv) == log
+    assert Conveyor.RawStore.frames(inv) == frames and Invocations.log(inv) == log
 
     # Rollups agree with the exact queries on both sides.
     for project <- [from, to] do

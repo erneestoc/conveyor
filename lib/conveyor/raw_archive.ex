@@ -46,7 +46,7 @@ defmodule Conveyor.RawArchive do
   `segments`, finished more than `after_hours` ago, and their row unchanged for two idle
   windows (a late finish notification or anything else touching the row waits a round).
   Only builds whose partition still exists are considered. One page of `limit`; pass the
-  last row of a page as `cursor` for the next (`all_candidates/1` walks them).
+  last row of a page as `cursor` for the next (`all_due/2` walks them).
   """
   @spec candidates(DateTime.t(), pos_integer(), tuple() | nil) ::
           [{DateTime.t(), Ecto.UUID.t(), project_id :: integer()}]
@@ -77,15 +77,10 @@ defmodule Conveyor.RawArchive do
     do: where(query, [i], i.finished_at > ^at or (i.finished_at == ^at and i.id > ^id))
 
   @doc """
-  Every due build, page by page (a run must not stop at one page: a fixed page per
-  15-minute run capped the archive at 96k builds a day while one node drains 20–30k an
-  hour).
+  Every due build with its project, page by page: what an archive job is enqueued with (a
+  run must not stop at one page: a fixed page per 15-minute run capped the archive at 96k
+  builds a day while one node drains 20–30k an hour).
   """
-  @spec all_candidates(DateTime.t(), pos_integer()) :: [Ecto.UUID.t()]
-  def all_candidates(now \\ DateTime.utc_now(), page \\ 1000),
-    do: now |> all_due(page) |> Enum.map(&elem(&1, 0))
-
-  @doc "As `all_candidates/2`, each id with its project: what an archive job is enqueued with."
   @spec all_due(DateTime.t(), pos_integer()) :: [{Ecto.UUID.t(), integer()}]
   def all_due(now \\ DateTime.utc_now(), page \\ 1000) do
     Stream.unfold(:start, fn

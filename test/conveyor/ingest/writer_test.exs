@@ -184,7 +184,7 @@ defmodule Conveyor.Ingest.WriterTest do
 
     TagCounter.flush()
     assert [%{count: 2}] = Repo.all(from t in Conveyor.Invocations.TagKey, where: t.key == "k")
-    assert Conveyor.Invocations.raw_frames(Repo.get!(Invocation, id)) == ["x", "y"]
+    assert Conveyor.RawStore.frames(Repo.get!(Invocation, id)) == ["x", "y"]
   end
 
   @tag :capture_log
@@ -394,7 +394,7 @@ defmodule Conveyor.Ingest.WriterTest do
     for id <- good do
       inv = Repo.get!(Invocation, id)
       assert inv.last_event_seq == 1
-      assert Conveyor.Invocations.raw_frames(inv) == [id]
+      assert Conveyor.RawStore.frames(inv) == [id]
     end
 
     assert Repo.get!(Invocation, fenced.invocation_id).last_event_seq == 0
@@ -675,7 +675,7 @@ defmodule Conveyor.Ingest.WriterTest do
     assert_receive {:batch_committed, ^small_ref}, 2_000
     assert_receive {:batch_committed, ^enough_ref}, 2_000
     assert objects() == before + 1
-    assert Conveyor.Invocations.raw_frames(Repo.get!(Invocation, id)) == ["ab", "c"]
+    assert Conveyor.RawStore.frames(Repo.get!(Invocation, id)) == ["ab", "c"]
   end
 
   test "two units of one invocation in a group are applied in order: the one the row does not continue is fenced",

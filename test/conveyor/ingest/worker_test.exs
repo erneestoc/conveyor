@@ -137,7 +137,8 @@ defmodule Conveyor.Ingest.WorkerTest do
                [Ecto.UUID.dump!(id)]
              )
 
-    assert [%{byte_offset: 0, line_offset: 0} | _] = Invocations.log_segments(inv)
+    assert %{problems: [], log_bytes: bytes} = Conveyor.RawStore.audit(inv)
+    assert bytes == inv.log_bytes
     Conveyor.Ingest.TagCounter.flush()
     assert Enum.any?(Invocations.tag_keys(ctx.project_id, limit: 50), &(&1.key == "scenario"))
 
@@ -244,7 +245,7 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert :ok = await_worker_exit(id)
     inv = reload(id)
     assert inv.status == "unknown" and inv.event_count == 0 and inv.last_event_seq == 3
-    assert Invocations.raw_frames(inv) == []
+    assert Conveyor.RawStore.frames(inv) == []
   end
 
   test "events without an invocation id and unknown lifecycle kinds are handled", %{ctx: ctx} do

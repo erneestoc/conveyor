@@ -23,12 +23,11 @@ defmodule Conveyor.Ingest.Writer.Plan do
   @doc """
   Compressors for the calling process, to keep for its lifetime: one zstd context for raw
   events (with the BEP dictionary) and one for log text, reused for every segment instead
-  of created per call. The frames are the ones `Conveyor.RawStore.Codec.compress_bep/1` and
-  `compress/1` produce, so every reader decodes them. A context belongs to the process
+  of created per call. The frames are the ones `Conveyor.RawStore` reads back. A context belongs to the process
   that made it.
   """
   @spec compressors() :: compressors()
-  defdelegate compressors, to: Conveyor.RawStore.Codec
+  defdelegate compressors, to: Conveyor.RawStore
 
   @doc "The segment rows of a unit, compressed: `{event row | nil, log row | nil}`."
   @spec segments(Batch.t(), compressors()) :: segments()

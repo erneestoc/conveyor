@@ -207,7 +207,7 @@ defmodule Conveyor.Blobs.S3 do
   end
 
   defp delete_chunk(keys, opts) do
-    by_object = Map.new(keys, &{object_key(&1, opts), &1})
+    by_object = Map.new(keys, &{bucket_key(&1, opts), &1})
 
     body =
       IO.iodata_to_binary([
@@ -265,10 +265,10 @@ defmodule Conveyor.Blobs.S3 do
   end
 
   @doc "Object URL for a digest under the configured bucket, prefixes and addressing style."
-  def url(digest, opts), do: bucket_url(opts) <> "/" <> object_key(digest, opts)
+  def url(digest, opts), do: bucket_url(opts) <> "/" <> bucket_key(digest, opts)
 
   # The key inside the bucket: the store's prefix, the project's (when given), the name.
-  defp object_key(name, opts) do
+  defp bucket_key(name, opts) do
     case Keyword.get(opts, :project_prefix) do
       nil -> Path.join(Keyword.get(opts, :prefix, "blobs"), name)
       project -> Path.join([Keyword.get(opts, :prefix, "blobs"), project, name])

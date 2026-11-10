@@ -209,7 +209,11 @@ defmodule Conveyor.Ingest.PropertyTest do
           {id,
            rs
            |> Enum.sort_by(& &1.first_seq)
-           |> Enum.flat_map(&(&1.payload |> Invocations.decompress() |> Fixture.frames()))}
+           |> Enum.flat_map(
+             &(&1.payload
+               |> Conveyor.RawStore.Codec.decompress()
+               |> Fixture.frames())
+           )}
         end)
       end
 
@@ -226,7 +230,7 @@ defmodule Conveyor.Ingest.PropertyTest do
           rs = Enum.sort_by(rs, & &1.byte_offset)
 
           {id,
-           {hd(rs).byte_offset, Enum.map_join(rs, &Invocations.decompress(&1.data)),
+           {hd(rs).byte_offset, Enum.map_join(rs, &Conveyor.RawStore.Codec.decompress(&1.data)),
             Enum.sum(Enum.map(rs, & &1.line_count))}}
         end)
       end

@@ -21,15 +21,24 @@ defmodule Conveyor.Workers.RawLogSweep do
 
   @impl Oban.Worker
   def perform(%Oban.Job{args: args}) do
-    result = Conveyor.RawStore.expire_objects(DateTime.utc_now(), opts())
+    result = Conveyor.RawStore.expire_objects(as_of(args), opts())
 
     # The continuation carries a counter: its arguments differ from this job's, so the
     # uniqueness that keeps two nodes' cron entries from doubling up does not drop it.
     if result.remaining?,
-      do: Oban.insert!(new(%{continued: Map.get(args, "continued", 0) + 1}))
+      do: Oban.insert!(new(Map.put(args, "continued", Map.get(args, "continued", 0) + 1)))
 
     {:ok, result}
   end
+
+  # `as_of` (ISO 8601) runs the sweep for another clock than the wall's: to rehearse what
+  # a shorter retention would delete, and in tests.
+  defp as_of(%{"as_of" => iso}) do
+    {:ok, at, _} = DateTime.from_iso8601(iso)
+    at
+  end
+
+  defp as_of(_args), do: DateTime.utc_now()
 
   defp opts,
     do: Keyword.merge([deadline_ms: @deadline_ms], Application.get_env(:conveyor, __MODULE__, []))

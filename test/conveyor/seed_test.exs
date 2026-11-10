@@ -29,7 +29,7 @@ defmodule Conveyor.SeedTest do
       assert inv.remote_cache_hits + inv.remote_exec + inv.worker_exec + inv.sandbox_exec ==
                inv.actions_executed
 
-      assert Invocations.raw_frames(inv) != []
+      assert Conveyor.RawStore.frames(inv) != []
 
       # Targets and actions move with the build.
       for t <-

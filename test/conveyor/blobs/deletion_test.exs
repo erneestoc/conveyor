@@ -33,6 +33,18 @@ defmodule Conveyor.Blobs.DeletionTest do
     refute Blobs.get(project, blob.digest)
   end
 
+  # docs/spec/Blobs.tla: pinning checks the bytes under the row lock.
+  test "a pin refuses a row whose bytes are gone", %{project: project} do
+    {:ok, blob} = Blobs.put(project, "gone #{System.unique_integer()}")
+    {adapter, opts} = Blobs.adapter()
+    :ok = adapter.delete(blob.digest, Keyword.put(opts, :project_prefix, blob.prefix))
+
+    assert {:ok, {:error, :blob_gone}} =
+             Repo.transaction(fn -> Blobs.pin(project.id, blob.digest) end)
+
+    assert {:error, :blob_gone} = Blobs.pin(project.id, String.duplicate("0", 64))
+  end
+
   test "discard deletes only what nothing references", %{project: project} do
     {:ok, raw} = Blobs.put(project, "raw #{System.unique_integer()}")
     {:ok, log} = Blobs.put(project, "log #{System.unique_integer()}")

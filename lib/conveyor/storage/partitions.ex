@@ -30,9 +30,8 @@ defmodule Conveyor.Storage.Partitions do
 
   @doc """
   Drops every daily partition strictly older than `cutoff` and returns their names. A day
-  for which `keep?` answers true stays (both tables): with the raw archive on, a day that
-  still holds a finished build not yet archived (`Conveyor.RawArchive.holds_unarchived?/1`,
-  docs/spec/Archive.tla).
+  for which `keep?` answers true stays (both tables). What the cutoff is and which days are
+  kept is decided by `Conveyor.RawStore.expire_partitions/1`.
   """
   @spec drop_before(Date.t(), (Date.t() -> boolean())) :: [String.t()]
   def drop_before(cutoff, keep? \\ fn _day -> false end) do

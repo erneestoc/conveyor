@@ -3,7 +3,7 @@ defmodule Conveyor.Ingest.BatchTest do
 
   alias Conveyor.Bep.Fixture
   alias Conveyor.Ingest.Batch
-  alias Conveyor.Invocations
+  alias Conveyor.RawStore.Codec
 
   @id "11111111-1111-4111-8111-111111111111"
 
@@ -19,23 +19,6 @@ defmodule Conveyor.Ingest.BatchTest do
     assert marked.last_seq == 5
   end
 
-  test "event segments use the BEP dictionary and frames without one still decode" do
-    frames = ["abc", "defg"]
-    with_dict = Invocations.compress_bep(frames)
-    plain = Invocations.compress(frames)
-    assert {:ok, %{dictID: 1}} = :zstd.get_frame_header(with_dict)
-    assert {:ok, %{dictID: 0}} = :zstd.get_frame_header(plain)
-    assert Invocations.decompress(with_dict) == "abcdefg"
-    assert Invocations.decompress(plain) == "abcdefg"
-
-    # A real event stream: the dictionary earns its keep.
-    raw = File.read!(fixture_path("clean_build_and_test")) |> Fixture.frames()
-    assert byte_size(Invocations.compress_bep(raw)) < byte_size(Invocations.compress(raw)) * 0.8
-    assert Invocations.decompress(Invocations.compress_bep(raw)) == IO.iodata_to_binary(raw)
-  end
-
-  defp fixture_path(name), do: Path.join([File.cwd!(), "test/fixtures/bep", name <> ".bep"])
-
   test "event and log segments round-trip through compression with offsets" do
     batch =
       Batch.new(@id, 1, ~D[2026-09-18], 3, 100, 7)
@@ -50,7 +33,7 @@ defmodule Conveyor.Ingest.BatchTest do
     assert %{first_seq: 3, last_seq: 4, count: 2, kinds: ["started", "progress"], byte_size: 7} =
              row
 
-    assert row.payload |> Invocations.decompress() |> Fixture.frames() == ["abc", "defg"]
+    assert row.payload |> Codec.decompress() |> Fixture.frames() == ["abc", "defg"]
 
     log = Batch.log_segment_row(batch)
 
@@ -63,7 +46,7 @@ defmodule Conveyor.Ingest.BatchTest do
              line_count: 2
            } = log
 
-    assert Invocations.decompress(log.data) == "line1\nline2\ntail"
+    assert Codec.decompress(log.data) == "line1\nline2\ntail"
     assert Batch.event_count(batch) == 2
   end
 
@@ -128,13 +111,13 @@ defmodule Conveyor.Ingest.BatchTest do
     assert m
            |> Batch.event_segment_row()
            |> Map.fetch!(:payload)
-           |> Invocations.decompress()
+           |> Codec.decompress()
            |> Fixture.frames() == ["abc", "de"]
 
     assert %{byte_offset: 0, line_offset: 0, byte_size: 8, line_count: 2} =
              log = Batch.log_segment_row(m)
 
-    assert Invocations.decompress(log.data) == "one\ntwo\n"
+    assert Codec.decompress(log.data) == "one\ntwo\n"
 
     assert m.targets == %{{"//a", ""} => %{label: "//a", kind: "rule", status: "success"}}
     assert map_size(m.tests) == 1

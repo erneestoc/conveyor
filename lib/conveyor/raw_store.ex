@@ -66,9 +66,17 @@ defmodule Conveyor.RawStore do
   end
 
   @doc """
+  Compressors for the calling process, to keep for its lifetime (a writer shard): one for
+  event messages and one for log text, each over a reused zstd context. What they write
+  is what every reader of this module decodes.
+  """
+  @spec compressors() :: %{bep: (iodata() -> binary()), text: (iodata() -> binary())}
+  defdelegate compressors, to: Codec
+
+  @doc """
   The segment row of a unit's events (`{seq, kind, message}` in sequence order; nil when
   there are none), their messages framed and compressed by `compress` (a writer shard
-  passes its own compressor, `Codec.compressors/0`).
+  passes its own, `compressors/0`).
   """
   @spec event_segment(map(), [{pos_integer(), String.t(), binary()}], (iodata() -> binary())) ::
           map() | nil
@@ -235,10 +243,12 @@ defmodule Conveyor.RawStore do
 
   @doc """
   The finished builds whose bytes are due to be compacted at `now`, oldest finish first,
-  each with its project: what a compaction job is enqueued with.
+  each with its project: what a compaction job is enqueued with. All of them, read `page`
+  at a time.
   """
-  @spec due_for_compaction(DateTime.t()) :: [{Ecto.UUID.t(), integer()}]
-  def due_for_compaction(now \\ DateTime.utc_now()), do: RawArchive.all_due(now)
+  @spec due_for_compaction(DateTime.t(), pos_integer()) :: [{Ecto.UUID.t(), integer()}]
+  def due_for_compaction(now \\ DateTime.utc_now(), page \\ 1000),
+    do: RawArchive.all_due(now, page)
 
   @doc """
   How long the oldest build due for compaction has waited past its time, in seconds (0

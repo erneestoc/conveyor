@@ -1,11 +1,13 @@
 defmodule Conveyor.Invocations do
-  @moduledoc "Read side of invocations: list, detail, events, log, targets, tests, actions."
+  @moduledoc """
+  Read side of invocations: list, detail, targets, tests, actions, and the decoded events
+  and the log text (the raw bytes themselves are `Conveyor.RawStore`'s).
+  """
   import Ecto.Query
 
   alias Conveyor.Invocations.{
     Action,
     Invocation,
-    LogSegment,
     Metrics,
     TagKey,
     Target,
@@ -168,60 +170,6 @@ defmodule Conveyor.Invocations do
   def log(%Invocation{} = inv),
     do: RawStore.log(inv).chunks |> Enum.to_list() |> IO.iodata_to_binary()
 
-  # The readers below answer through `Conveyor.RawStore`; they remain for their callers in
-  # the tests until those move to the store's contract suite.
-
-  @doc false
-  def raw_frames(%Invocation{} = inv), do: RawStore.frames(inv)
-
-  @doc false
-  def archived?(%Invocation{raw_status: "archived", raw_blob: blob}) when is_binary(blob),
-    do: true
-
-  def archived?(%Invocation{}), do: false
-
-  @doc false
-  def stream_raw(%Invocation{} = inv), do: RawStore.bep(inv)
-
-  @doc false
-  def stream_log(%Invocation{} = inv), do: RawStore.log(inv).chunks
-
-  @doc false
-  def log_segments(%Invocation{} = inv) do
-    cond do
-      not archived?(inv) -> log_segment_rows(inv)
-      inv.log_bytes == 0 -> []
-      true -> [archived_log_segment(inv)]
-    end
-  end
-
-  defp archived_log_segment(%Invocation{} = inv) do
-    %LogSegment{
-      first_seq: 1,
-      last_seq: inv.last_event_seq,
-      byte_offset: 0,
-      line_offset: 0,
-      byte_size: inv.log_bytes,
-      line_count: inv.log_lines
-    }
-  end
-
-  defp log_segment_rows(%Invocation{id: id} = inv) do
-    Repo.all(
-      from s in LogSegment,
-        where: s.invocation_id == ^id and s.day == ^day(inv),
-        order_by: s.first_seq,
-        select: %LogSegment{
-          first_seq: s.first_seq,
-          last_seq: s.last_seq,
-          byte_offset: s.byte_offset,
-          line_offset: s.line_offset,
-          byte_size: s.byte_size,
-          line_count: s.line_count
-        }
-    )
-  end
-
   @doc "Recomputes a project's tag facet counts from its invocations (after bulk deletes or reshaping)."
   @spec rebuild_tag_keys!(integer()) :: :ok
   def rebuild_tag_keys!(project_id) do
@@ -293,16 +241,6 @@ defmodule Conveyor.Invocations do
   @spec day(Invocation.t()) :: Date.t()
   def day(%Invocation{inserted_at: %DateTime{} = at}), do: DateTime.to_date(at)
   def day(%Invocation{}), do: Date.utc_today()
-
-  # The codec lives in `Conveyor.RawStore.Codec`; these remain for their callers in the
-  # tests until those move to the store's contract suite.
-
-  @doc false
-  defdelegate compress(iodata), to: RawStore.Codec
-  @doc false
-  defdelegate compress_bep(iodata), to: RawStore.Codec
-  @doc false
-  defdelegate decompress(binary), to: RawStore.Codec
 
   defp id(%Invocation{id: id}), do: id
   defp id(id) when is_binary(id), do: id
