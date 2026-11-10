@@ -33,7 +33,7 @@ defmodule Conveyor.Ingest.WriterDownTest do
     # The writer holds the batch (it is suspended, so the cast sits in its mailbox) when it
     # dies; the marker makes the worker flush at once, and its ack is the one a gRPC
     # handler would be waiting on for ever.
-    writer = GenServer.whereis(WriterPool.for_invocation(id))
+    writer = Conveyor.Ingest.Writer.whereis(WriterPool.for_invocation(id))
     :ok = :sys.suspend(writer)
     for seq <- 2..n, do: assert(:ok = Ingest.push(ctx, obe.(seq), self()))
     assert :ok = Ingest.push(ctx, Replay.ordered_event(stream_id(id), n + 1, @marker), self())
@@ -55,7 +55,7 @@ defmodule Conveyor.Ingest.WriterDownTest do
   test "a batch submitted while no writer is registered fails at once", %{ctx: ctx} do
     assert {:error, :writer_down} =
              Ingest.Writer.submit(
-               {:via, Registry, {Conveyor.Ingest.Registry, {:writer, :none}}},
+               :no_such_shard,
                Ingest.Batch.new(Replay.uuid(), ctx.project_id, Date.utc_today(), 1, 0, 0)
              )
   end
@@ -69,7 +69,7 @@ defmodule Conveyor.Ingest.WriterDownTest do
     assert :ok = Ingest.push_sync(ctx, obe.(1))
     worker = worker_pid(id)
 
-    writer = GenServer.whereis(WriterPool.for_invocation(id))
+    writer = Conveyor.Ingest.Writer.whereis(WriterPool.for_invocation(id))
     ref = Process.monitor(writer)
     Process.exit(writer, :kill)
     assert_receive {:DOWN, ^ref, :process, ^writer, :killed}

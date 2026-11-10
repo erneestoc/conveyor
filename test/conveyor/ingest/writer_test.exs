@@ -111,7 +111,7 @@ defmodule Conveyor.Ingest.WriterTest do
     ref = bad.ref
     assert_receive {:batch_failed, ^ref, reason}, 2_000
     assert is_binary(reason)
-    assert Process.alive?(GenServer.whereis(writer))
+    assert Process.alive?(Writer.whereis(writer))
   end
 
   test "two batches of one invocation in a group merge into one row per table", %{
@@ -351,7 +351,7 @@ defmodule Conveyor.Ingest.WriterTest do
 
   # Every batch is in the writer's mailbox before it looks at the first: one flush.
   defp submit_together(writer, batches) do
-    pid = GenServer.whereis(writer)
+    pid = Writer.whereis(writer)
     :ok = :sys.suspend(pid)
     Enum.each(batches, &Writer.submit(writer, &1))
     :ok = :sys.resume(pid)
@@ -473,7 +473,8 @@ defmodule Conveyor.Ingest.WriterTest do
     blob_mode!()
     before = objects()
     # A shard whose batches are due the moment they arrive.
-    writer = start_supervised!({Writer, shard: 778, deadline_ms: 0})
+    start_supervised!({Writer, shard: 778, deadline_ms: 0})
+    writer = 778
 
     batches = [
       batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a")),
@@ -492,6 +493,79 @@ defmodule Conveyor.Ingest.WriterTest do
     assert objects() == before
   end
 
+  # Returns once the clock the gauge reads has moved.
+  defp tick(from \\ System.monotonic_time(:millisecond)) do
+    if System.monotonic_time(:millisecond) == from, do: tick(from), else: :ok
+  end
+
+  test "pressure: what a shard was handed and has not answered, and the age of the oldest",
+       %{id: id, project: project} do
+    start_supervised!({Writer, shard: 779})
+    idle = %{batches: 0, bytes: 0, oldest_ms: 0}
+    assert Writer.pressure(779) == idle
+    assert Writer.pressure(:no_such_shard) == idle
+
+    # The shard is busy (suspended): what it is handed waits in its mailbox, and shows.
+    :ok = :sys.suspend(Writer.whereis(779))
+    first = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "12345"))
+    second = batch(id, project, 2, &Batch.add_log(&1, 2, "678\n"))
+    {:ok, _} = Writer.submit(779, first)
+    tick()
+    {:ok, _} = Writer.submit(779, second)
+
+    assert %{batches: 2, bytes: 9, oldest_ms: age} = Writer.pressure(779)
+    assert age >= 1
+    tick()
+    assert Writer.pressure(779).oldest_ms > age
+
+    :ok = :sys.resume(Writer.whereis(779))
+    first_ref = first.ref
+    second_ref = second.ref
+    assert_receive {:batch_committed, ^first_ref}, 2_000
+    assert_receive {:batch_committed, ^second_ref}, 2_000
+    assert Writer.pressure(779) == idle
+
+    # A restarted shard starts from zero whatever its predecessor was holding.
+    :ok = :sys.suspend(Writer.whereis(779))
+    {:ok, old} = Writer.submit(779, batch(id, project, 3, &Batch.add_event(&1, 3, "x", "y")))
+    assert Writer.pressure(779).batches == 1
+    ref = Process.monitor(old)
+    Process.exit(old, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^old, :killed}
+    assert is_pid(await_restart(779, old))
+    assert Writer.pressure(779) == idle
+  end
+
+  defp await_restart(shard, old) do
+    case Writer.whereis(shard) do
+      pid when is_pid(pid) and pid != old ->
+        pid
+
+      _ ->
+        receive do
+        after
+          5 -> await_restart(shard, old)
+        end
+    end
+  end
+
+  test "the pool's pressure is the sum of its shards and the age of the oldest batch on any" do
+    assert WriterPool.pressure() == %{batches: 0, bytes: 0, oldest_ms: 0}
+
+    # Before a pool has started on the node (the telemetry poller runs earlier) there is
+    # nothing to read, and reading it is not an error.
+    count = WriterPool.shards()
+    :persistent_term.erase({WriterPool, :shards})
+    on_exit(fn -> :persistent_term.put({WriterPool, :shards}, count) end)
+    assert WriterPool.shards() == 0
+    assert WriterPool.pressure() == %{batches: 0, bytes: 0, oldest_ms: 0}
+    assert ConveyorWeb.Telemetry.measure_writer_backlog() == :ok
+    assert WriterPool.for_invocation("abc") == 0
+    :persistent_term.put({WriterPool, :shards}, count)
+    shard = WriterPool.for_invocation("abc")
+    assert shard in 0..(WriterPool.shards() - 1)
+  end
+
   test "a batch that ends a stream is committed without waiting for the writer's hold", %{
     id: id,
     project: project
@@ -499,7 +573,8 @@ defmodule Conveyor.Ingest.WriterTest do
     previous = Application.get_env(:conveyor, Conveyor.RawLog)
     on_exit(fn -> Application.put_env(:conveyor, Conveyor.RawLog, previous) end)
     Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob, flush_ms: 30_000)
-    writer = start_supervised!({Writer, shard: 777})
+    start_supervised!({Writer, shard: 777})
+    writer = 777
 
     plain = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))
     Writer.submit(writer, plain)

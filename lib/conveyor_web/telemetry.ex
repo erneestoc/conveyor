@@ -57,6 +57,34 @@ defmodule ConveyorWeb.Telemetry do
         reporter_options: [buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000]],
         description: "Group commit duration per writer shard (ms)"
       ),
+      distribution("conveyor.ingest.writer.flush.wait",
+        reporter_options: [
+          buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, 20_000, 30_000]
+        ],
+        description:
+          "How long the oldest batch of a group commit waited for its outcome, from the worker's submit (ms)"
+      ),
+      last_value("conveyor.ingest.writer.backlog.batches",
+        tags: [:shard],
+        description: "Batches handed to a writer shard and not answered yet"
+      ),
+      last_value("conveyor.ingest.writer.backlog.bytes",
+        tags: [:shard],
+        description: "Event and log bytes of the batches a writer shard has not answered yet"
+      ),
+      last_value("conveyor.ingest.writer.backlog.oldest_ms",
+        tags: [:shard],
+        description:
+          "Age of the oldest batch a writer shard has not answered (ms); batches expire at INGEST_WRITER_DEADLINE_MS"
+      ),
+      counter("conveyor.ingest.writer.group_failed.count",
+        tags: [:kind],
+        description:
+          "Group commit attempts that failed, by kind: fenced (retried without the fenced builds), unavailable or contention (retried after a delay), data (halved)"
+      ),
+      sum("conveyor.ingest.writer.expired.count",
+        description: "Batches that passed their deadline before their commit could start"
+      ),
       distribution("conveyor.ingest.writer.flush.events",
         reporter_options: [buckets: [10, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000]],
         description: "Events per group commit"
@@ -156,8 +184,23 @@ defmodule ConveyorWeb.Telemetry do
   def measure_ingest do
     :telemetry.execute([:conveyor, :ingest, :workers], %{count: workers()}, %{})
     :telemetry.execute([:conveyor, :ingest, :streams], %{count: streams()}, %{})
+    measure_writer_backlog()
     measure_oban()
     measure_raw_archive()
+  end
+
+  # The commit pressure of every writer shard (`Conveyor.Ingest.Writer.pressure/1`).
+  @doc false
+  def measure_writer_backlog do
+    for shard <- 0..(Conveyor.Ingest.WriterPool.shards() - 1)//1 do
+      :telemetry.execute(
+        [:conveyor, :ingest, :writer, :backlog],
+        Conveyor.Ingest.Writer.pressure(shard),
+        %{shard: shard}
+      )
+    end
+
+    :ok
   end
 
   # One query over the days whose partitions still exist; recomputed at most once a minute

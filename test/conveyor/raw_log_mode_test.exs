@@ -142,13 +142,13 @@ defmodule Conveyor.RawLogModeTest do
     # A long hold and a one-byte threshold: the first batch flushes at once. The build
     # does not exist, so the commit fences, which is the proof that the flush happened.
     Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 60_000, flush_bytes: 1)
-    pid = start_supervised!({Conveyor.Ingest.Writer, shard: :bytes_test})
+    start_supervised!({Conveyor.Ingest.Writer, shard: :bytes_test})
 
     batch =
       Conveyor.Ingest.Batch.new(Ecto.UUID.generate(), 1, Date.utc_today(), 1, 0, 0)
       |> Conveyor.Ingest.Batch.add_event(1, "started", "not a build event")
 
-    Conveyor.Ingest.Writer.submit(pid, batch)
+    Conveyor.Ingest.Writer.submit(:bytes_test, batch)
     assert_receive {:batch_failed, ref, {:fenced, _}}, 5_000
     assert ref == batch.ref
   end

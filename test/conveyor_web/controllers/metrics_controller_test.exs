@@ -11,6 +11,14 @@ defmodule ConveyorWeb.MetricsControllerTest do
     )
 
     :telemetry.execute([:conveyor, :ingest, :fenced], %{count: 1}, %{invocation_id: "x"})
+
+    :telemetry.execute([:conveyor, :ingest, :writer, :group_failed], %{count: 1}, %{
+      kind: :fenced,
+      shard: 0
+    })
+
+    :telemetry.execute([:conveyor, :ingest, :writer, :expired], %{count: 3}, %{shard: 0})
+    ConveyorWeb.Telemetry.measure_writer_backlog()
     :telemetry.execute([:conveyor, :blobs, :errors], %{count: 1}, %{op: :put})
 
     # A job waiting since an hour ago shows as queue backlog age.
@@ -45,6 +53,11 @@ defmodule ConveyorWeb.MetricsControllerTest do
     assert body =~ "conveyor_ingest_ack_latency_us_bucket"
     assert body =~ "conveyor_ingest_workers_count"
     assert body =~ "conveyor_ingest_writer_flush_duration"
+    assert counter(body, ~s(conveyor_ingest_writer_group_failed_count{kind="fenced"})) >= 1
+    assert counter(body, "conveyor_ingest_writer_expired_count") >= 3
+    assert body =~ ~s(conveyor_ingest_writer_backlog_batches{shard="0"} 0)
+    assert body =~ ~s(conveyor_ingest_writer_backlog_bytes{shard="0"} 0)
+    assert body =~ ~s(conveyor_ingest_writer_backlog_oldest_ms{shard="0"} 0)
 
     Application.put_env(:conveyor, :metrics_token, "scrape-me")
     on_exit(fn -> Application.delete_env(:conveyor, :metrics_token) end)

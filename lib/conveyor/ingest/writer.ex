@@ -49,10 +49,66 @@ defmodule Conveyor.Ingest.Writer do
   @target_key [:invocation_id, :label, :aspect]
   @test_key [:invocation_id, :label, :configuration_id, :run, :shard, :attempt]
 
-  def start_link(opts),
-    do: GenServer.start_link(__MODULE__, opts, name: name(Keyword.fetch!(opts, :shard)))
+  @registry Conveyor.Ingest.Registry
 
-  def name(shard), do: {:via, Registry, {Conveyor.Ingest.Registry, {:writer, shard}}}
+  # The shard's pressure gauge: batches and bytes handed over and not yet answered, and
+  # when the oldest of them was handed over. Submitters add, the writer subtracts.
+  @batches 1
+  @bytes 2
+  @oldest 3
+  # No batch waits (a monotonic time can be any other integer).
+  @none -9_223_372_036_854_775_808
+
+  @type shard :: term()
+
+  # A gauge belongs to one incarnation of the shard and is registered with its name, so a
+  # submitter always adds to the gauge of the process it hands the batch to: a restarted
+  # shard starts from zero, and what was cast to the dead one is not counted against it.
+  def start_link(opts) do
+    shard = Keyword.fetch!(opts, :shard)
+    gauge = :atomics.new(3, signed: true)
+    :atomics.put(gauge, @oldest, @none)
+
+    GenServer.start_link(__MODULE__, Keyword.put(opts, :gauge, gauge),
+      name: {:via, Registry, {@registry, {:writer, shard}, gauge}}
+    )
+  end
+
+  @doc "The process of a shard, or nil."
+  @spec whereis(shard()) :: pid() | nil
+  def whereis(shard) do
+    case Registry.lookup(@registry, {:writer, shard}) do
+      [{pid, _gauge}] -> pid
+      [] -> nil
+    end
+  end
+
+  @doc """
+  What a shard has been handed and has not answered yet: `batches`, their `bytes` (event
+  and log bytes as received) and `oldest_ms`, the age of the oldest one. It covers the
+  shard's mailbox as well as the group it is collecting or committing, so a shard stuck in
+  a slow commit shows its age growing. Read from counters: no message to the shard.
+  """
+  @spec pressure(shard()) :: %{
+          batches: non_neg_integer(),
+          bytes: non_neg_integer(),
+          oldest_ms: non_neg_integer()
+        }
+  def pressure(shard) do
+    case Registry.lookup(@registry, {:writer, shard}) do
+      [{_pid, gauge}] ->
+        oldest = :atomics.get(gauge, @oldest)
+
+        %{
+          batches: max(:atomics.get(gauge, @batches), 0),
+          bytes: max(:atomics.get(gauge, @bytes), 0),
+          oldest_ms: if(oldest == @none, do: 0, else: max(now_ms() - oldest, 0))
+        }
+
+      [] ->
+        %{batches: 0, bytes: 0, oldest_ms: 0}
+    end
+  end
 
   @doc """
   Queues a batch. The delivery contract with the submitter:
@@ -71,14 +127,18 @@ defmodule Conveyor.Ingest.Writer do
       outstanding means their outcome is unknown (a batch may have committed), and
       `{:error, :writer_down}` means the batch was never queued.
   """
-  @spec submit(GenServer.name(), Batch.t()) :: {:ok, pid()} | {:error, :writer_down}
-  def submit(writer, %Batch{} = batch) do
-    case GenServer.whereis(writer) do
-      pid when is_pid(pid) ->
-        GenServer.cast(pid, {:submit, batch, self(), now_ms()})
+  @spec submit(shard(), Batch.t()) :: {:ok, pid()} | {:error, :writer_down}
+  def submit(shard, %Batch{} = batch) do
+    case Registry.lookup(@registry, {:writer, shard}) do
+      [{pid, gauge}] ->
+        at = now_ms()
+        :atomics.add(gauge, @batches, 1)
+        :atomics.add(gauge, @bytes, batch.event_bytes + batch.log_bytes)
+        :atomics.compare_exchange(gauge, @oldest, @none, at)
+        GenServer.cast(pid, {:submit, batch, self(), at})
         {:ok, pid}
 
-      nil ->
+      [] ->
         {:error, :writer_down}
     end
   end
@@ -88,6 +148,7 @@ defmodule Conveyor.Ingest.Writer do
     {:ok,
      %{
        shard: opts[:shard],
+       gauge: opts[:gauge],
        pending: [],
        count: 0,
        timer: nil,
@@ -108,6 +169,10 @@ defmodule Conveyor.Ingest.Writer do
 
   @impl true
   def handle_cast({:submit, batch, from, at}, state) do
+    # The submitter's own mark loses to an older one still standing; with nothing pending
+    # this batch is the oldest the shard holds.
+    if state.pending == [], do: :atomics.put(state.gauge, @oldest, at)
+
     state = %{
       state
       | pending: [{batch, from, at} | state.pending],
@@ -152,12 +217,21 @@ defmodule Conveyor.Ingest.Writer do
       {batch, from, {:error, reason}} -> send(from, {:batch_failed, batch.ref, reason})
     end)
 
+    # Everything pending is answered. What arrived meanwhile is in the mailbox; the first
+    # of it marks the gauge again when it is taken out.
+    :atomics.sub(state.gauge, @batches, state.count)
+    :atomics.sub(state.gauge, @bytes, state.bytes)
+    :atomics.put(state.gauge, @oldest, @none)
+    {_batch, _from, oldest} = hd(pending)
+
     :telemetry.execute(
       [:conveyor, :ingest, :writer, :flush],
       %{
         duration: System.monotonic_time() - started,
         batches: length(pending),
-        events: Enum.sum(Enum.map(pending, fn {b, _, _} -> Batch.event_count(b) end))
+        events: Enum.sum(Enum.map(pending, fn {b, _, _} -> Batch.event_count(b) end)),
+        # How long the oldest batch of the group waited for its outcome (ms).
+        wait: now_ms() - oldest
       },
       %{shard: state.shard}
     )
