@@ -82,10 +82,12 @@ defmodule Conveyor.Ingest.WorkerTest do
     push_all(ctx, id, events, 4)
     finish(ctx, id, length(events) + 1)
 
-    # A finished worker hibernates on its next quiet tick and drops the wide columns it
-    # will never read again (PLAN §24 item 5); it still answers.
+    # A finished worker hibernates at once, and on its next quiet tick (the one that
+    # publishes the final digest) drops the wide columns it will never read again
+    # (PLAN §24 item 5); it still answers.
     pid = worker_pid(id)
     assert hibernated?(pid)
+    assert_receive {:invocation_detail, %{invocation: %{finalized: true}}}, 2_000
     summary = Worker.summary(ctx.project_id, id)
     assert summary.finalized and not Map.has_key?(summary, :options)
 

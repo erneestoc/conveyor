@@ -268,7 +268,16 @@ defmodule Conveyor.Ingest.Session do
             do: finalized(acc),
             else: acc
 
-        if s.linger == :due and quiet?(s), do: acc |> stop() |> done(), else: done(acc)
+        cond do
+          s.linger == :due and quiet?(s) -> acc |> stop() |> done()
+          # A finished session with nothing in hand only lingers: compact it now. The
+          # broadcast tick does the same, but a commit that lands after the last tick (the
+          # final batch under load, or the attempt-finished notification that wakes a
+          # hibernated session) would leave the heap and the event binaries it references
+          # in place for the whole linger.
+          s.finalized and quiet?(s) -> acc |> hibernate() |> done()
+          true -> done(acc)
+        end
     end
   end
 
@@ -576,6 +585,7 @@ defmodule Conveyor.Ingest.Session do
     do: s.inflight == %{} and s.blocked == [] and Batch.empty?(s.batch) and s.batch.waiters == []
 
   defp stop({s, fx}), do: {s, [{:stop, :normal} | fx]}
+  defp hibernate({s, fx}), do: {s, [:hibernate | fx]}
 
   defp refuse(s, reason, from),
     do: {s, [{:reply, from, {:error, reason}}, {:arm, :refusal, s.config.refusal_ms}]}

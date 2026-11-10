@@ -534,6 +534,28 @@ defmodule Conveyor.Ingest.SessionTest do
     assert fx == [:hibernate]
   end
 
+  test "the commit that leaves a finished session quiet compacts it; a live one is left alone" do
+    s = live()
+    {s, _fx} = Session.push(s, progress(1, "hello\n"), :c1, {:c1, 1})
+    {s, fx} = Session.timer(s, :flush)
+    [batch] = for {:submit, b} <- fx, do: b
+    {s, fx} = Session.committed(s, batch.ref)
+    refute :hibernate in fx
+
+    {s, fx} = Session.push(s, marker(2), :c1, {:c1, 2})
+    [final] = for {:submit, b} <- fx, do: b
+    {s, fx} = Session.committed(s, final.ref)
+    assert :hibernate in fx
+
+    # The attempt-finished notification wakes the lingering session; its commit puts it
+    # back, whether or not a broadcast tick is still to come.
+    {s, fx} = Session.lifecycle(s, :invocation_attempt_finished, {:c2, 1})
+    [notified] = for {:submit, b} <- fx, do: b
+    {_s, fx} = Session.committed(s, notified.ref)
+    assert {:reply, {:c2, 1}, :ok} in fx
+    assert :hibernate in fx
+  end
+
   test "a referenced profile: a local file is settled in the final batch, a remote one is scheduled" do
     final = fn uri ->
       s = live()

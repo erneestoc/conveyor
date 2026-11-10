@@ -1225,7 +1225,54 @@ Paced, the shape production runs in, is unchanged. Flat out the after runs are 0
 than the before run next to them on a machine whose own noise was that large, with the
 workers' reductions equal (2.09 vs 2.12 G); the worker heap sampled at the peak is higher
 (344–436 MB vs 169–269 MB over 10,000 workers), which is the effect lists and deserves one
-profile on a quiet machine before it is called a regression or dismissed. **Open.**
+profile on a quiet machine before it is called a regression or dismissed. **Resolved
+below.**
+
+**Regression check (2026-11-09 night).** Verdict: the throughput and ack gap was noise; the
+session costs the same CPU as the callbacks it replaced; the heap gap was real memory but
+not the session's, and is fixed.
+
+*Six runs, alternating* (`56e9e85` and `0e50085` built side by side in worktrees, flat out
+200 × 10,000, `bench/results/20261110-06*-s0-*.json`). The machine was not quiet: other
+projects' Bazel builds and simulator tests ran throughout (load average 9–95 at the start of
+a run, 16 cores), so wall-clock numbers spread more inside one build than between the two.
+Events per app vCPU by OS CPU time does not depend on who else has the cores:
+
+| | before (`56e9e85`) | after (`0e50085`) | after + fix |
+|---|---|---|---|
+| events/s | 13,223 · 14,379 · 10,886 | 7,881 · 16,097 · 15,971 | 15,726 · 14,791 |
+| ack p50 ms | 85 · 125 · 172 | 212 · 76 · 124 | 110 · 145 |
+| ack p99 ms | 1,278 · 513 · 1,039 | 2,745 · 393 · 434 | 797 · 649 |
+| events/s per app vCPU (OS time) | 5,556 · 4,975 · 5,040 | 5,511 · 5,159 · 5,470 | 5,386 · 5,499 |
+| worker memory at the peak sample | 334 · 336 · 293 MB | 235 · 328 · 407 MB | 65 · 95 MB |
+| finished workers not hibernated at the peak | 2,392 · 2,800 · 2,399 of ≈ 10,000 | 2,447 · 1,874 · 2,534 | 0 · 0 |
+| peak RSS | 1.94 · 1.92 · 1.92 GB | 1.67 · 1.90 · 1.96 GB | 1.68 · 1.70 GB |
+
+*One worker, deterministic* (each of the eight fixtures pushed through one worker 20 times
+in a prod build, the worker read with `Process.info`; independent of machine load):
+
+| per build, summed over the eight fixtures | before | after | after + fix |
+|---|---|---|---|
+| reductions to the final ack | 1,643,876 | 1,636,576 (−0.4 %) | 1,649,680 |
+| peak heap during the build | 1,977 KB | 2,152 KB (a second run of the same build read 2,393) | 2,265 KB |
+| memory right after the final commit | 1,911 KB | 2,078 KB | 205 KB |
+| memory once hibernated | 56.9 KB | 59.6 KB (+0.3 KB per worker) | 59.6 KB |
+| memory after the attempt-finished notification woke it | (same code path) | 170 KB (21.3 KB each) | 59.6 KB (7.5 KB each) |
+
+So the effect lists cost nothing measurable in reductions and at most one heap growth step
+(the heap grows in steps; the same build differs by more between two runs than the two
+builds differ). **The cause of the heap gap**, in both builds: a finished worker was only
+compacted by a broadcast tick that found nothing in hand. A commit that lands after the
+last tick leaves the worker awake for the whole linger (30 s) with its heap (≈ 100–280 KB)
+and, through it, the event binaries of its build (≈ 1 MB): the final batch when the commit
+takes longer than the 250 ms tick, or the attempt-finished notification, which wakes the
+hibernated worker for one more batch and nothing hibernates it again. How many workers
+miss the tick depends on commit latency, so a loaded machine reads as "more heap": a
+quarter of the lingering workers held 85 % of the worker memory in every one of the six
+runs. **Fix** (pure, `Session.committed/2`): the commit that leaves a finalized session
+with nothing in hand emits `:hibernate`. Tests: a row in `session_test.exs` (failed
+before); `worker_test.exs` now waits for the final digest before it checks the slimmed
+summary, since hibernation no longer implies the tick has run.
 
 **For the next steps.** The session relies on this contract from the writer: every batch
 it took gets exactly one `{:batch_committed, ref}` or `{:batch_failed, ref, reason}` sent
