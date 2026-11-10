@@ -68,6 +68,50 @@ defmodule Conveyor.LoadgenTest do
     for %{id: id} <- quick.invocations, do: :ok = await_worker_exit(id)
   end
 
+  test "open loop: builds start at the arrival rate whatever the completions", %{
+    grpc_port: port,
+    key: key
+  } do
+    # Every build takes far longer (a pause per event) than the 25 ms between arrivals. A
+    # closed loop with one stream would run them one after the other and never show that
+    # the server had fallen behind; here they overlap.
+    report =
+      Loadgen.run(
+        fixtures: [Path.join([File.cwd!(), "test/fixtures/bep", "analysis_failure.bep"])],
+        hosts: ["127.0.0.1:#{port}"],
+        api_key: key,
+        streams: 1,
+        builds: 8,
+        arrival_rate: 40,
+        delay_ms: 30
+      )
+
+    assert %{builds_total: 8, builds_ok: 8, builds_failed: 0, arrival_rate: 40} = report
+    assert report.peak_streams >= 4
+    assert report.max_start_lag_ms < 1_000
+    assert report.resends == 0 and report.failure_kinds == %{}
+
+    # Outcomes over time, by the second a build ended in.
+    assert Enum.sum(Enum.map(report.timeline, & &1.ok)) == 8
+    assert Enum.all?(report.timeline, &(&1.failed == 0 and is_integer(&1.t_s)))
+    for %{id: id} <- report.invocations, do: :ok = await_worker_exit(id)
+    assert Loadgen.format(report) =~ "open loop at 40 builds/s"
+
+    # A duration bounds the arrivals; failures are grouped by what the server answered.
+    failed =
+      Loadgen.run(
+        fixtures: ["test/fixtures/bep/analysis_failure.bep"],
+        hosts: ["127.0.0.1:1"],
+        arrival_rate: 200,
+        duration_ms: 50
+      )
+
+    assert failed.builds_failed == failed.builds_total and failed.builds_total in 1..40
+    assert [{_kind, n}] = Map.to_list(failed.failure_kinds)
+    assert n == failed.builds_total
+    assert CLI.loadgen_opts(arrival_rate: 2.5)[:arrival_rate] == 2.5
+  end
+
   test "retries a build on another host with the same invocation id", %{
     grpc_port: port,
     key: key

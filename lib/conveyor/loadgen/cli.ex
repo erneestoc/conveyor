@@ -6,8 +6,11 @@ defmodule Conveyor.Loadgen.CLI do
         --fixtures 'test/fixtures/bep/*.bep' --streams 200 --builds 2000 \\
         [--duration-s 300] [--delay-ms 0] [--jitter-ms 100] [--drop-after 20] \\
         [--duplicate-every 10] [--retries 3] [--ack-timeout-ms 30000] [--report out.json] \\
-        [--verify] [--tls]
+        [--verify] [--tls] [--arrival-rate 12.5]
 
+  `--arrival-rate N` starts N builds per second whatever the completions (an open loop;
+  `--streams` is then ignored): the mode for overload experiments, where a closed loop
+  slows down with the server and hides the overload.
   `--tls` dials `grpcs://` with the system CA store (a TLS balancer or Caddy in front).
   `--retries` resumes a build from its last acknowledged event on a fresh connection to the
   next host, as Bazel does; `--ack-timeout-ms` is how long a stream may stay silent with
@@ -23,6 +26,7 @@ defmodule Conveyor.Loadgen.CLI do
     streams: :integer,
     builds: :integer,
     duration_s: :integer,
+    arrival_rate: :float,
     delay_ms: :integer,
     jitter_ms: :integer,
     drop_after: :integer,
@@ -53,6 +57,7 @@ defmodule Conveyor.Loadgen.CLI do
       streams: opts[:streams] || 10,
       builds: opts[:builds] || (opts[:streams] || 10) * 5,
       duration_ms: opts[:duration_s] && opts[:duration_s] * 1000,
+      arrival_rate: opts[:arrival_rate],
       delay_ms: opts[:delay_ms] || 0,
       jitter_ms: opts[:jitter_ms] || 0,
       drop_after: opts[:drop_after],
