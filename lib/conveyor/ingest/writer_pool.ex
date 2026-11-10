@@ -1,7 +1,8 @@
 defmodule Conveyor.Ingest.WriterPool do
   @moduledoc """
   A fixed pool of group-commit writers; batches are sharded by invocation id. The shard
-  count is fixed when the pool starts.
+  count and the shards' configuration (`Writer.Config.from_env/0`) are fixed when the pool
+  starts.
   """
   use Supervisor
 
@@ -21,8 +22,11 @@ defmodule Conveyor.Ingest.WriterPool do
     # once per boot (the same value again is not a write).
     :persistent_term.put(@shards, shards)
 
+    config = Writer.Config.from_env()
+
     children =
-      for i <- 0..(shards - 1), do: Supervisor.child_spec({Writer, shard: i}, id: {Writer, i})
+      for i <- 0..(shards - 1),
+          do: Supervisor.child_spec({Writer, shard: i, config: config}, id: {Writer, i})
 
     Supervisor.init(children, strategy: :one_for_one)
   end

@@ -8,7 +8,8 @@ defmodule Conveyor.Ingest.PropertyTest do
 
   alias BuildEventStream, as: BES
   alias Conveyor.Bep.Fixture
-  alias Conveyor.Ingest.{Batch, Normalizer, Writer}
+  alias Conveyor.Ingest.{Batch, Normalizer}
+  alias Conveyor.Ingest.Writer.Plan
   alias Conveyor.Invocations
   alias Conveyor.Invocations.Invocation
 
@@ -104,9 +105,14 @@ defmodule Conveyor.Ingest.PropertyTest do
     )
   end
 
+  defp plan(units) do
+    compressors = Plan.compressors()
+    Plan.rows(units, Enum.map(units, &Plan.segments(&1, compressors)))
+  end
+
   property "the writer's merged target rows equal applying every upsert in order, one row per key" do
     check all(batches <- list_of(target_batch(), min_length: 1, max_length: 5)) do
-      rows = Writer.plan(batches).targets
+      rows = plan(batches).targets
 
       expected =
         batches
@@ -192,8 +198,8 @@ defmodule Conveyor.Ingest.PropertyTest do
   property "coalescing batches changes the rows written, never the content" do
     check all(batches <- interleaved_batches()) do
       units = Batch.coalesce(batches)
-      plain = Writer.plan(batches)
-      merged = Writer.plan(units)
+      plain = plan(batches)
+      merged = plan(units)
 
       # Every event once, contiguous per invocation, in the same order.
       frames = fn rows ->

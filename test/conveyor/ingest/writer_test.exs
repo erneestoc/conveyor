@@ -1,9 +1,17 @@
 defmodule Conveyor.Ingest.WriterTest do
+  @moduledoc """
+  The commit pipeline against Postgres, through its interface: batches are submitted,
+  outcomes are received, and the rows and objects are what the outcomes say. What the
+  pipeline decides (when to commit, what to do after a failed attempt) is tested without
+  a database in `writer/flush_test.exs` and `writer/policy_test.exs`; here each decision
+  is carried out once for real.
+  """
   use Conveyor.DataCase, async: false
 
   import Ecto.Query
 
   alias Conveyor.Ingest.{Batch, TagCounter, Writer, WriterPool}
+  alias Conveyor.Ingest.Writer.Config
   alias Conveyor.Invocations.{Invocation, Target}
   alias Conveyor.Projects
   alias Conveyor.Repo
@@ -17,6 +25,14 @@ defmodule Conveyor.Ingest.WriterTest do
 
   defp batch(id, project, first_seq, fun) do
     Batch.new(id, project.id, Date.utc_today(), first_seq, 0, 0) |> fun.()
+  end
+
+  # A shard of its own with the node's configuration and the given changes.
+  defp shard!(overrides) do
+    shard = "test-#{System.os_time(:microsecond)}"
+    config = struct!(Config.from_env(), overrides)
+    start_supervised!({Writer, shard: shard, config: config}, id: shard)
+    shard
   end
 
   @tag :capture_log
@@ -197,11 +213,10 @@ defmodule Conveyor.Ingest.WriterTest do
   test "pool sharding is stable" do
     assert WriterPool.for_invocation("abc") == WriterPool.for_invocation("abc")
     assert WriterPool.shards() >= 1
-    assert Exception.message(%Writer.Fenced{units: [{"i", 0}]}) =~ "fenced"
   end
 
   @tag :capture_log
-  test "fenced updates of many invocations share one statement and a fenced one fails alone",
+  test "every column type travels through the fenced update; a fenced unit fails alone",
        %{project: project} do
     ids = for _ <- 1..5, do: Conveyor.Bep.Replay.uuid()
 
@@ -276,55 +291,6 @@ defmodule Conveyor.Ingest.WriterTest do
   end
 
   @tag :capture_log
-  test "a fenced invocation evicts only itself: the rest of the group commits in one more transaction",
-       %{project: project} do
-    ids = for _ <- 1..6, do: Conveyor.Bep.Replay.uuid()
-
-    for id <- ids,
-        do:
-          Repo.insert!(%Invocation{
-            id: id,
-            project_id: project.id,
-            started_at: DateTime.utc_now()
-          })
-
-    good = for id <- tl(ids), do: batch(id, project, 1, &Batch.add_event(&1, 1, "started", "x"))
-    # Expects last_event_seq 6 on a row that is at 0.
-    fenced = batch(hd(ids), project, 7, &Batch.add_event(&1, 7, "progress", "y"))
-
-    test_pid = self()
-
-    :telemetry.attach(
-      "writer-test-tx-#{hd(ids)}",
-      [:conveyor, :repo, :query],
-      fn _, _, %{query: q}, _ -> if q == "begin", do: send(test_pid, :begin) end,
-      nil
-    )
-
-    on_exit(fn -> :telemetry.detach("writer-test-tx-#{hd(ids)}") end)
-
-    writer = WriterPool.for_invocation(hd(ids))
-    # One submit per cast, so every batch is pending before the first flush fires.
-    Enum.each([fenced | good], &Writer.submit(writer, &1))
-
-    fenced_ref = fenced.ref
-    assert_receive {:batch_failed, ^fenced_ref, {:fenced, 6}}, 5_000
-
-    for b <- good do
-      ref = b.ref
-      assert_receive {:batch_committed, ^ref}, 5_000
-    end
-
-    # The failed group transaction plus one retry without the fenced invocation, not one
-    # transaction per remaining batch.
-    assert_receive :begin, 1_000
-    assert_receive :begin, 1_000
-    refute_receive :begin, 200
-    assert Repo.get!(Invocation, hd(ids)).last_event_seq == 0
-    for id <- tl(ids), do: assert(Repo.get!(Invocation, id).last_event_seq == 1)
-  end
-
-  @tag :capture_log
   test "the fence is judged before any child row is written", %{id: id, project: project} do
     # Stale (the row is at 0, the batch expects 41) and unwritable (the mnemonic is too
     # long for its column): the verdict is the fence, reached before the insert that would
@@ -363,22 +329,19 @@ defmodule Conveyor.Ingest.WriterTest do
     id
   end
 
-  defp blob_mode! do
-    previous = Application.get_env(:conveyor, Conveyor.RawLog)
-    on_exit(fn -> Application.put_env(:conveyor, Conveyor.RawLog, previous) end)
-    Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob, flush_ms: 5)
-  end
-
   defp objects, do: Repo.aggregate(from(o in "raw_log_objects"), :count)
 
-  # Makes the database answer an `actions` row whose mnemonic is "refuse" as if it had no
-  # connection to spare (SQLSTATE 53300), for the rest of the test's transaction.
+  # Makes the database answer an `actions` row by its mnemonic, for the rest of the test's
+  # transaction: "refuse" as if it had no connection to spare (SQLSTATE 53300), "deadlock"
+  # as the victim of a deadlock (40P01).
   defp refuse_work! do
     Repo.query!("""
     CREATE FUNCTION conveyor_test_refuse() RETURNS trigger LANGUAGE plpgsql AS $$
     BEGIN
       IF NEW.mnemonic = 'refuse' THEN
         RAISE EXCEPTION 'injected' USING ERRCODE = '53300';
+      ELSIF NEW.mnemonic = 'deadlock' THEN
+        RAISE EXCEPTION 'injected' USING ERRCODE = '40P01';
       END IF;
       RETURN NEW;
     END $$
@@ -393,7 +356,7 @@ defmodule Conveyor.Ingest.WriterTest do
   @tag :capture_log
   test "a group is stored as one object, whatever its attempts: fenced, refused, committed",
        %{project: project} do
-    blob_mode!()
+    writer = shard!(blob?: true)
     before = objects()
     good = for _ <- 1..6, do: invocation!(project)
     committed = for id <- good, do: batch(id, project, 1, &Batch.add_event(&1, 1, "started", id))
@@ -408,8 +371,6 @@ defmodule Conveyor.Ingest.WriterTest do
         |> Batch.add_action(%{seq: 1, mnemonic: String.duplicate("x", 300)})
       end)
 
-    # One writer for all of them, so they share a flush.
-    writer = WriterPool.for_invocation(hd(good))
     submit_together(writer, [fenced, refused | committed])
 
     fenced_ref = fenced.ref
@@ -440,7 +401,7 @@ defmodule Conveyor.Ingest.WriterTest do
   @tag :capture_log
   test "while the database refuses work the group waits, then fails whole: nothing is committed alone",
        %{project: project} do
-    blob_mode!()
+    writer = shard!(blob?: true)
     refuse_work!()
     before = objects()
     ids = for _ <- 1..5, do: invocation!(project)
@@ -454,7 +415,6 @@ defmodule Conveyor.Ingest.WriterTest do
         end)
       end
 
-    writer = WriterPool.for_invocation(hd(ids))
     submit_together(writer, batches)
 
     for b <- batches do
@@ -468,13 +428,80 @@ defmodule Conveyor.Ingest.WriterTest do
   end
 
   @tag :capture_log
+  test "a group that keeps deadlocking is retried, then halved: the unit in the way fails alone",
+       %{project: project} do
+    refuse_work!()
+    ids = for _ <- 1..4, do: invocation!(project)
+
+    [a, b, c, d] =
+      for {id, i} <- Enum.with_index(ids) do
+        batch(id, project, 1, fn b ->
+          b
+          |> Batch.add_event(1, "started", "x")
+          |> Batch.add_action(%{seq: 1, mnemonic: if(i == 1, do: "deadlock", else: "Genrule")})
+        end)
+      end
+
+    submit_together(WriterPool.for_invocation(hd(ids)), [a, b, c, d])
+
+    b_ref = b.ref
+    assert_receive {:batch_failed, ^b_ref, reason}, 5_000
+    assert reason =~ "deadlock_detected"
+
+    for batch <- [a, c, d] do
+      ref = batch.ref
+      assert_receive {:batch_committed, ^ref}, 5_000
+    end
+  end
+
+  @tag :capture_log
+  test "while the object store refuses the object the group waits, then fails whole; every try is the same object",
+       %{project: project} do
+    # The store's root is a file: no object can be written under it.
+    previous = Application.get_env(:conveyor, Conveyor.Blobs)
+    on_exit(fn -> Application.put_env(:conveyor, Conveyor.Blobs, previous) end)
+    root = Path.join(System.tmp_dir!(), "conveyor-no-store-#{System.unique_integer([:positive])}")
+    File.write!(root, "in the way")
+    on_exit(fn -> File.rm(root) end)
+    Application.put_env(:conveyor, Conveyor.Blobs, adapter: :disk, dir: root)
+
+    test_pid = self()
+    handler = "writer-test-puts-#{System.unique_integer([:positive])}"
+
+    :telemetry.attach(
+      handler,
+      [:conveyor, :raw_log, :put_failed],
+      fn _, _, _, _ -> send(test_pid, :put_failed) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    writer = shard!(blob?: true)
+    before = objects()
+    ids = for _ <- 1..3, do: invocation!(project)
+    batches = for id <- ids, do: batch(id, project, 1, &Batch.add_event(&1, 1, "started", "x"))
+    submit_together(writer, batches)
+
+    for b <- batches do
+      ref = b.ref
+      assert_receive {:batch_failed, ^ref, reason}, 5_000
+      assert reason =~ "raw log put"
+    end
+
+    # The first try and one per retry delay, all under the one key registered for the group.
+    for _ <- 0..length(Config.from_env().retry_delays), do: assert_received(:put_failed)
+    refute_received :put_failed
+    assert objects() == before + 1
+    for id <- ids, do: assert(Repo.get!(Invocation, id).last_event_seq == 0)
+  end
+
+  @tag :capture_log
   test "a batch past its deadline is expired: never attempted, nothing written, its followers with it",
        %{id: id, project: project} do
-    blob_mode!()
-    before = objects()
     # A shard whose batches are due the moment they arrive.
-    start_supervised!({Writer, shard: 778, deadline_ms: 0})
-    writer = 778
+    writer = shard!(blob?: true, deadline_ms: 0)
+    before = objects()
 
     batches = [
       batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a")),
@@ -566,20 +593,16 @@ defmodule Conveyor.Ingest.WriterTest do
     assert shard in 0..(WriterPool.shards() - 1)
   end
 
-  test "a batch that ends a stream is committed without waiting for the writer's hold", %{
+  test "a batch that ends a stream is committed at once, and takes what waited with it", %{
     id: id,
     project: project
   } do
-    previous = Application.get_env(:conveyor, Conveyor.RawLog)
-    on_exit(fn -> Application.put_env(:conveyor, Conveyor.RawLog, previous) end)
-    Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob, flush_ms: 30_000)
-    start_supervised!({Writer, shard: 777})
-    writer = 777
-
+    # A hold far longer than the test: only the end of the stream can commit these.
+    writer = shard!(hold_ms: 60_000)
     plain = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))
-    Writer.submit(writer, plain)
-    plain_ref = plain.ref
-    refute_receive {:batch_committed, ^plain_ref}, 300
+    {:ok, pid} = Writer.submit(writer, plain)
+    # (A hold that elapses after its group was committed is ignored.)
+    send(pid, {:timeout, make_ref(), :flush})
 
     final =
       batch(
@@ -590,19 +613,37 @@ defmodule Conveyor.Ingest.WriterTest do
       )
 
     Writer.submit(writer, final)
+    plain_ref = plain.ref
     final_ref = final.ref
     assert_receive {:batch_committed, ^plain_ref}, 2_000
     assert_receive {:batch_committed, ^final_ref}, 2_000
+    assert Repo.get!(Invocation, id).last_event_seq == 2
   end
 
-  test "two units of one invocation in a flush are applied in order, in separate statements",
+  test "blob mode: enough waiting bytes commit a group before its hold", %{
+    id: id,
+    project: project
+  } do
+    writer = shard!(blob?: true, hold_ms: 60_000, max_bytes: 3)
+    before = objects()
+    small = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "ab"))
+    enough = batch(id, project, 2, &Batch.add_event(&1, 2, "progress", "c"))
+    Writer.submit(writer, small)
+    Writer.submit(writer, enough)
+    small_ref = small.ref
+    enough_ref = enough.ref
+    assert_receive {:batch_committed, ^small_ref}, 2_000
+    assert_receive {:batch_committed, ^enough_ref}, 2_000
+    assert objects() == before + 1
+    assert Conveyor.Invocations.raw_frames(Repo.get!(Invocation, id)) == ["ab", "c"]
+  end
+
+  test "two units of one invocation in a group are applied in order: the one the row does not continue is fenced",
        %{id: id, project: project} do
     first = batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a"))
     # Leaves a gap: only valid once the row is at 4, which it never is in this flush.
     resumed = batch(id, project, 5, &Batch.add_event(&1, 5, "progress", "b"))
-    writer = WriterPool.for_invocation(id)
-    Writer.submit(writer, first)
-    Writer.submit(writer, resumed)
+    submit_together(WriterPool.for_invocation(id), [first, resumed])
     first_ref = first.ref
     resumed_ref = resumed.ref
     assert_receive {:batch_committed, ^first_ref}, 5_000

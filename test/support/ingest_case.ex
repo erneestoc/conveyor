@@ -65,6 +65,29 @@ defmodule Conveyor.IngestCase do
     end
   end
 
+  @doc """
+  Switches the raw log's mode for the rest of the test. Writer shards read their
+  configuration when they start, so the pool is restarted with it, and again with the
+  previous configuration when the test ends.
+  """
+  def raw_log_mode!(mode, opts \\ []) do
+    previous = Application.get_env(:conveyor, Conveyor.RawLog)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Application.put_env(:conveyor, Conveyor.RawLog, previous)
+      restart_writers()
+    end)
+
+    Application.put_env(:conveyor, Conveyor.RawLog, [mode: mode] ++ opts)
+    restart_writers()
+  end
+
+  defp restart_writers do
+    :ok = Supervisor.terminate_child(Conveyor.Ingest.Supervisor, Conveyor.Ingest.WriterPool)
+    {:ok, _} = Supervisor.restart_child(Conveyor.Ingest.Supervisor, Conveyor.Ingest.WriterPool)
+    :ok
+  end
+
   @doc "Reloads an invocation from the database."
   def reload(invocation_id),
     do: Conveyor.Repo.get!(Conveyor.Invocations.Invocation, invocation_id)

@@ -385,6 +385,23 @@ defmodule Conveyor.Invocations do
     |> IO.iodata_to_binary()
   end
 
+  @doc """
+  `compress_bep/1` and `compress/1` over two zstd contexts made here and reused by every
+  call: for a process that compresses many small frames (a writer shard), where creating a
+  context per call costs about a third of the compression. Same frames, same readers. The
+  contexts belong to the calling process and live as long as the functions do.
+  """
+  @spec compressors() :: %{bep: (iodata() -> binary()), text: (iodata() -> binary())}
+  def compressors do
+    {:ok, bep} = :zstd.context(:compress, %{dictionary: zstd_dict(:compress, @bep_dict_id)})
+    {:ok, text} = :zstd.context(:compress, %{})
+
+    %{
+      bep: fn iodata -> iodata |> :zstd.compress(bep) |> IO.iodata_to_binary() end,
+      text: fn iodata -> iodata |> :zstd.compress(text) |> IO.iodata_to_binary() end
+    }
+  end
+
   @doc false
   def decompress(binary) do
     case :zstd.get_frame_header(binary) do

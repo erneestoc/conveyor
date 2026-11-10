@@ -40,12 +40,16 @@ defmodule Conveyor.RawLogTest do
     end
   end
 
+  # Names that do not collide with what an earlier run left on disk.
+  defp unique(name), do: "#{name}-#{System.os_time(:microsecond)}"
+
   defp root, do: Conveyor.Blobs.adapter() |> elem(1) |> Keyword.fetch!(:dir)
   defp dir_of(key), do: root() |> Path.join(key) |> Path.dirname()
 
   test "a disk put is durable before it returns: synced file, renamed into place, synced directory" do
     # The shard's directory is new: its ancestors up to the store's root are synced too.
-    first = RawLog.new_key("durable-#{System.unique_integer([:positive])}")
+    first = RawLog.new_key(unique("durable"))
+    on_exit(fn -> File.rm_rf(dir_of(first)) end)
     assert {:ok, syncs} = sync_calls(fn -> RawLog.put(first, "first") end)
     assert syncs >= 3
 
@@ -61,8 +65,9 @@ defmodule Conveyor.RawLogTest do
   test "a disk put that cannot be written is an error, and leaves nothing behind" do
     previous = Application.get_env(:conveyor, Conveyor.Blobs)
     on_exit(fn -> Application.put_env(:conveyor, Conveyor.Blobs, previous) end)
-    blocked_root = Path.join(root(), "blocked-#{System.unique_integer([:positive])}")
+    blocked_root = Path.join(root(), unique("blocked"))
     File.mkdir_p!(blocked_root)
+    on_exit(fn -> File.rm_rf(blocked_root) end)
     Application.put_env(:conveyor, Conveyor.Blobs, adapter: :disk, dir: blocked_root)
 
     # The object's own name is taken by a directory: the rename fails, the temporary
@@ -84,7 +89,8 @@ defmodule Conveyor.RawLogTest do
     Application.put_env(:conveyor, RawLog, Keyword.put(previous || [], :fsync, false))
     refute RawLog.fsync?()
 
-    key = RawLog.new_key("nosync-#{System.unique_integer([:positive])}")
+    key = RawLog.new_key(unique("nosync"))
+    on_exit(fn -> File.rm_rf(dir_of(key)) end)
     assert {:ok, 0} = sync_calls(fn -> RawLog.put(key, "unsynced") end)
     assert {:ok, "unsynced"} = RawLog.get_range(key, 0, 8)
     assert File.ls!(dir_of(key)) == [Path.basename(key)]

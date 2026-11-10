@@ -9,8 +9,6 @@ defmodule Conveyor.RawLogModeTest do
 
   setup %{project: project} do
     {:ok, _key, key} = Projects.create_api_key(project, %{name: "rawlog"})
-    previous = Application.get_env(:conveyor, RawLog)
-    on_exit(fn -> Application.put_env(:conveyor, RawLog, previous) end)
     %{key: key}
   end
 
@@ -27,10 +25,10 @@ defmodule Conveyor.RawLogModeTest do
     grpc_port: port,
     key: key
   } do
-    Application.put_env(:conveyor, RawLog, mode: :postgres, flush_ms: 20)
+    raw_log_mode!(:postgres, flush_ms: 20)
     reference = ingest!(port, key, "clean_build_and_test")
 
-    Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 20)
+    raw_log_mode!(:blob, flush_ms: 20)
     assert RawLog.blob_mode?()
     inv = ingest!(port, key, "clean_build_and_test")
 
@@ -79,13 +77,13 @@ defmodule Conveyor.RawLogModeTest do
     grpc_port: port,
     key: key
   } do
-    Application.put_env(:conveyor, RawLog, mode: :postgres, flush_ms: 20)
+    raw_log_mode!(:postgres, flush_ms: 20)
     reference = ingest!(port, key, "clean_build_and_test")
 
     # Paced events make the build many batches and rows. The writer merges a build's
     # contiguous batches of one group commit into one row, so each row of a build is in
     # its own object: the read is one range per object, never one per row of an object.
-    Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 20)
+    raw_log_mode!(:blob, flush_ms: 20)
     inv = ingest!(port, key, "clean_build_and_test", delay_ms: 25)
 
     events_q = from(s in EventSegment, where: s.invocation_id == ^inv.id)
@@ -110,7 +108,7 @@ defmodule Conveyor.RawLogModeTest do
     on_exit(fn -> Application.put_env(:conveyor, RawArchive, prev) end)
     Application.put_env(:conveyor, RawArchive, enabled: true, after_hours: 24)
 
-    Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 20)
+    raw_log_mode!(:blob, flush_ms: 20)
     inv = ingest!(port, key, "clean_build_and_test", delay_ms: 25)
     sent = inv.last_event_seq - 1
     # Fixture builds carry the recording's event times; make this one finish now.
@@ -136,21 +134,6 @@ defmodule Conveyor.RawLogModeTest do
     assert RawLog.sweep(DateTime.add(DateTime.utc_now(), 1, :second)) >= 1
     assert Invocations.events(archived) == events
     assert Invocations.log(archived) == log
-  end
-
-  test "a writer shard in blob mode flushes by pending bytes before its hold" do
-    # A long hold and a one-byte threshold: the first batch flushes at once. The build
-    # does not exist, so the commit fences, which is the proof that the flush happened.
-    Application.put_env(:conveyor, RawLog, mode: :blob, flush_ms: 60_000, flush_bytes: 1)
-    start_supervised!({Conveyor.Ingest.Writer, shard: :bytes_test})
-
-    batch =
-      Conveyor.Ingest.Batch.new(Ecto.UUID.generate(), 1, Date.utc_today(), 1, 0, 0)
-      |> Conveyor.Ingest.Batch.add_event(1, "started", "not a build event")
-
-    Conveyor.Ingest.Writer.submit(:bytes_test, batch)
-    assert_receive {:batch_failed, ref, {:fenced, _}}, 5_000
-    assert ref == batch.ref
   end
 
   test "fetch_rows! splits coalesced ranges, breaks on gaps and keys, and keeps inline rows" do

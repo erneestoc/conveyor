@@ -207,11 +207,15 @@ defmodule Conveyor.Ingest.Batch do
   @spec event_count(t()) :: non_neg_integer()
   def event_count(%__MODULE__{events: events}), do: length(events)
 
-  @doc "The `event_segments` row for this batch, or nil when it holds no events."
-  @spec event_segment_row(t()) :: map() | nil
-  def event_segment_row(%__MODULE__{events: []}), do: nil
+  @doc """
+  The `event_segments` row for this batch, or nil when it holds no events. `compress` turns
+  the frames into the stored payload (a writer shard passes its own compressor).
+  """
+  @spec event_segment_row(t(), (iodata() -> binary())) :: map() | nil
+  def event_segment_row(batch, compress \\ &Invocations.compress_bep/1)
+  def event_segment_row(%__MODULE__{events: []}, _compress), do: nil
 
-  def event_segment_row(%__MODULE__{} = b) do
+  def event_segment_row(%__MODULE__{} = b, compress) do
     events = Enum.reverse(b.events)
 
     frames =
@@ -230,15 +234,16 @@ defmodule Conveyor.Ingest.Batch do
       count: length(events),
       kinds: events |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
       byte_size: b.event_bytes,
-      payload: Invocations.compress_bep(frames)
+      payload: compress.(frames)
     }
   end
 
   @doc "The `log_segments` row for this batch, or nil when it holds no log text."
-  @spec log_segment_row(t()) :: map() | nil
-  def log_segment_row(%__MODULE__{log: []}), do: nil
+  @spec log_segment_row(t(), (iodata() -> binary())) :: map() | nil
+  def log_segment_row(batch, compress \\ &Invocations.compress/1)
+  def log_segment_row(%__MODULE__{log: []}, _compress), do: nil
 
-  def log_segment_row(%__MODULE__{} = b) do
+  def log_segment_row(%__MODULE__{} = b, compress) do
     chunks = Enum.reverse(b.log)
     {first, _} = hd(chunks)
     {last, _} = List.last(chunks)
@@ -252,7 +257,7 @@ defmodule Conveyor.Ingest.Batch do
       line_offset: b.log_line_offset,
       byte_size: b.log_bytes,
       line_count: b.log_lines,
-      data: Invocations.compress(Enum.map(chunks, &elem(&1, 1)))
+      data: compress.(Enum.map(chunks, &elem(&1, 1)))
     }
   end
 end

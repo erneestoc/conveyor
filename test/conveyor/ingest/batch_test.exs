@@ -166,5 +166,16 @@ defmodule Conveyor.Ingest.BatchTest do
 
     assert Batch.coalesce([]) == []
     assert Batch.coalesce([a1]) == [a1]
+
+    # Each unit is named by its invocation and its position among that invocation's units,
+    # and lists the batches merged into it.
+    assert [{{@id, 0}, _, [r1, r2]}, {{@id, 1}, _, [r3]}, {{^other, 0}, _, [r4, r5]}] =
+             Batch.units([a1, o1, a2, a3, o2])
+
+    assert [r1, r2, r3, r4, r5] == [a1.ref, a2.ref, a3.ref, o1.ref, o2.ref]
+
+    # A second batch starting at the same sequence (a restarted worker) is its own unit.
+    again = Batch.new(@id, 1, ~D[2026-09-18], 1, 0, 0) |> Batch.add_event(1, "started", "a")
+    assert [{{@id, 0}, _, _}, {{@id, 1}, _, _}] = Batch.units([a1, again])
   end
 end
