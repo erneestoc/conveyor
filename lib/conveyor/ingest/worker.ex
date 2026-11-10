@@ -105,7 +105,10 @@ defmodule Conveyor.Ingest.Worker do
       stream_finished: inv.stream_finished,
       lifecycle_finished: inv.lifecycle_finished,
       finalized: inv.stream_finished,
-      lingering: false,
+      # An idle disconnect was submitted and no event has arrived since.
+      disconnected: false,
+      # nil | timer reference | :due (expired with work in hand: stop when it drains)
+      linger: nil,
       last_event_at: System.monotonic_time(:millisecond)
     }
 
@@ -228,7 +231,7 @@ defmodule Conveyor.Ingest.Worker do
         end
 
       true ->
-        state = absorb(state, obe)
+        state = state |> resume() |> absorb(obe)
 
         state = %{
           state
@@ -263,22 +266,39 @@ defmodule Conveyor.Ingest.Worker do
   # or in flight, such a worker resumes from the row instead of rejecting the sequence.
   defp takeover(%{inflight: inflight, batch: batch} = state, seq) do
     if inflight == %{} and Batch.empty?(batch) do
-      for t <- [state.idle_timer, state.flush_timer, state.broadcast_timer],
-          t != nil,
-          do: Process.cancel_timer(t)
-
-      # The row was this project's when the worker loaded it and never changes project.
-      {:ok, inv} =
-        Retry.with_backoff(
-          fn -> load_or_create(state.ctx, state.invocation_id, state.stream_id) end,
-          label: "worker reload #{state.invocation_id}"
-        )
-
-      fresh = loaded(state.ctx, state.invocation_id, state.stream_id, inv)
+      fresh = reload(state)
       if fresh.expected_seq == seq, do: {:ok, fresh}, else: {:error, fresh}
     else
       {:error, state}
     end
+  end
+
+  # Drops every timer and starts again from the row. Only with nothing buffered or in flight.
+  defp reload(state) do
+    for {timer, msg} <- [
+          {state.idle_timer, :idle_timeout},
+          {state.flush_timer, :flush},
+          {state.broadcast_timer, :broadcast},
+          {state.linger, :linger_expired}
+        ],
+        is_reference(timer) do
+      Process.cancel_timer(timer)
+
+      receive do
+        ^msg -> :ok
+      after
+        0 -> :ok
+      end
+    end
+
+    # The row was this project's when the worker loaded it and never changes project.
+    {:ok, inv} =
+      Retry.with_backoff(
+        fn -> load_or_create(state.ctx, state.invocation_id, state.stream_id) end,
+        label: "worker reload #{state.invocation_id}"
+      )
+
+    %{loaded(state.ctx, state.invocation_id, state.stream_id, inv) | writer: state.writer}
   end
 
   # --- absorbing one event ---------------------------------------------------------------
@@ -445,7 +465,7 @@ defmodule Conveyor.Ingest.Worker do
       |> unblock()
 
     state =
-      if batch.finalize do
+      if batch.finalize and (state.stream_finished or state.disconnected) do
         # Only a build that referenced a profile on a remote cache has work to schedule; the
         # worker's own view of the row saves the read.
         if state.norm.inv[:profile_status] == "referenced",
@@ -456,7 +476,9 @@ defmodule Conveyor.Ingest.Worker do
         state
       end
 
-    {:noreply, state}
+    if state.linger == :due and quiet?(state),
+      do: {:stop, :normal, state},
+      else: {:noreply, state}
   end
 
   # One failed batch fails everything behind it: later batches cannot commit before it
@@ -515,12 +537,18 @@ defmodule Conveyor.Ingest.Worker do
          | norm: norm,
            batch: next,
            inflight: Map.put(state.inflight, batch.ref, batch),
-           stream_finished: true
+           disconnected: true
        }}
     end
   end
 
-  def handle_info(:linger_expired, state), do: {:stop, :normal, state}
+  # A worker exits only when it is quiet (`Exit` in docs/spec/Ingest.tla): nothing
+  # buffered, nothing at the writer, nobody waiting. Otherwise it goes when that drains.
+  def handle_info(:linger_expired, state) do
+    if quiet?(state),
+      do: {:stop, :normal, state},
+      else: {:noreply, %{state | linger: :due}}
+  end
 
   # A broadcast tick with nothing in flight is the quiet moment of a stream: between paced
   # events, and for the whole linger of a finished build. Hibernating there compacts the
@@ -579,12 +607,26 @@ defmodule Conveyor.Ingest.Worker do
     }
   end
 
-  defp start_linger(%{lingering: true} = state), do: state
-
-  defp start_linger(state) do
-    Process.send_after(self(), :linger_expired, Ingest.config(:linger_ms, 30_000))
-    %{state | lingering: true}
+  defp start_linger(%{linger: nil} = state) do
+    %{
+      state
+      | linger: Process.send_after(self(), :linger_expired, Ingest.config(:linger_ms, 30_000))
+    }
   end
+
+  defp start_linger(state), do: state
+
+  defp quiet?(state),
+    do: state.inflight == %{} and Batch.empty?(state.batch) and state.batch.waiters == []
+
+  # A client that comes back after an idle disconnect, while the worker lingers (or while
+  # the disconnect is still at the writer), continues a live build: the linger must not
+  # stop the worker under it, and the stream's end must finalize the build. Once the
+  # disconnect has committed the worker starts again from the row, as a new worker would
+  # (it may have dropped the wide columns already); before that its own view is current.
+  defp resume(%{disconnected: true, finalized: true} = state), do: reload(state)
+  defp resume(%{disconnected: true} = state), do: %{state | disconnected: false}
+  defp resume(state), do: state
 
   # --- broadcasts ---------------------------------------------------------------------------
 

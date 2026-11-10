@@ -272,4 +272,44 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert_received {:ack, 1}
     Process.exit(sink, :kill)
   end
+
+  @tag :capture_log
+  test "a client that resumes within the linger after an idle disconnect keeps its worker", %{
+    ctx: ctx
+  } do
+    id = Replay.uuid()
+    events = events("build_failure")
+    n = length(events)
+    previous = Application.get_env(:conveyor, Ingest)
+
+    Application.put_env(
+      :conveyor,
+      Ingest,
+      previous |> Keyword.put(:idle_timeout_ms, 50) |> Keyword.put(:linger_ms, 150)
+    )
+
+    on_exit(fn -> Application.put_env(:conveyor, Ingest, previous) end)
+    Conveyor.Watch.subscribe(Ingest.invocation_topic(id))
+
+    push_all(ctx, id, Enum.take(events, 5))
+    worker = worker_pid(id)
+    ref = Process.monitor(worker)
+    assert_receive {:invocation_detail, %{invocation: %{status: "disconnected"}}}, 2_000
+
+    # Back within the linger: no more idle timeouts from here on.
+    Application.put_env(:conveyor, Ingest, Keyword.put(previous, :linger_ms, 150))
+    assert :ok = Ingest.push_sync(ctx, Replay.ordered_event(stream_id(id), 6, Enum.at(events, 5)))
+
+    # The linger armed by the disconnect would have fired by now; the worker is the same.
+    refute_receive {:DOWN, ^ref, :process, ^worker, _}, 300
+    push_all(ctx, id, events, 7)
+    finish(ctx, id, n + 1)
+    assert worker_pid(id) in [worker, nil]
+
+    # The stream's end finalizes the build: it is no longer `disconnected`.
+    assert_receive {:DOWN, ^ref, :process, ^worker, :normal}, 2_000
+    assert %{status: "failed", stream_finished: true, last_event_seq: last} = reload(id)
+    assert last == n + 1
+    assert :ok = Ingest.Verify.check(id, n)
+  end
 end
