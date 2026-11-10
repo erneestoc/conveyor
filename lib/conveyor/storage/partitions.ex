@@ -3,8 +3,8 @@ defmodule Conveyor.Storage.Partitions do
   Maintains the daily range partitions of `event_segments` and `log_segments`.
 
   Partitions are keyed by the invocation's start day. `ensure/1` is idempotent and runs on
-  boot and hourly (Oban cron) so partitions exist ahead of time; `drop_before/1` implements
-  raw-data retention as cheap `DROP TABLE`s.
+  boot and hourly (Oban cron) so partitions exist ahead of time; `drop_before/2` is the
+  mechanism of raw-data retention, cheap `DROP TABLE`s.
   """
 
   alias Conveyor.Repo
@@ -76,8 +76,7 @@ defmodule Conveyor.Storage.Partitions do
 
   @doc """
   The day of the oldest daily segment partition of either table, or nil when there is
-  none. The raw-log sweep stops at it: a row in that partition can only reference an
-  object registered on or after that day.
+  none (`Conveyor.RawStore.Expiry` bounds two of its rules by it).
   """
   @spec oldest_day() :: Date.t() | nil
   def oldest_day do

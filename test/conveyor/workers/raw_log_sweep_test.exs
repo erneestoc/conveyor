@@ -46,10 +46,10 @@ defmodule Conveyor.Workers.RawLogSweepTest do
     key = RawLog.new_key(0)
     :ok = RawLog.put(key, "x")
     assert {:ok, %{deleted: 0}} = perform_job(RawLogSweep, %{})
-    assert %{objects: 0, overdue_seconds: 0} = RawLog.sweep_backlog(RawLogSweep.cutoff())
+    assert %{objects: 0, overdue_seconds: 0} = Conveyor.RawStore.expiry_backlog()
 
     age!([key], 40)
-    assert %{objects: 1, overdue_seconds: late} = RawLog.sweep_backlog(RawLogSweep.cutoff())
+    assert %{objects: 1, overdue_seconds: late} = Conveyor.RawStore.expiry_backlog()
     assert late > 0
 
     assert {:ok, %{deleted: 1, failed: 0, remaining?: false}} = perform_job(RawLogSweep, %{})
@@ -115,14 +115,14 @@ defmodule Conveyor.Workers.RawLogSweepTest do
 
     # Pages of two: the refused key is in the first, the run goes on past it.
     assert %{deleted: 4, failed: 1, remaining?: false} =
-             RawLog.sweep(RawLogSweep.cutoff(), page: 2)
+             Conveyor.RawStore.expire_objects(DateTime.utc_now(), page: 2)
 
     assert_received {:sweep_failed, ^refused}
     assert registered(keys) == [refused]
 
     # The next run tries it again, and succeeds once the store lets it.
     File.rm_rf!(Path.join(root(), refused))
-    assert %{deleted: 1, failed: 0} = RawLog.sweep(RawLogSweep.cutoff())
+    assert %{deleted: 1, failed: 0} = Conveyor.RawStore.expire_objects()
     assert registered(keys) == []
   end
 

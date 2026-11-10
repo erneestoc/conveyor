@@ -1,15 +1,16 @@
 defmodule Conveyor.RawArchive do
   @moduledoc """
-  Raw write-behind: moves a finished build's raw BEP events and log out of the Postgres
-  segment partitions into the blob store, one object each, a day after the build finished.
-  Every acknowledgement stays a Postgres commit; this only changes where history lives.
+  Compaction, the third form of `Conveyor.RawStore` (callers use `RawStore.compact/2`,
+  `due_for_compaction/1`): moves a finished build's raw BEP events and log out of the
+  segment rows (and the raw-log objects they may point into) into the blob store, one
+  object each, a day after the build finished. Every acknowledgement stays a Postgres
+  commit; this only changes where history lives.
 
   The events object is exactly a zstd-compressed `--build_event_binary_file` (the BEP
-  dictionary's id is in the frame), the log object the zstd-compressed log text. Readers
-  (`Conveyor.Invocations.raw_frames/1`, `stream_raw/1`, `stream_log/2`) prefer the blobs
-  once `raw_status` is `archived`; the segments stay until their daily partition is
-  dropped, and `Conveyor.Storage.Partitions.drop_before/2` keeps a day that still holds a
-  finished build this module has not archived.
+  dictionary's id is in the frame), the log object the zstd-compressed log text. The
+  store's readers prefer the blobs once the build references them; the segments stay
+  until their daily partition is dropped, and the drop keeps a day that still holds a
+  finished build this module has not archived (`RawStore.Expiry`).
 
   Per build (`archive/1`): read the segments in order and stream them through one zstd
   context into `Conveyor.Blobs.put/3`, check the counts against the row, then in one
@@ -26,14 +27,10 @@ defmodule Conveyor.RawArchive do
 
   require Logger
 
-  alias Conveyor.Bep.Fixture
-  alias Conveyor.{Blobs, Invocations, Repo}
-  alias Conveyor.Ingest.Retry
-  alias Conveyor.Invocations.{EventSegment, Invocation, LogSegment}
-  alias Conveyor.RawStore.Codec
+  alias Conveyor.{Blobs, Repo}
+  alias Conveyor.Invocations.Invocation
+  alias Conveyor.RawStore.{Codec, Expiry, Segments}
   alias Conveyor.Storage.Partitions
-
-  @chunk 32
 
   @spec enabled?() :: boolean()
   def enabled?, do: config(:enabled, false)
@@ -126,29 +123,19 @@ defmodule Conveyor.RawArchive do
     end
   end
 
-  # The window is bounded below by the oldest partition that still exists (the only
-  # builds with segments left) and uses the index on `inserted_at`.
+  # Which builds are looked at and when they are due is `RawStore.Expiry`'s rule 3; the
+  # window uses the index on `inserted_at`.
   defp due_query(now) do
-    case oldest_partition_day() do
+    case Expiry.compaction_window(now, after_hours(), Partitions.oldest_day()) do
       nil ->
         nil
 
-      oldest ->
-        from_at = DateTime.new!(oldest, ~T[00:00:00], "Etc/UTC")
-        due = DateTime.add(now, -after_hours() * 3600, :second)
-
+      {from_at, due} ->
         from i in Invocation,
           where: i.inserted_at >= ^from_at and i.inserted_at < ^due,
           where: i.raw_status == "segments" and i.stream_finished,
           where: i.status not in ["in_progress", "disconnected"],
           where: i.finished_at < ^due
-    end
-  end
-
-  defp oldest_partition_day do
-    case Partitions.partition_names("event_segments") do
-      [] -> nil
-      [first | _] -> Partitions.day_of("event_segments", first)
     end
   end
 
@@ -158,8 +145,7 @@ defmodule Conveyor.RawArchive do
   """
   @spec holds_unarchived?(Date.t()) :: boolean()
   def holds_unarchived?(%Date{} = day) do
-    from_at = DateTime.new!(day, ~T[00:00:00], "Etc/UTC")
-    to_at = DateTime.add(from_at, 1, :day)
+    {from_at, to_at} = Expiry.day_span(day)
 
     Repo.exists?(
       from i in Invocation,
@@ -195,7 +181,7 @@ defmodule Conveyor.RawArchive do
   defp due?(%Invocation{} = inv, now) do
     inv.stream_finished and inv.status not in ["in_progress", "disconnected"] and
       inv.finished_at != nil and
-      DateTime.diff(now, inv.finished_at, :second) >= after_hours() * 3600
+      DateTime.compare(inv.finished_at, Expiry.compaction_due_before(now, after_hours())) != :gt
   end
 
   defp run(%Invocation{} = inv) do
@@ -228,10 +214,10 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(EventSegment, :payload, [:count])
-      |> Stream.map(fn %{count: count, payload: payload} ->
+      |> Segments.stream(:events)
+      |> Stream.map(fn %{count: count, bytes: payload} ->
         data = Codec.decompress(payload)
-        :counters.add(counts, 1, length(Fixture.frames(data)))
+        :counters.add(counts, 1, length(Codec.frames(data)))
         :counters.add(counts, 2, count)
         data
       end)
@@ -259,8 +245,8 @@ defmodule Conveyor.RawArchive do
 
     chunks =
       inv
-      |> segment_rows(LogSegment, :data, [])
-      |> Stream.map(fn %{data: data} ->
+      |> Segments.stream(:log)
+      |> Stream.map(fn %{bytes: data} ->
         text = Codec.decompress(data)
         :counters.add(counts, 1, byte_size(text))
         text
@@ -280,46 +266,6 @@ defmodule Conveyor.RawArchive do
   defp discard(inv, blob, result) do
     Blobs.discard(inv.project_id, blob.digest)
     result
-  end
-
-  # A few segments per query, in sequence order (keyset on first_seq), each query retried
-  # on transient database errors; the partition day prunes the scan to one partition. The
-  # bytes column (`col`) is filled per query, coalescing ranged reads in blob mode.
-  defp segment_rows(%Invocation{id: id} = inv, schema, col, fields) do
-    day = Invocations.day(inv)
-    fields = [col | fields] ++ Conveyor.RawLog.object_fields()
-
-    Stream.resource(
-      fn -> 0 end,
-      fn
-        :done ->
-          {:halt, :done}
-
-        after_seq ->
-          rows =
-            Retry.with_backoff(
-              fn ->
-                Repo.all(
-                  from(s in schema,
-                    where: s.invocation_id == ^id and s.day == ^day and s.first_seq > ^after_seq,
-                    order_by: s.first_seq,
-                    limit: @chunk,
-                    select: map(s, ^[:first_seq | fields])
-                  ),
-                  timeout: :timer.minutes(5)
-                )
-              end,
-              label: "archive read #{id}"
-            )
-
-          case rows do
-            [] -> {:halt, :done}
-            rows when length(rows) < @chunk -> {Conveyor.RawLog.fetch_rows!(rows, col), :done}
-            rows -> {Conveyor.RawLog.fetch_rows!(rows, col), List.last(rows).first_seq}
-          end
-      end,
-      fn _ -> :ok end
-    )
   end
 
   # Pin both blobs and point the build at them in one transaction; the conditional update

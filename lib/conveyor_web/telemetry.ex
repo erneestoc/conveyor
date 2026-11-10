@@ -193,6 +193,13 @@ defmodule ConveyorWeb.Telemetry do
       counter("conveyor.raw_log.sweep_failed.count",
         description: "Raw-log objects the sweep could not delete"
       ),
+      last_value("conveyor.raw_log.sweep_backlog.objects",
+        description:
+          "Raw-log objects past their date that the sweep has not deleted yet (counted up to 100,000; 0 when the sweep keeps up)"
+      ),
+      last_value("conveyor.raw_log.sweep_backlog.overdue_seconds",
+        description: "How long the oldest raw-log object has been past its date"
+      ),
       counter("conveyor.ingest.fenced.count",
         description: "Batch commits fenced by another node's write to the same invocation"
       ),
@@ -271,6 +278,7 @@ defmodule ConveyorWeb.Telemetry do
     measure_writer_backlog()
     measure_oban()
     measure_raw_archive()
+    measure_raw_expiry()
   end
 
   # The commit pressure of every writer shard (`Conveyor.Ingest.Writer.pressure/1`).
@@ -291,7 +299,7 @@ defmodule ConveyorWeb.Telemetry do
   # per node (the poller ticks every 10 s).
   @doc false
   def measure_raw_archive(now \\ System.monotonic_time(:millisecond)) do
-    if Conveyor.RawArchive.enabled?() do
+    if Conveyor.RawStore.compaction?() do
       key = {__MODULE__, :raw_archive_overdue}
 
       seconds =
@@ -300,7 +308,7 @@ defmodule ConveyorWeb.Telemetry do
             value
 
           _ ->
-            value = Conveyor.RawArchive.overdue_seconds()
+            value = Conveyor.RawStore.compaction_overdue_seconds()
             :persistent_term.put(key, {now, value})
             value
         end
@@ -308,6 +316,28 @@ defmodule ConveyorWeb.Telemetry do
       :telemetry.execute([:conveyor, :raw_archive, :overdue], %{seconds: seconds}, %{})
     end
 
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  # What the raw-log sweep has not deleted yet; recomputed at most once a minute per node.
+  @doc false
+  def measure_raw_expiry(now \\ System.monotonic_time(:millisecond)) do
+    key = {__MODULE__, :raw_expiry_backlog}
+
+    backlog =
+      case :persistent_term.get(key, nil) do
+        {at, value} when now - at < 60_000 ->
+          value
+
+        _ ->
+          value = Conveyor.RawStore.expiry_backlog()
+          :persistent_term.put(key, {now, value})
+          value
+      end
+
+    :telemetry.execute([:conveyor, :raw_log, :sweep_backlog], backlog, %{})
     :ok
   rescue
     _ -> :ok

@@ -21,6 +21,11 @@ defmodule Conveyor.RawStore do
       pipeline's store step, `Conveyor.Ingest.Writer.Store`), `event_segment/3` and
       `log_segment/3` for the rows that describe them, `write_mode/0`;
     * **read** — `frames/1`, `bep/1`, `events_page/3`, `log/1`;
+    * **compact** — `compact/2` moves a finished build to form 3, `due_for_compaction/1`
+      says which builds are due, `compaction_overdue_seconds/1` how late the oldest is;
+    * **expire** — `expire_partitions/1` and `expire_objects/2` delete what may go at a
+      given clock, `expiry_backlog/1` says what is late; the rules themselves are
+      `Conveyor.RawStore.Expiry`, in one place;
     * **verify** — `audit/1`, what the persistence oracle (`Conveyor.Ingest.Verify`)
       compares against what was sent.
 
@@ -36,8 +41,9 @@ defmodule Conveyor.RawStore do
 
   alias Conveyor.Blobs
   alias Conveyor.Invocations.Invocation
-  alias Conveyor.RawLog
-  alias Conveyor.RawStore.{Codec, Segments}
+  alias Conveyor.{RawArchive, RawLog}
+  alias Conveyor.RawStore.{Codec, Expiry, Segments}
+  alias Conveyor.Storage.Partitions
 
   # --- append -----------------------------------------------------------------------------
 
@@ -220,6 +226,78 @@ defmodule Conveyor.RawStore do
         |> Stream.map(&Codec.decompress(&1.bytes))
     }
   end
+
+  # --- compact ----------------------------------------------------------------------------
+
+  @doc "Whether finished builds are compacted on this deployment (`RAW_ARCHIVE_ENABLED`)."
+  @spec compaction?() :: boolean()
+  defdelegate compaction?, to: RawArchive, as: :enabled?
+
+  @doc """
+  The finished builds whose bytes are due to be compacted at `now`, oldest finish first,
+  each with its project: what a compaction job is enqueued with.
+  """
+  @spec due_for_compaction(DateTime.t()) :: [{Ecto.UUID.t(), integer()}]
+  def due_for_compaction(now \\ DateTime.utc_now()), do: RawArchive.all_due(now)
+
+  @doc """
+  How long the oldest build due for compaction has waited past its time, in seconds (0
+  when none is due). A value that keeps growing means compaction is failing or not
+  keeping up, and the expiry of segment partitions is being held back meanwhile.
+  """
+  @spec compaction_overdue_seconds(DateTime.t()) :: non_neg_integer()
+  def compaction_overdue_seconds(now \\ DateTime.utc_now()), do: RawArchive.overdue_seconds(now)
+
+  @doc """
+  Compacts one build: its segments (and byte ranges) become one blob for the events and
+  one for the log, and its readers switch to them in the same transaction that references
+  them (`docs/spec/Archive.tla`). Takes the build's id, or the row as loaded earlier, or
+  `:gone` for a build that no longer exists.
+
+  `{:ok, :archived}`, or `{:ok, reason}` when there is nothing to do (`:not_found`,
+  `:not_due`, `:already_archived`, `:lost` to another node, `:skipped` when what is
+  stored does not match the row: the build is marked and keeps its segments until they
+  expire), or `{:error, reason}` to try again.
+  """
+  @spec compact(Ecto.UUID.t() | Invocation.t() | :gone, DateTime.t()) ::
+          {:ok, atom()} | {:error, term()}
+  def compact(build, now \\ DateTime.utc_now()), do: RawArchive.archive(build, now)
+
+  # --- expire -----------------------------------------------------------------------------
+
+  @doc """
+  Drops the segment partitions whose day has passed raw retention at `today`, keeping any
+  day compaction has not finished with, and returns the names dropped
+  (`Conveyor.RawStore.Expiry`, rule 1). Run hourly by `Workers.PartitionMaintenance`.
+  """
+  @spec expire_partitions(Date.t()) :: [String.t()]
+  def expire_partitions(%Date{} = today \\ Date.utc_today()) do
+    keep? = if compaction?(), do: &RawArchive.holds_unarchived?/1, else: fn _day -> false end
+    Partitions.drop_before(Expiry.partition_cutoff(today, Expiry.raw_days()), keep?)
+  end
+
+  @doc """
+  Deletes the raw-log objects no segment row can point at any more at `now`, orphans of
+  failed commits included, for at most `:deadline_ms` (rule 2; bytes first, then the
+  registration row). `remaining?` says the deadline ended the run with objects left. Run
+  hourly by `Workers.RawLogSweep`.
+  """
+  @spec expire_objects(DateTime.t(), keyword()) ::
+          %{deleted: non_neg_integer(), failed: non_neg_integer(), remaining?: boolean()}
+  def expire_objects(%DateTime{} = now \\ DateTime.utc_now(), opts \\ []),
+    do: RawLog.sweep(object_cutoff(now), opts)
+
+  @doc """
+  What `expire_objects/2` has not deleted yet at `now`: how many objects are past their
+  date (counted up to 100,000) and by how many seconds the oldest is.
+  """
+  @spec expiry_backlog(DateTime.t()) ::
+          %{objects: non_neg_integer(), overdue_seconds: non_neg_integer()}
+  def expiry_backlog(%DateTime{} = now \\ DateTime.utc_now()),
+    do: RawLog.sweep_backlog(object_cutoff(now))
+
+  defp object_cutoff(now),
+    do: Expiry.object_cutoff(now, Expiry.raw_days(), Partitions.oldest_day())
 
   # --- verify -----------------------------------------------------------------------------
 
