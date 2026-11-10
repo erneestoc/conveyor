@@ -144,7 +144,8 @@ defmodule Conveyor.Ingest do
   end
 
   # Scoped by project: for an id of another project this updates nothing and answers as it
-  # does for an id that does not exist, so the notification reveals nothing.
+  # does for an id that does not exist, so the notification reveals nothing. Database
+  # errors surface as UNAVAILABLE here too.
   defp mark_lifecycle_finished(%Context{project_id: project_id}, invocation_id) do
     import Ecto.Query, only: [from: 2]
 
@@ -156,6 +157,8 @@ defmodule Conveyor.Ingest do
     )
 
     :ok
+  rescue
+    e in [DBConnection.ConnectionError, Postgrex.Error] -> {:error, {:unavailable, e}}
   end
 
   @doc "Finds or starts the worker for an invocation."

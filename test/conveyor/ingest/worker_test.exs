@@ -312,4 +312,30 @@ defmodule Conveyor.Ingest.WorkerTest do
     assert last == n + 1
     assert :ok = Ingest.Verify.check(id, n)
   end
+
+  @tag :capture_log
+  test "a database error while recording a finish notification is reported as unavailable", %{
+    ctx: ctx
+  } do
+    id = Replay.uuid()
+    push_all(ctx, id, Enum.take(events("analysis_failure"), 2))
+    worker = worker_pid(id)
+    ref = Process.monitor(worker)
+    GenServer.stop(worker)
+    assert_receive {:DOWN, ^ref, :process, ^worker, _}
+
+    finished =
+      Replay.ordered_event(
+        stream_id(id),
+        2,
+        {:invocation_attempt_finished, %V1.BuildEvent.InvocationAttemptFinished{}}
+      )
+
+    # The statement fails in the database (rolled back with the sandbox transaction).
+    Repo.query!("ALTER TABLE invocations RENAME COLUMN lifecycle_finished TO renamed")
+    assert {:error, {:unavailable, %Postgrex.Error{}}} = Ingest.lifecycle(ctx, finished)
+    Repo.query!("ALTER TABLE invocations RENAME COLUMN renamed TO lifecycle_finished")
+    assert :ok = Ingest.lifecycle(ctx, finished)
+    assert reload(id).lifecycle_finished
+  end
 end
