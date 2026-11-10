@@ -37,13 +37,29 @@ defmodule Conveyor.LimitsTest do
     Process.sleep(20)
     assert Limits.streams(:k) == 0
     assert Limits.streams(:other) == 0
-    assert :ok = Limits.acquire_stream(nil, limits)
-    assert :ok = Limits.release_stream(nil)
 
     # A slot held by a process that dies is released by the monitor.
     task = Task.async(fn -> Limits.acquire_stream(:dead, limits) end)
     assert :ok = Task.await(task)
     wait_until(fn -> Limits.streams(:dead) == 0 end)
+  end
+
+  test "streams without an API key (auth none) are counted for the node and never limited" do
+    limits = %{Limits.defaults() | max_streams: 2}
+    for _ <- 1..3, do: assert(:ok = Limits.acquire_stream(nil, limits))
+    assert Limits.total_streams() == 3
+    assert :ok = Limits.acquire_stream(:k, limits)
+    assert Limits.total_streams() == 4
+
+    # Draining waits for them like for any other stream.
+    assert Conveyor.Drain.run(50) == :timeout
+    Conveyor.Drain.stop()
+
+    for _ <- 1..3, do: assert(:ok = Limits.release_stream(nil))
+    assert :ok = Limits.release_stream(:k)
+    wait_until(fn -> Limits.total_streams() == 0 end)
+    assert Conveyor.Drain.run(50) == :ok
+    Conveyor.Drain.stop()
   end
 
   defp wait_until(fun, tries \\ 50) do

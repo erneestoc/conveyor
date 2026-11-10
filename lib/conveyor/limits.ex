@@ -14,6 +14,7 @@ defmodule Conveyor.Limits do
   use GenServer
 
   @table __MODULE__
+  @anonymous :anonymous
 
   @type limits :: %{
           max_streams: pos_integer(),
@@ -35,7 +36,7 @@ defmodule Conveyor.Limits do
   def handle_call({:acquire, key_id, max, pid}, _from, state) do
     count = streams(key_id)
 
-    if count >= max do
+    if max != :infinity and count >= max do
       {:reply, {:error, :too_many_streams}, state}
     else
       :ets.insert(@table, {{:streams, key_id}, count + 1})
@@ -110,13 +111,16 @@ defmodule Conveyor.Limits do
   caller exits.
   """
   @spec acquire_stream(term(), limits()) :: :ok | {:error, :too_many_streams}
-  def acquire_stream(nil, _limits), do: :ok
+  # A stream without a key (auth mode `:none`) is counted for the node and not limited: the
+  # node's stream count, the streams metric and draining must not depend on API keys.
+  def acquire_stream(nil, _limits),
+    do: GenServer.call(__MODULE__, {:acquire, @anonymous, :infinity, self()})
 
   def acquire_stream(key_id, %{max_streams: max}),
     do: GenServer.call(__MODULE__, {:acquire, key_id, max, self()})
 
   @spec release_stream(term()) :: :ok
-  def release_stream(nil), do: :ok
+  def release_stream(nil), do: GenServer.cast(__MODULE__, {:release, @anonymous, self()})
   def release_stream(key_id), do: GenServer.cast(__MODULE__, {:release, key_id, self()})
 
   @doc "Current concurrent stream count for a key."
