@@ -6,7 +6,6 @@ defmodule Conveyor.Ingest.Batch do
   """
 
   alias Conveyor.Bep.Fixture
-  alias Conveyor.Invocations
 
   @type t :: %__MODULE__{}
 
@@ -212,7 +211,7 @@ defmodule Conveyor.Ingest.Batch do
   the frames into the stored payload (a writer shard passes its own compressor).
   """
   @spec event_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def event_segment_row(batch, compress \\ &Invocations.compress_bep/1)
+  def event_segment_row(batch, compress \\ &Conveyor.RawStore.Codec.compress_bep/1)
   def event_segment_row(%__MODULE__{events: []}, _compress), do: nil
 
   def event_segment_row(%__MODULE__{} = b, compress) do
@@ -240,7 +239,7 @@ defmodule Conveyor.Ingest.Batch do
 
   @doc "The `log_segments` row for this batch, or nil when it holds no log text."
   @spec log_segment_row(t(), (iodata() -> binary())) :: map() | nil
-  def log_segment_row(batch, compress \\ &Invocations.compress/1)
+  def log_segment_row(batch, compress \\ &Conveyor.RawStore.Codec.compress/1)
   def log_segment_row(%__MODULE__{log: []}, _compress), do: nil
 
   def log_segment_row(%__MODULE__{} = b, compress) do

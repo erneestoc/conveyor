@@ -30,6 +30,7 @@ defmodule Conveyor.RawArchive do
   alias Conveyor.{Blobs, Invocations, Repo}
   alias Conveyor.Ingest.Retry
   alias Conveyor.Invocations.{EventSegment, Invocation, LogSegment}
+  alias Conveyor.RawStore.Codec
   alias Conveyor.Storage.Partitions
 
   @chunk 32
@@ -229,12 +230,12 @@ defmodule Conveyor.RawArchive do
       inv
       |> segment_rows(EventSegment, :payload, [:count])
       |> Stream.map(fn %{count: count, payload: payload} ->
-        data = Invocations.decompress(payload)
+        data = Codec.decompress(payload)
         :counters.add(counts, 1, length(Fixture.frames(data)))
         :counters.add(counts, 2, count)
         data
       end)
-      |> Invocations.zstd_stream(:compress, dictionary: true)
+      |> Codec.stream(:compress, dictionary: true)
 
     with {:ok, blob} <-
            Blobs.put(inv.project_id, chunks,
@@ -260,11 +261,11 @@ defmodule Conveyor.RawArchive do
       inv
       |> segment_rows(LogSegment, :data, [])
       |> Stream.map(fn %{data: data} ->
-        text = Invocations.decompress(data)
+        text = Codec.decompress(data)
         :counters.add(counts, 1, byte_size(text))
         text
       end)
-      |> Invocations.zstd_stream(:compress)
+      |> Codec.stream(:compress)
 
     with {:ok, blob} <-
            Blobs.put(inv.project_id, chunks, source: "raw", content_type: "application/zstd") do
