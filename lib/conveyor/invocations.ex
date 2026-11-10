@@ -36,9 +36,6 @@ defmodule Conveyor.Invocations do
     end
   end
 
-  @spec get!(String.t()) :: Invocation.t()
-  def get!(id), do: Repo.get!(Invocation, id)
-
   @doc """
   Arguments for a background job about an invocation: the id and its project, so the
   worker loads the build inside the project it was enqueued for (`for_job/1`).

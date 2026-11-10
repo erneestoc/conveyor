@@ -20,7 +20,7 @@ defmodule Conveyor.RawLogModeTest do
 
     :ok = await_worker_exit(id)
     assert :ok = Conveyor.Ingest.Verify.check(id, sent - 1)
-    Invocations.get!(id)
+    Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id)
   end
 
   test "blob mode stores bytes in objects and reads them back identically", %{
@@ -118,7 +118,7 @@ defmodule Conveyor.RawLogModeTest do
       set: [finished_at: DateTime.utc_now()]
     )
 
-    inv = Invocations.get!(inv.id)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, inv.id)
     assert inv.raw_status == "segments"
     events = Invocations.events(inv)
     log = Invocations.log(inv)
@@ -126,7 +126,7 @@ defmodule Conveyor.RawLogModeTest do
 
     later = DateTime.add(DateTime.utc_now(), 2, :day)
     assert {:ok, :archived} = RawArchive.archive(inv.id, later)
-    archived = Invocations.get!(inv.id)
+    archived = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, inv.id)
     assert Invocations.archived?(archived)
     assert :ok = Verify.check(inv.id, sent)
     assert Invocations.events(archived) == events

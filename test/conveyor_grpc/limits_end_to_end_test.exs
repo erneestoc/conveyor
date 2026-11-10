@@ -90,7 +90,7 @@ defmodule Conveyor.Grpc.LimitsEndToEndTest do
 
     assert {:ok, r} = Replay.run(fixture("clean_build_and_test"), port: port, api_key: plaintext)
     :ok = await_worker_exit(r.invocation_id)
-    inv = Invocations.get!(r.invocation_id)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, r.invocation_id)
     log = Invocations.log(inv)
     assert log =~ "build log truncated at 200 bytes"
     assert inv.log_bytes < 400

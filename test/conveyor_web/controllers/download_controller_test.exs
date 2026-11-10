@@ -17,7 +17,7 @@ defmodule ConveyorWeb.DownloadControllerTest do
       opts: [dir: prev[:dir]]
     )
 
-    inv = Conveyor.Invocations.get!(id)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id)
     gz = :zlib.gzip("{\"traceEvents\":[]}")
 
     # Typed by name (an upload or a fetch): the header comes from the content type.
@@ -29,13 +29,25 @@ defmodule ConveyorWeb.DownloadControllerTest do
 
     # Untyped (a CAS sink upload): the magic number is read through a separate stream.
     {:ok, untyped} = Conveyor.Blobs.put(context().project_id, gz <> "x", content_type: nil)
-    :ok = Conveyor.Artifacts.profile_available(Conveyor.Invocations.get!(id), untyped)
+
+    :ok =
+      Conveyor.Artifacts.profile_available(
+        Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id),
+        untyped
+      )
+
     resp = get(conn, ~p"/invocation/#{id}/download/profile")
     assert get_resp_header(resp, "content-encoding") == ["gzip"]
     assert response(resp, 200) == gz <> "x"
 
     {:ok, json} = Conveyor.Blobs.put(context().project_id, "{}", content_type: nil)
-    :ok = Conveyor.Artifacts.profile_available(Conveyor.Invocations.get!(id), json)
+
+    :ok =
+      Conveyor.Artifacts.profile_available(
+        Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id),
+        json
+      )
+
     resp = get(conn, ~p"/invocation/#{id}/download/profile")
     assert get_resp_header(resp, "content-encoding") == []
     assert response(resp, 200) == "{}"

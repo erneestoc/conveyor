@@ -30,7 +30,7 @@ defmodule Conveyor.InvocationsTest do
   test "get and list with filters and cursor", %{project: project, ids: [newest, middle, oldest]} do
     assert Invocations.get(newest).id == newest
     assert Invocations.get("not-a-uuid") == nil
-    assert Invocations.get!(newest).id == newest
+    assert Conveyor.Repo.get!(Conveyor.Invocations.Invocation, newest).id == newest
 
     assert Enum.map(Invocations.list(project_id: project.id), & &1.id) == [newest, middle, oldest]
     assert Enum.map(Invocations.list(status: "failed"), & &1.id) == [middle]

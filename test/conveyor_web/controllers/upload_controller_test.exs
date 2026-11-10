@@ -60,7 +60,7 @@ defmodule ConveyorWeb.UploadControllerTest do
     upload_key: key,
     project: project
   } do
-    inv = Invocations.get!(id)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id)
     assert inv.profile_status == "unavailable"
 
     body = :crypto.strong_rand_bytes(300_000)
@@ -80,7 +80,10 @@ defmodule ConveyorWeb.UploadControllerTest do
            } = resp
 
     assert digest == Blobs.digest(body)
-    assert %{profile_status: "available", profile_blob: ^digest} = Invocations.get!(id)
+
+    assert %{profile_status: "available", profile_blob: ^digest} =
+             Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id)
+
     assert [%{name: "command.profile.gz", source: "upload"}] = Artifacts.list(inv)
 
     # Replacing by name, default content type from the name.
@@ -92,7 +95,9 @@ defmodule ConveyorWeb.UploadControllerTest do
 
     assert resp["size"] == 2
     assert resp["content_type"] == "application/gzip"
-    assert Invocations.get!(id).profile_blob == Blobs.digest("v2")
+
+    assert Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id).profile_blob ==
+             Blobs.digest("v2")
 
     # Download it back through the UI route.
     conn2 = get(build_conn(), ~p"/invocation/#{id}/artifact/command.profile.gz")
@@ -160,10 +165,10 @@ defmodule ConveyorWeb.UploadControllerTest do
     ])
     |> json_response(201)
 
-    assert Invocations.get!(id).exec_log_status == "available"
+    assert Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id).exec_log_status == "available"
     assert_enqueued(worker: Conveyor.Workers.ParseExecLog, args: %{invocation_id: id})
     assert {:ok, 12} = perform_job(Conveyor.Workers.ParseExecLog, %{invocation_id: id})
-    assert Invocations.get!(id).exec_log_status == "parsed"
+    assert Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id).exec_log_status == "parsed"
   end
 
   test "validates names, ownership and size", %{conn: conn, id: id, upload_key: key} do
@@ -255,7 +260,7 @@ defmodule ConveyorWeb.UploadControllerTest do
 
     :ok = Conveyor.IngestCase.await_worker_exit(uuid)
     assert :ok = Conveyor.Ingest.Verify.check(uuid, length(events))
-    inv = Invocations.get!(uuid)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, uuid)
     assert inv.status == "failed"
     assert inv.tests_failed > 0
     assert inv.api_key_id != nil

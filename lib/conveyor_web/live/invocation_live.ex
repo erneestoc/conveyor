@@ -321,17 +321,25 @@ defmodule ConveyorWeb.InvocationLive do
     {:noreply, socket}
   end
 
+  # The topic is the page's own invocation; the reload stays inside its project (a build
+  # deleted meanwhile leaves the page as it is).
   def handle_info({:artifacts_changed, id}, socket) do
-    inv = Conveyor.Invocations.get!(id)
+    project_id = socket.assigns.invocation.project_id
 
-    {:noreply,
-     assign(socket,
-       invocation: inv,
-       artifacts: Conveyor.Artifacts.list(inv),
-       profile_summary: profile_summary(inv),
-       exec_summary: Conveyor.ExecLog.summary(inv),
-       exec_log: if(loaded?(socket, :actions), do: exec_log_view(inv))
-     )}
+    case Conveyor.Invocations.get(id, project_ids: [project_id]) do
+      nil ->
+        {:noreply, socket}
+
+      inv ->
+        {:noreply,
+         assign(socket,
+           invocation: inv,
+           artifacts: Conveyor.Artifacts.list(inv),
+           profile_summary: profile_summary(inv),
+           exec_summary: Conveyor.ExecLog.summary(inv),
+           exec_log: if(loaded?(socket, :actions), do: exec_log_view(inv))
+         )}
+    end
   end
 
   def handle_info({:log_chunks, chunks, offset}, socket) do

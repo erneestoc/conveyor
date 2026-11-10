@@ -90,8 +90,12 @@ defmodule ConveyorWeb.InvocationLiveTest do
 
     {:ok, clean} = Conveyor.ExecLog.parse(File.read!("test/fixtures/execlog/clean.log.zst"))
     {:ok, changed} = Conveyor.ExecLog.parse(File.read!("test/fixtures/execlog/changed.log.zst"))
-    Conveyor.ExecLog.store!(Conveyor.Invocations.get!(older_id), clean)
-    Conveyor.ExecLog.store!(Conveyor.Invocations.get!(newer_id), changed)
+    Conveyor.ExecLog.store!(Conveyor.Repo.get!(Conveyor.Invocations.Invocation, older_id), clean)
+
+    Conveyor.ExecLog.store!(
+      Conveyor.Repo.get!(Conveyor.Invocations.Invocation, newer_id),
+      changed
+    )
 
     {:ok, view, _} = live(conn, ~p"/invocation/#{newer_id}/actions")
     assert has_element?(view, "#exec-log-summary", "8 spawns")
@@ -116,14 +120,14 @@ defmodule ConveyorWeb.InvocationLiveTest do
     assert has_element?(view, "#stat-exec-log", "8 ran · 0 cached")
 
     # Spawns expired by retention: the tab says so and the overview stat reads "expired".
-    older = Conveyor.Invocations.get!(older_id)
+    older = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, older_id)
 
     older
     |> Ecto.Changeset.change(started_at: DateTime.add(DateTime.utc_now(), -40, :day))
     |> Conveyor.Repo.update!()
 
     # The fixtures carry their recording date; keep the newer build inside retention.
-    Conveyor.Invocations.get!(newer_id)
+    Conveyor.Repo.get!(Conveyor.Invocations.Invocation, newer_id)
     |> Ecto.Changeset.change(started_at: DateTime.utc_now())
     |> Conveyor.Repo.update!()
 
@@ -139,10 +143,19 @@ defmodule ConveyorWeb.InvocationLiveTest do
     assert has_element?(overview, "#stat-exec-log-expired", "expired")
 
     # Status changes arrive over PubSub (the parse worker broadcasts artifacts_changed).
-    Conveyor.ExecLog.set_status(Conveyor.Invocations.get!(failed_id), "available")
+    Conveyor.ExecLog.set_status(
+      Conveyor.Repo.get!(Conveyor.Invocations.Invocation, failed_id),
+      "available"
+    )
+
     {:ok, view, _} = live(conn, ~p"/invocation/#{failed_id}/actions")
     assert has_element?(view, "#exec-log-pending")
-    Conveyor.ExecLog.set_status(Conveyor.Invocations.get!(failed_id), "failed")
+
+    Conveyor.ExecLog.set_status(
+      Conveyor.Repo.get!(Conveyor.Invocations.Invocation, failed_id),
+      "failed"
+    )
+
     send(view.pid, {:artifacts_changed, failed_id})
     assert has_element?(view, "#exec-log-failed")
   end
@@ -224,7 +237,7 @@ defmodule ConveyorWeb.InvocationLiveTest do
         content_type: "application/gzip"
       )
 
-    inv = Conveyor.Invocations.get!(id)
+    inv = Conveyor.Repo.get!(Conveyor.Invocations.Invocation, id)
     :ok = Conveyor.Artifacts.profile_available(inv, blob)
 
     assert :ok =
