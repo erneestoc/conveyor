@@ -38,6 +38,7 @@ shown.
 | `INGEST_WRITER_SHARDS` | schedulers | parallel group-commit writers; on a networked database (RDS over TLS) writers mostly wait on round trips, so set 3–4 per vCPU (the trial runs 8 on 2 vCPUs) |
 | `INGEST_WRITER_FLUSH_MS` | `20` | group commit interval |
 | `INGEST_WRITER_MAX_PENDING` | `256` | batches a writer shard commits early instead of waiting for the interval |
+| `INGEST_WRITER_DEADLINE_MS` | `20000` | how long after a worker submits a batch its commit may still start. Later than that the batch fails as expired without touching the database, and a commit that has started runs with the rest of the budget as its timeout. Bazel waits 30 s for an acknowledgement and then resends on a new stream, so an outcome after that would only fence the stream that took over; keep this under the client's ack timeout minus `INGEST_BATCH_FLUSH_MS` |
 | `INGEST_TAG_FLUSH_MS` | `1000` | tag facet count write interval |
 | `INGEST_MAX_UNACKED_EVENTS` | see config | backpressure threshold per stream |
 | `INGEST_IDLE_TIMEOUT_MS` | `600000` | a silent stream is marked disconnected after this |

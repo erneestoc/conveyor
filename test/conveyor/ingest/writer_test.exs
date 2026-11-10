@@ -366,7 +366,7 @@ defmodule Conveyor.Ingest.WriterTest do
   defp blob_mode! do
     previous = Application.get_env(:conveyor, Conveyor.RawLog)
     on_exit(fn -> Application.put_env(:conveyor, Conveyor.RawLog, previous) end)
-    Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob)
+    Application.put_env(:conveyor, Conveyor.RawLog, mode: :blob, flush_ms: 5)
   end
 
   defp objects, do: Repo.aggregate(from(o in "raw_log_objects"), :count)
@@ -465,6 +465,31 @@ defmodule Conveyor.Ingest.WriterTest do
 
     for id <- ids, do: assert(Repo.get!(Invocation, id).last_event_seq == 0)
     assert objects() == before + 1
+  end
+
+  @tag :capture_log
+  test "a batch past its deadline is expired: never attempted, nothing written, its followers with it",
+       %{id: id, project: project} do
+    blob_mode!()
+    before = objects()
+    # A shard whose batches are due the moment they arrive.
+    writer = start_supervised!({Writer, shard: 778, deadline_ms: 0})
+
+    batches = [
+      batch(id, project, 1, &Batch.add_event(&1, 1, "started", "a")),
+      batch(id, project, 2, &Batch.add_event(&1, 2, "progress", "b")),
+      batch(invocation!(project), project, 1, &Batch.add_event(&1, 1, "started", "c"))
+    ]
+
+    Enum.each(batches, &Writer.submit(writer, &1))
+
+    for b <- batches do
+      ref = b.ref
+      assert_receive {:batch_failed, ^ref, :expired}, 2_000
+    end
+
+    assert Repo.get!(Invocation, id).last_event_seq == 0
+    assert objects() == before
   end
 
   test "a batch that ends a stream is committed without waiting for the writer's hold", %{

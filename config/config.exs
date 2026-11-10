@@ -32,6 +32,10 @@ config :conveyor, Conveyor.Ingest,
   # waits between a group's attempts while the database or the store is unavailable
   # (Conveyor.Ingest.Writer.Policy); after the last one the group fails
   writer_retry_delays: [50, 200, 800],
+  # a batch that has not started its commit this long after the worker submitted it fails
+  # as :expired; a commit that has started runs with the rest as its timeout. Bazel waits
+  # 30 s for an acknowledgement before it resends on a new stream
+  writer_deadline_ms: 20_000,
   # tag_keys counts are coalesced per node and written once per interval
   tag_flush_ms: 1000,
   broadcast_interval_ms: 250

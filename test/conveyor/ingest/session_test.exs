@@ -164,6 +164,12 @@ defmodule Conveyor.Ingest.SessionTest do
           :stop
         ]}
      ]},
+    {"an expired batch is a failed batch: its waiters hear the reason and the session stops", [],
+     [
+       {{:push, 1, :c1}, [{:arm, :flush}, {:reply, 1, :ok}]},
+       {{:timer, :flush}, [{:submit, 1..1}]},
+       {{:fail, 1, :expired}, [{:nack, :c1, 1, :expired}, :stop]}
+     ]},
     # --- the writer goes away: outcome unknown ----------------------------------------------
     {"a writer that goes away with batches in hand fails the stream", [],
      [
