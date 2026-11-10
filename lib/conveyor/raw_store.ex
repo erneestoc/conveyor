@@ -76,7 +76,8 @@ defmodule Conveyor.RawStore do
 
   @doc """
   The segment row of a unit's events (`{seq, kind, message}` in sequence order; nil when
-  there are none), their messages framed and compressed by `compress` (a writer shard
+  there are none; the kinds are not stored: nothing ever read the `kinds` column, which
+  keeps its default), their messages framed and compressed by `compress` (a writer shard
   passes its own, `compressors/0`).
   """
   @spec event_segment(map(), [{pos_integer(), String.t(), binary()}], (iodata() -> binary())) ::
@@ -93,7 +94,6 @@ defmodule Conveyor.RawStore do
       first_seq: first,
       last_seq: last,
       count: length(events),
-      kinds: events |> Enum.map(&elem(&1, 1)) |> Enum.uniq(),
       byte_size: bytes,
       payload: compress.(Enum.map(events, fn {_seq, _kind, message} -> Codec.frame(message) end))
     }

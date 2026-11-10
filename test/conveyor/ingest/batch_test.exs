@@ -30,8 +30,9 @@ defmodule Conveyor.Ingest.BatchTest do
 
     row = Batch.event_segment_row(batch)
 
-    assert %{first_seq: 3, last_seq: 4, count: 2, kinds: ["started", "progress"], byte_size: 7} =
-             row
+    assert %{first_seq: 3, last_seq: 4, count: 2, byte_size: 7} = row
+    # Nothing reads the kinds of a segment: the column keeps its default.
+    refute Map.has_key?(row, :kinds)
 
     assert row.payload |> Codec.decompress() |> Fixture.frames() == ["abc", "defg"]
 
@@ -105,8 +106,7 @@ defmodule Conveyor.Ingest.BatchTest do
     assert ref == a.ref
     assert Batch.event_count(m) == 2
 
-    assert %{first_seq: 1, last_seq: 2, count: 2, kinds: ["started", "progress"]} =
-             Batch.event_segment_row(m)
+    assert %{first_seq: 1, last_seq: 2, count: 2} = Batch.event_segment_row(m)
 
     assert m
            |> Batch.event_segment_row()

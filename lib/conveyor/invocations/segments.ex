@@ -9,7 +9,6 @@ defmodule Conveyor.Invocations.EventSegment do
     field :first_seq, :integer, primary_key: true
     field :last_seq, :integer
     field :count, :integer
-    field :kinds, {:array, :string}, default: []
     field :byte_size, :integer
     field :payload, :binary
     # Blob mode (PLAN §25 step 2): the bytes live in a raw-log object, not in the row.
