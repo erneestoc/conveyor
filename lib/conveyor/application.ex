@@ -37,13 +37,10 @@ defmodule Conveyor.Application do
   defp grpc_server_opts do
     conf = Application.fetch_env!(:conveyor, Conveyor.Grpc)
 
-    [
-      endpoint: Conveyor.Grpc.Endpoint,
-      port: Keyword.fetch!(conf, :port),
-      start_server: Keyword.get(conf, :start_server, true),
-      # Bazel can send multi-megabyte NamedSetOfFiles and progress chunks.
-      max_body_size: Keyword.get(conf, :max_body_size, 64 * 1024 * 1024)
-    ]
+    Conveyor.Grpc.Endpoint.server_opts(
+      Keyword.fetch!(conf, :port),
+      Keyword.take(conf, [:start_server, :max_body_size])
+    )
   end
 
   # SIGTERM: stop taking new streams, let balancers notice, finish open streams, then stop.

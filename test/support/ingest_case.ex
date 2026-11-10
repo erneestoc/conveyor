@@ -20,11 +20,7 @@ defmodule Conveyor.IngestCase do
 
     pid =
       start_supervised!(
-        {GRPC.Server.Supervisor,
-         endpoint: Conveyor.Grpc.Endpoint,
-         port: port,
-         start_server: true,
-         max_body_size: 64 * 1024 * 1024},
+        {GRPC.Server.Supervisor, Conveyor.Grpc.Endpoint.server_opts(port)},
         id: {:grpc_server, port}
       )
 
