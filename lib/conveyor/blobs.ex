@@ -310,8 +310,9 @@ defmodule Conveyor.Blobs do
   # without bytes, which `pin/2` refuses and the next prune removes.
   #
   # Rows written before prefixes existed (`prefix` nil) may share one flat object across
-  # projects (the migration copied rows per referencing project): the object goes only
-  # when the last such row does.
+  # projects (the migration copied rows per referencing project), and so may rows of two
+  # projects that were given one prefix before that was refused: the object goes only when
+  # the last such row does (`shared_object?/1`).
   defp delete_blob(%Blob{} = blob, mode \\ :checked) do
     now = DateTime.utc_now()
 
@@ -361,7 +362,7 @@ defmodule Conveyor.Blobs do
     {adapter, aopts} = adapter(blob.prefix)
 
     deleted =
-      if blob.prefix == nil and shared_flat_object?(blob),
+      if shared_object?(blob),
         do: :ok,
         else: counted(:delete, adapter.delete(blob.digest, aopts))
 
@@ -393,11 +394,30 @@ defmodule Conveyor.Blobs do
       )
   end
 
-  defp shared_flat_object?(%Blob{project_id: project_id, digest: digest}) do
+  # Whether another project's row points at the same object, in which case only the row
+  # goes. Flat rows (no prefix) were copied per referencing project by the migration.
+  # Prefixed rows share an object only when two projects write under one prefix, which
+  # `Projects.Project` refuses since 2026-11; data from before is handled here: the
+  # projects that write under this prefix today are asked for the digest (primary-key
+  # lookups; `blobs` has no index on the digest alone).
+  defp shared_object?(%Blob{project_id: project_id, digest: digest, prefix: nil}) do
     Repo.exists?(
       from b in Blob,
         where: b.digest == ^digest and is_nil(b.prefix) and b.project_id != ^project_id
     )
+  end
+
+  defp shared_object?(%Blob{project_id: project_id, digest: digest, prefix: prefix}) do
+    case Projects.sharing_prefix(prefix, project_id) do
+      [] ->
+        false
+
+      ids ->
+        Repo.exists?(
+          from b in Blob,
+            where: b.project_id in ^ids and b.digest == ^digest and b.prefix == ^prefix
+        )
+    end
   end
 
   @doc """

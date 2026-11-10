@@ -64,7 +64,8 @@ defmodule Conveyor.Projects do
   its execution-log retention (`"spawn_retention_days"`, blank = `RETENTION_SPAWN_DAYS`;
   spawns never outlive their build) and blob key prefix (`"blob_prefix"`, blank = the
   slug). Blobs already stored keep the prefix they were written under, so a change never
-  orphans them.
+  orphans them. A prefix the server reserves (`Project.reserved_prefixes/0`) or one that
+  another project uses or has blobs under is refused: a project owns its prefix.
   """
   @spec put_storage(Project.t(), map()) :: {:ok, Project.t()} | {:error, String.t()}
   def put_storage(%Project{} = project, attrs) do
@@ -79,10 +80,13 @@ defmodule Conveyor.Projects do
 
       case update_project(project, %{settings: settings}) do
         {:ok, project} -> {:ok, project}
-        {:error, changeset} -> {:error, inspect(changeset.errors)}
+        {:error, changeset} -> {:error, error_text(changeset)}
       end
     end
   end
+
+  defp error_text(%Ecto.Changeset{errors: errors}),
+    do: Enum.map_join(errors, "; ", fn {_field, {message, _}} -> message end)
 
   defp put_or_drop(settings, key, nil), do: Map.delete(settings, key)
   defp put_or_drop(settings, key, value), do: Map.put(settings, key, value)
@@ -137,11 +141,24 @@ defmodule Conveyor.Projects do
   project or a project id; blob writes call this once per blob.
   """
   @spec blob_prefix(Project.t() | integer()) :: String.t()
-  def blob_prefix(%Project{slug: slug, settings: settings}),
-    do: Map.get(settings || %{}, "blob_prefix") || slug
+  def blob_prefix(%Project{} = project), do: Project.blob_prefix(project)
 
   def blob_prefix(project_id) when is_integer(project_id),
     do: project_id |> get_project!() |> blob_prefix()
+
+  @doc """
+  Ids of the other projects that write blobs under `prefix` today. Empty unless two
+  projects were given one prefix before `Project.changeset/2` refused that.
+  """
+  @spec sharing_prefix(String.t(), integer()) :: [integer()]
+  def sharing_prefix(prefix, project_id) do
+    Repo.all(
+      from p in Project,
+        where: p.id != ^project_id,
+        where: fragment("coalesce(?->>'blob_prefix', ?) = ?", p.settings, p.slug, ^prefix),
+        select: p.id
+    )
+  end
 
   @spec create_project(map()) :: {:ok, Project.t()} | {:error, Ecto.Changeset.t()}
   def create_project(attrs), do: %Project{} |> Project.changeset(attrs) |> Repo.insert()

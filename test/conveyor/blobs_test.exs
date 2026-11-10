@@ -49,6 +49,60 @@ defmodule Conveyor.BlobsTest do
     assert {:error, :not_found} = Blobs.read(project.id, digest)
   end
 
+  test "a project owns its blob prefix: reserved and taken prefixes are refused", %{
+    project: project
+  } do
+    # The raw log's objects live under rawlog/: no project may write there.
+    assert {:error, changeset} = Projects.create_project(%{slug: "rawlog", name: "Raw"})
+    assert %{slug: [reserved]} = errors_on(changeset)
+    assert reserved =~ "reserved"
+    assert {:error, message} = Projects.put_storage(project, %{"blob_prefix" => "rawlog"})
+    assert message =~ "reserved"
+
+    # Another project's slug, another project's setting, and a slug that is one.
+    {:ok, other} = Projects.create_project(%{slug: "prefix-other", name: "Other"})
+    assert {:error, taken} = Projects.put_storage(project, %{"blob_prefix" => "prefix-other"})
+    assert taken =~ "another project"
+    {:ok, other} = Projects.put_storage(other, %{"blob_prefix" => "custom"})
+    assert {:error, _} = Projects.put_storage(project, %{"blob_prefix" => "custom"})
+    assert {:error, changeset} = Projects.create_project(%{slug: "custom", name: "Custom"})
+    assert %{slug: [_]} = errors_on(changeset)
+
+    # A prefix another project has blobs under stays taken after that project moved on.
+    assert {:ok, blob} = Blobs.put(other, "written under custom")
+    {:ok, other} = Projects.put_storage(other, %{"blob_prefix" => "moved"})
+    assert {:error, _} = Projects.put_storage(project, %{"blob_prefix" => "custom"})
+    assert :ok = Blobs.delete(other, blob.digest)
+    assert {:ok, project} = Projects.put_storage(project, %{"blob_prefix" => "custom"})
+
+    # Its own prefix, and settings that do not touch the prefix, are always accepted.
+    assert {:ok, project} = Projects.put_storage(project, %{"blob_prefix" => "custom"})
+    assert {:ok, _} = Projects.update_project(project, %{name: "Renamed"})
+  end
+
+  test "two projects left on one prefix by older data do not delete each other's bytes", %{
+    project: project
+  } do
+    {:ok, other} = Projects.create_project(%{slug: "prefix-twin", name: "Twin"})
+    # What the settings allowed before prefixes were checked: written past the changeset.
+    Repo.update_all(from(p in Projects.Project, where: p.id == ^other.id),
+      set: [settings: %{"blob_prefix" => project.slug}]
+    )
+
+    other = Projects.get_project!(other.id)
+    content = "one object, two rows #{System.unique_integer()}"
+    digest = Blobs.digest(content)
+    assert {:ok, %{prefix: prefix}} = Blobs.put(project, content)
+    assert {:ok, %{prefix: ^prefix}} = Blobs.put(other, content)
+
+    # The first row goes without the object; the last one takes it along.
+    assert :ok = Blobs.delete(project, digest)
+    assert {:ok, ^content} = Blobs.read(other, digest)
+    assert :ok = Blobs.delete(other, digest)
+    {Disk, opts} = Blobs.adapter()
+    refute File.regular?(Disk.path(digest, Keyword.put(opts, :project_prefix, prefix)))
+  end
+
   test "projects never share blobs: the same content is stored once per project", %{
     project: project
   } do
