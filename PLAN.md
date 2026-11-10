@@ -1494,3 +1494,313 @@ accounts per byte, or archives object-first, must go by the rows' ranges and not
 object is fully referenced. The registration row per put is still its own transaction
 (51,207 of them for 9,969 flushes in the review's numbers); a prefix lease per shard would
 remove it and needs `RawLog.tla`'s `Registered` re-modelled.
+
+### 26.4 Admission (candidate 2)
+
+**The problem** (measured 2026-11-06, the linearity run in §25). No signal reached
+admission from commit latency. A node whose commits fell behind kept taking streams and
+events it would acknowledge after the client's 30 s ack timeout; the clients resent
+through the balancer; the late commits fenced the resumed streams; every tier amplified
+(5,357 of 5,496 reporting builds failed at 12,000 paced streams). The limits that existed
+were shallow and each fed by a different signal: a drain flag checked in the auth
+interceptor and the health controller, a per-key stream count and token bucket in the
+publish server, `max_unacked_events` in the session, `SELECT 1` for readiness. The HTTP
+upload and `Ingest.push_all/3` passed none of them.
+
+**The module.** `Conveyor.Admission` answers one question, "does this node take more
+work: accept, slow down or refuse", at three doors.
+
+| Door | Interface | Callers |
+|---|---|---|
+| a new stream | `open_stream(key_id, limits) :: {:ok, ticket} \| {:refuse, reason}` when it opens (takes the key's slot; draining and the key's limit are judged here), `build(ticket \| key_id, invocation_id, resumed?, announced?) :: :ok \| {:refuse, reason}` once the build is known (pressure is judged here), `bind(ticket, invocation_id) :: ticket`, `close_stream(ticket)` | `PublishBuildEventServer` (the stream; its first event), `Ingest.lifecycle/2` (the attempt-started notification), `Ingest.push_all/3` (the HTTP upload, the seed) |
+| the next event | `event(ticket) :: :ok \| {:refuse, reason}`; returns late when the key is above its rate | the same stream loops |
+| readiness | `ready() :: %{ready, state, checks: %{database, draining, overloaded}}` | `HealthController` |
+
+Also on the interface: `drain/1`, `draining?/0`, `resume/0` (what `Conveyor.Drain` was),
+`state/0`, `streams/0`, `measure/0` (the gauges), and the one mapping from a refusal to
+what the client sees, `grpc_error/2` and `http_error/2` (`:draining`, `:overloaded`,
+`:key_share` → UNAVAILABLE / 503; `:key_streams` → RESOURCE_EXHAUSTED / 429). `Limits`
+keeps the per-key counters behind it and decides nothing; `Drain` is gone; the auth
+interceptor no longer knows about draining.
+
+**Inside.** Three parts, each with its own tests.
+
+| Part | Module | Interface | Pure |
+|---|---|---|---|
+| the decisions | `Admission.Policy` | `pressure(signals, config) :: float`, `step(state, signals, now_ms, config) :: state`, `decide(door, state, request) :: :accept \| {:slow, ms} \| {:refuse, reason}` | yes |
+| the signals | `Admission.Sampler` | a process: every 250 ms `signals → Policy.step/4 →` the cell; `inject/1`, `sample/1` for tests | no |
+| the cell | eight atomics behind `Admission` | level, the shares of new builds and of open streams' events refused, draining, ready, database, the fair share, pressure | |
+
+The seam is the signal source: a function returning `%{oldest_ms, bytes, batches}`. In
+production it is `WriterPool.pressure/0`; a test injects a map (`Sampler.inject(signals:
+%{oldest_ms: 6_000})`) and the whole stack above it, the gRPC server included, behaves as
+on a node whose commits are six seconds behind, without a database under load. Two
+adapters, so it is a real seam. The probe (`SELECT 1` in a process beside the sampler) is
+the second one.
+
+The event door is not a function call into the policy: the sampler publishes the policy's
+answer (`events_pct`) and a stream's ticket carries its build's bucket and the cell, so
+the check is one `:atomics.get/2` and a comparison.
+Measured with a `:timer.tc` loop of 2M calls: 149 ns per event with an API key against
+142 ns for `Limits.throttle/2` before (the two ETS operations of the token bucket are the
+cost), 10 ns against 6 ns without a key. No GenServer call per event, before or after.
+
+**Pressure.** One number, in deadlines:
+
+    pressure = max( (oldest_ms - hold_ms) / deadline_ms,
+                    queue_ms / (2 * queue_target_ms),
+                    bytes / max_backlog_bytes )
+
+`oldest_ms` is the age of the oldest batch any shard has not answered, mailbox included
+(§26.3): it is what the client is waiting for, and it reaches `deadline_ms` exactly when
+batches expire. The hold is subtracted because a batch is meant to wait that long (20 ms
+in postgres mode, `RAW_LOG_FLUSH_MS` in blob mode). `queue_ms` is the mean wait for a
+database connection since the last sample, read from the query histogram's counters (no
+work per query); twice the pool's `queue_target` counts as a full deadline because
+DBConnection starts dropping requests when the target is exceeded for an interval.
+`bytes` is memory: the writer's mailbox is unbounded. The policy uses the maximum of the
+last four samples: the gauge reads 0 between a flush and the next batch, and since an age
+is already an integral of the delay, a single sample above a threshold is not a spike.
+
+**Levels and thresholds.**
+
+| Level | Enters | Leaves | Refused | Why there |
+|---|---|---|---|---|
+| 0 normal | | | nothing | |
+| 1 elevated | 0.15 (3 s) | 0.05 (1 s) | new builds of a key holding more than its share (streams ÷ keys with streams, when there are at least two keys) | healthy is a hold plus a commit, well under a second (§26.3: flush p99 42 ms flat out; the paced fleet level that held had ack p99 3.15 s of which 3 s are holds). Three seconds of waiting beyond the hold is not health; the first to give is the key that takes the most |
+| 2 shedding | 0.25 (5 s) | 0.10 (2 s) | a share of the new builds growing linearly from none at 0.25 to all at 0.50 (10 s, `shed_all`): at the attempt-started notification (no row yet) or at the first event of a stream that is not a build in progress | a new build adds load for its whole length, and what is already admitted keeps arriving: the queue has to be slowed while there are 15 s left, not 2. 5 s is also where the runbook already said "commits are not keeping up" |
+| 3 critical | 0.75 (15 s) | 0.50 (10 s) | every new build, and a share of the builds in progress growing linearly from none at 0.75 to all at 1.0: their next event, and their stream when they reconnect | an event accepted behind a 15 s queue is acknowledged after about 17 s with the 2 s batch hold in front, if nothing gets worse; behind a 20 s queue its batch expires, and the client learns that after 22 s of waiting. Refusing it now costs the client nothing it would have got |
+
+The exit thresholds are at 40–67 % of the enter thresholds so that a level is left when
+the queue has drained, not when it dips: admitting again at 4.9 s what was refused at 5 s
+would hold the node at the threshold and alternate every sample.
+
+**Graded inside a level, sticky per build, slow to take back.** Three properties that the
+first version did not have and that the experiment below forced, one run each.
+
+*Graded.* The levels say what kind of work is refused; how much of it follows the
+pressure. In shedding, the share of new builds refused grows from none at 0.25 to all at
+0.50; in critical, the share of builds in progress refused grows from none at 0.75 to all
+at 1.0, where their batches would expire anyway. The first version refused every new
+build from 5 s and none below 2 s: with builds that last 22 s the node emptied, took
+everything back, and was over the deadline again one build length later.
+
+*Sticky.* A build's bucket (0–99) is a hash of its invocation id, the same on every node
+and on every reconnect, and a build is refused while the share that applies to it is
+above its bucket: at the notification, at the first event of its stream, at every later
+event. So a retry does not get lucky on another node, and a build in progress that was
+shed stays shed when it reconnects, which is what lets the ones that were kept finish.
+The second version drew a stream's bucket when the stream opened and took every resumed
+stream below the critical level: the builds it had just shed came back as "in progress"
+the moment the pressure fell, all of them, and the node cycled between empty and expired
+with the period of two commits.
+
+*Slow to take back.* A refused share rises with the pressure at once and falls by at most
+2 points a second (`readmit_per_s`; 50 s from all to none), whatever the level. The
+pressure is an age: it shows what was admitted only a commit later, and a node that has
+just shed everything reads 0. Without the limit it reopened to every waiting client in
+the same second. The price is paid after the cause is gone: a node that was refusing
+everything needs up to 50 s to take all builds again. A variant that doubled the pace
+every second the node read idle (to shorten that) was run and removed: a node that has
+shed everything reads idle too, and it reopened as before (151 builds completed in the
+throttled phase at 200 ms against 271 without the doubling).
+
+The hysteresis of the levels is for what stays binary: the key above its share,
+readiness, the reported state.
+
+**Resumed before new.** A build in progress is worth more than a new one: its events are
+partly committed, its row exists, and a failed upload leaves an `in_progress` row. At the
+door, "in progress" is known cheaply in two ways: the stream's first event is past
+sequence 1 (Bazel resends from its last acknowledgement, so something committed
+somewhere), or the build's session lives on this node (a registry lookup). A third way
+costs a primary-key read and is only used by a node above level 0 for a stream that
+starts at sequence 1: the build's row exists (`Ingest.announced?/2`), which means its
+notification was admitted, here or on another node, before the shedding began. Without
+it, the first local run left rows behind for builds admitted at the notification and
+refused at the stream. A retry of which nothing was acknowledged and which has no row
+looks new and is treated as new.
+
+**Per-key fairness.** Level 1 exists for it: before anybody else loses anything, the key
+that holds more than the mean number of streams per key loses its new builds. It uses the
+stream counters `Limits` already keeps (one ETS read at the build door, none per event);
+the share is computed by the sampler. With one key, or without keys, nobody is above the
+share. Event-rate fairness is the token bucket, as before.
+
+**Readiness, and the failure mode it must not have.** The obvious rule ("not ready while
+shedding") is wrong when the database is the bottleneck: every node sees the same
+pressure, every node turns 503, and the balancer has no target (an NLB then fails open,
+Kubernetes removes every endpoint, an auto-scaling group on ELB health replaces healthy
+nodes, which the trial did on 2026-09-22 when readiness ran `SELECT 1` against a
+throttled database). A node should shed load, not disappear: the doors already answer in
+microseconds. So readiness is relative. Each sampler tells the others its level and
+whether it reaches the database (one PubSub message per sample); a node reports not ready
+for pressure only after 10 s of shedding **and** when more than half of the peers it has
+heard from in the last 2 s are not shedding. Alone, partitioned or under a shared cause it
+stays in. Once out it stays out at least 30 s (a balancer needs two or three probes to
+notice either way) and for as long as it is still the outlier. The database check follows
+the same rule (three failed probes, 2 s apart, unless at least half of the peers have lost
+it too), except that a node without peers keeps the old meaning, and a node that has
+never reached its database is not ready. The probe runs beside the sampler, so
+`/health/ready` is a read of the cell: a slow database no longer makes the probe itself
+time out. Table-tested in `policy_test.exs` ("every node pressured: none leaves").
+
+**Defects fixed first**, each with a test that failed before:
+
+| | Defect | Evidence | Fix | Cost |
+|---|---|---|---|---|
+| F1 | every histogram sample was an ETS row until the next scrape | 2M acks and 2M queries without a scrape: 6,000,028 rows, 1.12 GB; 4.5 µs wall per ack with eight processes on the bag's one key | `Conveyor.Histogram`: fixed buckets on `:counters`, same names, same exposition text. Chosen over a periodic internal scrape, which bounds the memory but keeps the insert and the hot key. The ack counter is the histogram's count (the library's counter was the second hot key). Ack buckets to 60 s; resent, already committed events counted apart (`{:ack_again, …}` from the session) | 479 → 174 ns per ack alone, 4,457 → 85 ns wall with eight processes; a query event 836 → 217 ns; scrape 1,987 → 2 ms |
+| F2 | `grpc_stream_h` grants window for every DATA frame on receipt | read in `deps/grpc_server/src/grpc_stream_h.erl` (`data/4` emits `{flow, Size}` whether or not a read is waiting); a session suspended while a client sends 8 MB: 13.4 MB held by the connection process | `Conveyor.Grpc.FlowControl`, a cowboy stream handler in front of it (the adapter merges `adapter_opts` over its `stream_handlers`): the grant of unread data is withheld until the read, which the inner handler already grants. Nothing under `deps/` changes; `flow_control_test.exs` stalls a reader against the real server | the same stall holds 160–310 KB and the client blocks in its send |
+| F3 | with auth `:none` streams were not counted | `Limits.total_streams/0` 0 with three open | keyless streams take an (unlimited) slot under one anonymous entry | none |
+| F4 | found by the experiment: a statement cancelled at its timeout (`query_canceled`, 57014) was classed as a row the database refuses | 7,128 "data" group failures on two nodes in three minutes: every group that timed out was halved, and its halves timed out | `Writer.Transaction` classes it as unavailable (wait, then fail the group whole), as §26.3's table already said "timed out" should be. Test: a group with a cancelled statement fails whole | 1 "data" failure in the same run afterwards |
+
+**Tests replaced.** Removed: `drain_test.exs` and the stream-limit and rate tests of
+`limits_end_to_end_test.exs` (now in `admission_end_to_end_test.exs`, through the one
+module), the drain half of `health_controller_test.exs`, `Limits.throttle/2`'s test.
+Added: `admission/policy_test.exs` (58 tests: pressure, levels and hysteresis, the two
+refused shares and how slowly they come back, readiness including the all-nodes-pressured
+case, the decision table of the three doors; no process), `admission/sampler_test.exs` (injection, the node's own signals, peers,
+the probe), `admission_test.exs` (the doors against an injected pressure, draining, the
+wire mapping), `admission_end_to_end_test.exs` (gRPC: a shedding node refuses a new build
+and leaves no row while a build in progress goes on and reconnects; an open stream's next
+event refused at the deadline is never acknowledged and is resent later; `push_all`),
+readiness and upload tests through the HTTP endpoint, `histogram_test.exs`,
+`flow_control_test.exs`, the open-loop mode in `loadgen_test.exs`, a client that retries like Bazel, and in
+`writer_test.exs` a statement that ran into its timeout (the group is not halved). Suite:
+426 → 517 tests.
+
+**The experiment** (laptop, 2026-11-10; `bench/overload.sh`, summaries in
+`bench/results/overload-*/summary.txt`). The fleet was not available, so the bottleneck is
+induced: two clustered prod nodes (four writer shards each, postgres mode, batch hold 2 s)
+on the bench Postgres, with a trigger on `invocations` that sleeps per updated row while a
+flag row says so. A group commit then costs time in proportion to the builds it carries,
+as on a volume at its IOPS limit. The load is open loop (`--arrival-rate 20`: 20 builds a
+second whatever the completions, paced at one event per 500 ms, about 22 s and 44 events
+per build, so about 440 open streams when healthy) from a client that retries like Bazel
+(`--retries 5 --retry-delay-ms 1000`: 1 s × 1.6ⁿ, counted anew after progress; resumes on
+the other node). Three phases: 40 s healthy, 180 s throttled, 100 s recovered. "Before" is
+`078c6ce` (the defects F1–F3 fixed, no admission); "after" is this section's code as
+committed in `4546d4e` (the summaries' `server=48b1738` is the commit the working tree sat on). 6,401
+builds started in every run; 0 missing acks in every run; the generator never started a
+build late.
+
+| | before, 400 ms/row | after, 400 ms/row | before, 200 ms/row | after, 200 ms/row |
+|---|---|---|---|---|
+| builds completed / failed | **5,634 / 767** | 2,805 / 3,596 | **5,517 / 884** | 2,693 / 3,708 |
+| completed / failed that ended in the throttled 180 s | 1 / 767 | 81 / 3,294 | 4 / 884 | **271** / 3,318 |
+| completed / failed that ended in the recovery | 5,257 / 0 | 2,341 / 302 | 5,131 / 0 | 2,041 / 390 |
+| completed builds that had reconnected; their reconnects | 2,793; 9,599 | 769; 2,827 | 2,670; 9,246 | 679; 3,146 |
+| fenced commits | 56,922 | **5,705** | 62,297 | **3,766** |
+| expired batches | 45,192 | **3,086** | 42,390 | **1,811** |
+| failed group commits: unavailable / data / fenced | 771 / 7,128 / 6,019 | 263 / 1 / 394 | 984 / 8,741 / 6,777 | 151 / 0 / 312 |
+| refused: builds / events of open streams | | 22,795 / 962 | | 24,662 / 454 |
+| peak open streams on the nodes (healthy: 440) | 3,258 | **542** | 3,021 | **533** |
+| ack p50 / p99 / max, completed builds | 1.5 / 19.4 / 29.7 s | 1.0 / 12.4 / 22.0 s | 1.5 / 18.4 / 22.1 s | 1.5 / 17.2 / 21.9 s |
+| peak age of the oldest batch; peak level | 26.2 s; – | 23.3 s; critical | 21.0 s; – | 20.9 s; critical |
+| after the throttle is lifted: oldest batch under 2 s | 4 s | 1 s | 1 s | 2 s |
+| first 10 s window without a failure and with acks under 5 s | 51 s | 61 s | 61 s | 51 s |
+| rows left `in_progress` (+ `disconnected`) | 766 | 700 | 883 | 142 (+ 587) |
+
+Read honestly:
+
+- **Admission did not keep the nodes under the deadline in this experiment.** Both
+  throttles cut the commit capacity to a fraction of what the 440 open streams needed
+  (a commit of what was already admitted took longer than 20 s), and the node learns it
+  from an age: the pressure rose one second per second from the moment the first slow
+  commit began, shedding new builds started at 5 s, and by then the streams that would
+  expire were all inside. The open streams of the first cycle died in every run, with or
+  without admission. Afterwards the nodes with admission cycled: shed everything, take
+  builds back at 2 points a second, overshoot what they can commit before the first late
+  commit shows, shed again (period about 60 s at 200 ms/row). They never settled.
+- **What it bought: an order of magnitude less amplification.** Fenced commits −90 to
+  −94 %, expired batches −93 to −96 %, open streams bounded at 1.2 times the healthy
+  number instead of 7 times (the unprotected nodes held up to 3,258 streams, every one of
+  them resending), no group halved for a timeout. The nodes were never asked to do work
+  for more than a few hundred streams at a time, and they were out of it one to two
+  seconds after the cause was gone.
+- **What it cost: builds.** Fewer than half as many builds completed with admission
+  (2,805 against 5,634; 2,693 against 5,517). The unprotected node fails slowly: a stream
+  waits about 22 s for its expiry, so a client with five retries stays alive for more
+  than two minutes, and every build that was still retrying when the database came back
+  completed (5,257 and 5,131 of them, in the recovery). A refusal is immediate, and the
+  same five retries are spent in 16 s. For an outage shorter than the clients' patience,
+  waiting beat shedding. During the outage itself the unprotected nodes completed 1 and 4
+  builds in three minutes and admission 81 and 271: neither is service. Had the throttle
+  stayed, the "before" columns would read 0 completed (the trial's 139 of 5,496 on
+  2026-11-06); this run does not show that, it is an inference.
+- **The clients' retry policy decides as much as the server's.** With Bazel's default
+  budget (4 retries, 1 s × 1.6ⁿ as we read its uploader, not re-verified against 9.2: 9 s of backoff) a refused build is lost almost at once; with the
+  documented `--build_event_upload_max_retries=10` it would wait 181 s. An earlier pair of
+  runs with a generator that reconnected within a second (120 s throttled) gave the same
+  picture: 5,563 completed / 38 failed before, 3,285 / 2,316 with the first version.
+- **Rows left behind** are builds whose upload failed after their row existed: about as
+  many either way at 400 ms/row. The 2,849 builds that failed at the notification left none.
+
+What each change during the experiment did (400 ms/row unless noted; throttled-phase
+completions, fenced, expired, peak open streams):
+
+| Version | Completed in the throttled phase | Fenced | Expired | Peak streams |
+|---|---|---|---|---|
+| before | 1 | 56,922 | 45,192 | 3,258 |
+| levels as first written: every new build refused from 5 s, a stream's bucket drawn when it opens | 78 | 16,470 | 2,985 | 874 |
+| + the share of new builds follows the pressure, taken back 2 points a second; `query_canceled` is "unavailable" | 131 | 4,350 | 3,831 | 555 |
+| + a build's bucket is a hash of its id, at every door: a shed build stays shed (the code as committed) | 81 | 5,705 | 3,086 | 542 |
+| the same at 200 ms/row | 271 | 3,766 | 1,811 | 533 |
+| + taking back twice as fast per idle second (removed), 200 ms/row | 151 | 6,764 | 3,300 | 686 |
+
+One run per cell: differences of tens of builds between the last rows are within what a
+second run would move; the order of magnitude between "before" and any version is not.
+Summaries: `bench/results/overload-before`, `-after-final`, `-before-200`, `-after-200`
+(the four columns above), `-after-v1`, `-after-v2`, `-after-200-doubling` (the rows of this
+table), `-before-eager-client` and `-after-v1-eager-client` (the first pair). The raw
+series (metrics every 5 s, node logs) were not kept in the repository.
+
+**Standard bench** (`bench/run.sh`, postgres mode, quiet machine; base is `e865241`, the
+tree before this section):
+
+| | base `e865241` | after (this section) |
+|---|---|---|
+| **flat out** (200 × 10,000) events/s | 19,621 · 19,829 · 20,046 | 20,628 · 20,603 · 20,730 |
+| ack p50 / p99 ms | 31 / 286 · 17 / 259 · 32 / 266 | 7.6 / 154 · 7.5 / 174 · 7.5 / 175 |
+| group commit p99 ms | 42 · 40 | 11 |
+| app vCPU by OS time; events per app vCPU | 3.33–3.39; 5,849–5,966 | 3.86–3.90; 5,283–5,344 |
+| reductions, workers / writers | 2,112M / 572M | 2,111M / 574M |
+| WAL bytes/event; transactions/s | 666–668; 1,652–1,681 | 666–671; 1,743–1,753 |
+| **paced** (1,000 streams) events/s | 989.4 | 989.7 |
+| ack p50 / p99 ms | 1,029 / 2,050 | 1,023 / 2,033 |
+| app vCPU; RSS per stream | 0.31; 482 KB | 0.31; 464 KB |
+
+Every run: 10,000/10,000 (1,500/1,500) builds verified, 0 failed, 0 missing acks. The
+machine was not as quiet as for §26.3 (load average 2 to 9 from this session's own
+experiments; the third flat-out pair was run back to back under the same load). Flat out
+the throughput is up 3–5 % and the acknowledgements are four times faster at the median:
+the library's histogram table was one lock on the ack path and on every query (group
+commit p99 42 → 11 ms). Paced, nothing moved. **One number moved the wrong way and is
+not explained:** flat out the server's CPU by OS time is 16 % higher (3.4 → 3.9 vCPU, so
+events per app vCPU −10 %) while the reductions of workers and writers are unchanged.
+The flow-control handler is not it (a run with it switched off: 21,057 events/s, 3.95
+vCPU, ack p50 7.7 ms). The suspects left are what no longer waits on that lock (the same
+work done sooner by more schedulers, which reductions do not see) and the short-lived
+handler and acker processes, which the reductions table does not list; `:msacc` over a
+flat-out run would tell. Not a throughput regression; a cost to look at before the next
+capacity claim per vCPU.
+
+**Unverified, and the run that settles it.** The case admission was built for is the
+overload that builds up: the paced fleet levels of 2026-11-06, where 7,500 and 12,000
+streams pushed a volume to its IOPS cap over minutes and the commit latency crept from 2
+to 30 s. There the pressure passes 5 s long before the deadline, the share of new builds
+refused has minutes to settle, and the open streams are not already lost when shedding
+starts. Nothing local reproduces that slope. Rerun on the fleet shape: six `t4g.xlarge`
+behind the NLB, `db.m6g.2xlarge` on the trial's 100 GB gp3 volume, `RAW_LOG=blob`, 60 and
+then 96 generator tasks × 125 paced streams (one event per 500 ms, 10 min of sends), with
+`--retries 10 --retry-delay-ms 1000`. Pass: `conveyor_admission_state_level` settles at 2
+with `builds_refused` between 0 and 100 on every node, 0 expired batches, fenced commits
+in the tens (they were 19,575 on one node), ack p99 under 15 s for the builds that
+complete, every node ready throughout, and more builds completed than the 9,687 of 24,865
+(60 tasks) and 139 of 5,496 (96 tasks) of the unprotected run. Fail, and what to change
+first: the signal (the commit rate against the arrival rate per shard reacts a commit
+earlier than an age), then holding refusals for a second before answering so that the
+clients' retries cover time instead of being spent at once. Also unverified: readiness
+with real peers (the outlier rule is table-tested and tested through the sampler with
+injected peer reports, never on two machines); large CAS/ByteStream uploads through the
+flow-control handler (tests pass, throughput not measured); the per-key share with more
+than a handful of keys.

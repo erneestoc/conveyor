@@ -18,6 +18,48 @@
   commits a file in a few batches instead of one batch hold per event.
   `Invocations.get!/1` is removed (use `get/2` with `project_ids`).
 
+- **Admission and overload control (PLAN §26.4):** a node now measures how far its commits
+  are behind (the age of the oldest uncommitted batch against `INGEST_WRITER_DEADLINE_MS`)
+  and refuses what it could not acknowledge in time, new work first: new builds of a key
+  above its share, then a share of all new builds that grows with the pressure (builds in
+  progress continue and may reconnect), then, close to the deadline, new streams and the events of a growing share of open
+  streams, which fail fast with UNAVAILABLE instead of waiting 30 s. One module
+  (`Conveyor.Admission`) answers at every door: gRPC streams, the lifecycle notification
+  that announces a build, the HTTP BEP upload (503 with `Retry-After`, 429 at the key's
+  stream limit; it skipped the per-key limits before) and `/health/ready`. New settings:
+  `ADMISSION`, `ADMISSION_THRESHOLDS`, `ADMISSION_MAX_BACKLOG_MB`; new series
+  `conveyor_admission_state_{level,pressure,ready}`,
+  `conveyor_admission_refused_count{door,reason}`, `conveyor_admission_slowed_count`; new
+  alert rules in `deploy/prometheus/alerts.yml`; runbook in docs/operations.md "Overload".
+  **Behaviour changes:** `/health/ready` no longer runs a query per probe and no longer
+  turns 503 because the database is slow or because every node has lost it (a node that
+  alone cannot reach it, or never has, is not ready; a single node keeps the old rule
+  after three failed probes); its body gains `admission` and `checks.overloaded`.
+  UNAVAILABLE and RESOURCE_EXHAUSTED answers are no longer logged as handler errors.
+  Measured locally (PLAN §26.4): against a database that turns several times too slow at
+  once, admission cuts fenced commits and expired batches by more than 90 % and keeps the
+  open streams near their healthy number, and it does not keep the node under the
+  deadline; when the outage is shorter than the clients' retry patience, fewer builds
+  complete than without it (a refusal is immediate, a slow failure is not). Give Bazel
+  `--build_event_upload_max_retries=10`. `ADMISSION=off` restores the old behaviour.
+  Fixed with it:
+  - `/metrics` histograms kept every sample in memory until the next scrape (1.1 GB after
+    2M acks and 2M queries on a node nobody scrapes). They are fixed buckets on counters
+    now, same names. The ack histogram reaches 60 s (it ended at 1 s), and
+    acknowledgements of resent, already committed events are counted in
+    `conveyor_ingest_ack_resent_count` instead of pulling its percentiles down.
+  - HTTP/2 flow control: the gRPC library granted receive window for data nobody had
+    read, so a slow session never slowed Bazel down and the connection buffered without
+    bound. The window now follows the reader (`Conveyor.Grpc.FlowControl`).
+  - With `BES_INGEST_AUTH=none` streams were not counted: the streams metric read 0 and a
+    drain did not wait for them.
+  - A group commit whose statement ran into its timeout was treated as a bad row and
+    halved (more transactions against a database too slow for one); it now waits and
+    fails whole, like any other "database unavailable".
+  - `mix conveyor.loadgen --arrival-rate N` (builds per second, open loop) and
+    `--retry-delay-ms` (Bazel's backoff) for overload experiments; `bench/overload.sh` runs one against clustered nodes and a database that
+    turns slow in the middle.
+
 - **Commit pipeline (PLAN §26.3):** the writer is a pipeline with one promise: a submitted
   batch gets exactly one outcome (committed, fenced, expired or failed) before a deadline.
   Fixed with it: a group commit that failed no longer falls back to one transaction and

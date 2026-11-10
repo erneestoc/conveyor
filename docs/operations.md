@@ -3,8 +3,11 @@
 ## Health
 
 - `GET /health/live`: the node is up.
-- `GET /health/ready`: the database answers and the node is not draining. Balancers and
-  orchestrators use this one; it turns 503 the moment a drain starts.
+- `GET /health/ready`: a balancer should send this node new connections. 200 while the
+  node has reached its database, is not draining, and is not the one overloaded node of a
+  cluster that has room elsewhere (see "Overload" below). It turns 503 the moment a drain
+  starts. The answer is read from the node's admission state, no query per probe; the body
+  names the admission state and the three checks (`database`, `draining`, `overloaded`).
 
 ## Metrics
 
@@ -13,7 +16,7 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 
 | Series | Alert when |
 |---|---|
-| `conveyor_ingest_ack_latency_us` (histogram) | p99 above 250 ms for 5 minutes: Bazel's end-of-build wait grows |
+| `conveyor_ingest_ack_latency_us` (histogram, buckets to 60 s) | p99 above 250 ms for 5 minutes: Bazel's end-of-build wait grows. Acks of resent, already committed events are not in it (`conveyor_ingest_ack_resent_count`) |
 | `conveyor_ingest_writer_flush_duration` (histogram, ms) | p99 above 500 ms: PostgreSQL slow or contended |
 | `conveyor_repo_query_queue_time` (histogram, ms) | p99 above 50 ms: pool too small or database saturated |
 | `conveyor_ingest_batch_committed_events` (counter) | rate drops to zero while streams are open |
@@ -23,6 +26,9 @@ dashboard is in `deploy/grafana/conveyor.json`. The series that matter:
 | `conveyor_ingest_writer_backlog_batches{shard}`, `conveyor_ingest_writer_backlog_bytes{shard}` (gauges) | growing over several scrapes: the same, earlier |
 | `conveyor_ingest_writer_expired_count` (counter) | any increase: batches waited past their deadline and their streams failed; clients are resending |
 | `conveyor_ingest_writer_group_failed_count{kind}` (counter) | `unavailable` or `data` at all; `contention` repeating; `fenced` follows `conveyor_ingest_fenced_count` |
+| `conveyor_admission_state_level`, `conveyor_admission_state_pressure`, `conveyor_admission_state_ready` (gauges) | level 2 for two minutes (`ConveyorShedding`), level 3 (`ConveyorCritical`); see "Overload" below |
+| `conveyor_admission_refused_count{door,reason}`, `conveyor_admission_slowed_count` (counters) | `door="event"` at all: open streams are being failed to shed load |
+| `conveyor_ingest_ack_resent_count` (counter) | a rate that rivals the ack rate: clients are resending (a retry storm, or a balancer moving streams) |
 | `conveyor_oban_jobs_count{queue,state}`, `conveyor_oban_oldest_available_seconds{queue}` (gauges) | oldest waiting job older than 10 minutes: the queue is not draining |
 | `conveyor_blobs_errors_count{op}` (counter) | any increase: blob store credentials, bucket policy or disk |
 | `conveyor_raw_log_put_failed_count`, `conveyor_raw_log_sweep_failed_count` (counters) | any increase: the blob store refuses raw-log writes or deletes (`RAW_LOG=blob`); see "Raw log (blob mode)" below |
@@ -223,8 +229,7 @@ tuples on `invocations`); fast flushes with high ack latency mean the nodes are 
 (`vm_total_run_queue_lengths_total`, add nodes). Never raise `POOL_SIZE` past what
 `max_connections` allows for all nodes.
 
-**Commit pressure** (no rule shipped yet; the thresholds above are the ones to start
-from). Every writer shard reports what it has been handed and has not answered:
+**Commit pressure** (`ConveyorCommitPressure`, `ConveyorBatchesExpired`). Every writer shard reports what it has been handed and has not answered:
 `conveyor_ingest_writer_backlog_batches`, `…_bytes` and `…_oldest_ms` (sampled every 10 s),
 and each group commit records how long its oldest batch waited from the worker's submit to
 its outcome (`conveyor_ingest_writer_flush_wait`). On a healthy node the wait is the hold
@@ -261,6 +266,78 @@ the backlog is whatever arrived during one hold. What the numbers say when they 
 `Conveyor.Ingest.WriterPool.pressure/0` returns the pool's total backlog and the oldest
 age from the same counters (`bin/conveyor rpc 'IO.inspect(Conveyor.Ingest.WriterPool.pressure())'`).
 
+### Overload
+
+A node measures how far its commits are behind and refuses work it could not acknowledge
+in time, new work first. The measure is **pressure**: the age of the oldest batch any
+writer shard has not answered, beyond the writer's hold, as a fraction of
+`INGEST_WRITER_DEADLINE_MS` (also the mean wait for a database connection against twice
+the pool's queue target, and the bytes waiting for the writer against
+`ADMISSION_MAX_BACKLOG_MB`; the worst of the three counts). At 1.0 batches expire. The
+node samples it four times a second and is in one of four states
+(`conveyor_admission_state_level`, and `admission` in the body of `/health/ready`):
+
+| Level | Enters / leaves at (20 s deadline) | What the node does | What clients see |
+|---|---|---|---|
+| 0 normal | | takes everything | |
+| 1 elevated | 3 s / 1 s | refuses new builds of an API key that holds more than its share of the node's streams (streams ÷ keys with streams) | that key: UNAVAILABLE on new builds, retried by Bazel |
+| 2 shedding | 5 s / 2 s | refuses a share of the new builds that grows with the pressure, from none at 5 s to all at 10 s (`conveyor_admission_state_pressure` 0.25 to 0.50), at the notification that announces a build or at its first event; the same builds on every node and on every retry. The share rises with the pressure at once and falls by 2 points a second (`conveyor_admission_state_builds_refused` shows it, and `conveyor_admission_state_events_refused` the share of builds in progress; a node back at level 0 may still be taking builds back, for up to 50 s). Builds in progress continue, and a build that reconnects is taken | refused builds: UNAVAILABLE "this node is overloaded", retried by Bazel; open builds: slower acknowledgements |
+| 3 critical | 15 s / 10 s | refuses every new build, and a share of the builds in progress that grows from none at 15 s to all at 20 s: their next event, and their stream when they reconnect (the same builds each time, so the others can finish) | the shed builds fail fast with UNAVAILABLE instead of waiting 30 s for an acknowledgement that would not come |
+
+A level is left only at its lower threshold, so a node does not flap around one value. A
+refusal writes nothing and acknowledges nothing: the client resends, and behind a balancer
+the retry may reach a node with room. Refusals are counted
+(`conveyor_admission_refused_count{door,reason}`), not logged per request; the state
+changes are logged (`admission: normal -> shedding (pressure 0.3 …)`).
+
+**Readiness under overload.** A shedding node keeps answering `/health/ready` with 200.
+It leaves the balancer only when it has been shedding for 10 s **and** more than half of
+the other nodes it hears from are not: then it is the outlier and the cluster has room.
+When the cause is shared (the database, its volume), every node sheds and none leaves:
+taking all of them out would turn a slow system into an unreachable one, and an
+orchestrator that replaces unready nodes would restart healthy ones (seen on the trial
+with a throttled database). For the same reason, a database that every node has lost does
+not make them unready either; a node that alone cannot reach it, or has never reached it,
+is not ready. A node without peers keeps the old rule for the database (not ready without
+it, after three failed probes two seconds apart) and never reports unready for pressure. A node that left for pressure stays
+out for at least 30 s. Keep instance replacement on the node's own health
+([production](production.md)), never on readiness.
+
+**What to do.**
+
+- *`ConveyorShedding` on one node.* That node is the outlier: a writer shard inside a slow
+  commit (lock wait on a build another node also writes: "Fenced commits"), a noisy
+  neighbour, a node smaller than the others. It will leave the balancer by itself. Look at
+  `conveyor_ingest_writer_backlog_oldest_ms{shard}` on it and at
+  `conveyor_ingest_writer_group_failed_count`.
+- *`ConveyorShedding` on every node.* The database is the bottleneck: CPU, the volume's
+  IOPS or throughput cap, burst credits, the pool (`conveyor_repo_query_queue_time`). The
+  nodes are protecting the builds in progress; the refused ones fail their upload after
+  Bazel's retries. Add database capacity, or lower the load (`MAX_STREAMS_PER_KEY`). Adding
+  nodes does not help and adds connections. Do not restart nodes: their open streams would
+  resend elsewhere.
+- *`ConveyorCritical`, `ConveyorEventsRefused`.* Shedding new builds was not enough: open
+  streams are being failed. The same causes, further along; if only the first minutes of a
+  burst look like this, the thresholds are doing their job.
+- *`ConveyorBatchesExpired` without a level above 0.* Admission is off (`ADMISSION=off`)
+  or the pressure rose faster than a sample (a database that stopped answering at once).
+- *`ConveyorKeyAboveShare`.* One key holds more than its share while the node is under
+  pressure; its new builds are refused before anybody else's. Lower its
+  `max_streams` override or give it capacity.
+- *Too eager, or not eager enough.* `ADMISSION_THRESHOLDS` moves the levels (fractions of
+  the deadline, enter/exit per level). Later shedding trades fewer refused builds for
+  longer acknowledgements of the open ones; the numbers behind the defaults are in
+  `PLAN.md` §26.4.
+
+The per-key limits are part of the same door and independent of the level: a key at
+`MAX_STREAMS_PER_KEY` gets RESOURCE_EXHAUSTED (429 for the HTTP upload), a key above
+`MAX_EVENTS_PER_SECOND_PER_KEY` is slowed down (`conveyor_admission_slowed_count`), never
+failed. The HTTP upload answers 503 with `Retry-After` when the node sheds.
+
+Flow control helps before any of this: a handler that stops reading (a session holding
+its reply because 2,000 events are uncommitted, a key above its rate) closes the HTTP/2
+window of its stream, so Bazel stops sending instead of the node buffering.
+
 **Fenced commits** (`ConveyorFencedCommits`). Two nodes wrote the same invocation. A
 handful after a client reconnected through a balancer is normal: the resend lands on
 another node, which resumes from the row, and the first node's late batch is fenced. A
@@ -278,7 +355,7 @@ with `Oban.retry_all_jobs`), or parses slower than their timeout. See "Stuck job
 credentials expired, bucket policy changed, disk full. Profiles and test outputs of new
 builds show as unavailable until fixed; nothing about the build itself is lost.
 
-**Node not draining / not ready**. `/health/ready` stays 503 after a deploy: the database
+**Node not draining / not ready** (`ConveyorNotReadyForLong`). `/health/ready` stays 503 after a deploy: the database
 is unreachable (connection string, TLS bundle, security group) or migrations failed at
 boot (`docker logs` / pod logs show "Could not create schema migrations table" when the
 database itself is the problem). A node that never finishes draining holds open streams

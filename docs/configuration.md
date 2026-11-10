@@ -26,9 +26,12 @@ shown.
 | Variable | Default | Meaning |
 |---|---|---|
 | `BES_INGEST_AUTH` | `api_key` | `none` maps every stream to the `default` project (trusted networks only) |
-| `MAX_STREAMS_PER_KEY` | `200` | concurrent streams per API key per node; beyond it `RESOURCE_EXHAUSTED` |
+| `MAX_STREAMS_PER_KEY` | `200` | concurrent streams per API key per node; beyond it `RESOURCE_EXHAUSTED` (HTTP upload: 429). Streams without a key (`BES_INGEST_AUTH=none`) are counted for the node and not limited |
 | `MAX_EVENTS_PER_SECOND_PER_KEY` | `5000` | senders above it are slowed, never failed |
 | `MAX_LOG_MB` | `256` | log bytes kept per build; the rest is dropped with a marker |
+| `ADMISSION` | `on` | `off`: the node never refuses for commit pressure (the per-key limits and draining stay). See [Overload](operations.md#overload) |
+| `ADMISSION_THRESHOLDS` | `0.15/0.05,0.25/0.10,0.75/0.50` | enter/exit pressure of the three levels (elevated, shedding, critical) as fractions of `INGEST_WRITER_DEADLINE_MS`. Pressure is the age of the oldest uncommitted batch beyond the writer's hold; with the 20 s deadline the defaults are 3 s/1 s, 5 s/2 s and 15 s/10 s. In shedding the share of new builds refused grows from none at its threshold to all at 0.50 |
+| `ADMISSION_MAX_BACKLOG_MB` | `512` | bytes waiting for the writer that count as a full deadline (the levels apply to this fraction too: shedding at a quarter of it) |
 | `INGEST_BATCH_MAX_EVENTS` | `500` | events per commit batch |
 | `RAW_LOG` | `postgres` | `blob`: the writer puts each group commit's raw event and log bytes into one object in the blob store (`BLOB_STORE`) and the segment rows keep only a byte range, so the database carries metadata and small index rows; acks follow the object write and the commit (PLAN §25 step 2; how it behaves, the sweep and what to check when a put fails: docs/operations.md "Raw log (blob mode)") |
 | `RAW_LOG_FLUSH_MS` | `1000` | in blob mode, how long a writer shard collects batches before writing one object: at most `INGEST_WRITER_SHARDS` objects per second per node whatever the event rate (8 shards: 8 PUTs/s, about $3.50/day on S3); mid-build acks wait up to `INGEST_BATCH_FLUSH_MS` plus this (measured p50 1.6 s, p99 3 s on paced builds; shortening this alone does not help while the batch hold is 2 s, see PLAN §25 "Ack latency in blob mode") |

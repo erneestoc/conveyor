@@ -83,6 +83,10 @@ lib/conveyor/
   ingest/writer.ex      the commit pipeline of one shard (PLAN §26.3): submit/2 a batch → exactly one outcome (committed | fenced | expired | failed; the pid's death = unknown); the process, the pressure gauge, the driver loop
   ingest/writer/        its stages: config.ex (struct, read once at start), flush.ex (pure: commit now or wait), plan.ex (units → rows, compression contexts), store.ex (one raw-log object per group, put once), transaction.ex (fence first, CAS on last_event_seq, the unnest SQL), policy.ex (pure: what follows a failed attempt, bounded)
   ingest/writer_pool.ex shards by phash2(invocation_id) (count in a persistent term); pressure/0 for admission control
+  admission.ex          the three doors (PLAN §26.4): open_stream/2 + build/3 (a new stream: gRPC, HTTP upload, push_all, the attempt-started notification), event/1 (one atomic read, then the key's token), ready/0; drain/1; the one mapping from a refusal to a gRPC/HTTP status
+  admission/            policy.ex (pure: pressure, the four levels with hysteresis, readiness, decide/3), sampler.ex (every 250 ms: signals → Policy.step/4 → the atomics cell; inject/1 for tests), config.ex
+  limits.ex             per-key bookkeeping behind admission: stream slots (monitored), token bucket, limits of a key
+  histogram.ex          fixed-bucket histograms on :counters for /metrics (the library's distributions kept every sample until a scrape)
   ingest/tag_counter.ex per-node coalescing of tag_keys counts (one sorted upsert per second; flush on shutdown)
   seed.ex               realistic seed: fixture replays reshaped over N days (+ big_log)
   ingest/scrub.ex       redacts header flags, URL creds, token=, Bearer in command lines/logs (rewrites raw protobuf)
@@ -97,7 +101,7 @@ lib/conveyor/
   metrics/{scope,dashboard,tests}.ex           dashboard queries
   storage.ex, storage/partitions.ex            boot-time partition creation, retention drops
   workers/partition_maintenance.ex             Oban hourly cron
-lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor), auth_interceptor.ex, publish_build_event_server.ex, acker.ex
+lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor; server_opts/2 is the one place the server's options are built), auth_interceptor.ex, publish_build_event_server.ex, acker.ex, flow_control.ex (cowboy stream handler in front of grpc_stream_h: window granted when the body is read)
 lib/conveyor_web/       live/{builds,invocation,dashboard,tests,settings}_live.ex, components/{build_components,charts,timeline,layouts,core_components}.ex, controllers/download_controller.ex, format.ex, not_found_error.ex
 assets/js/hooks/        live_time.js (ticking durations), log_viewer.js (virtualized view over the log worker), profile_timeline.js
 assets/js/              log_core.mjs (log engine: paged UTF-8 buffer + terminal emulation + filter; Node tests in assets/test), log_worker.js, profile_worker.js
@@ -127,7 +131,7 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
-### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1 and 4 landed; next 2 (admission), then 3 (raw bytes store)
+### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1, 4 and 2 landed; next 3 (raw bytes store)
 
 - **Done:** §26.1 derived rows, §26.2 stream session, §26.3 commit pipeline (2026-11-10:
   `2cdc899` fence first, `e6ad538` durable disk puts, `d7d9f42` session hibernation,
@@ -135,23 +139,57 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
   gauges, `4552940` the pipeline's modules). The §26.2 "regression" was noise plus a real
   memory effect present before and after the session (finished workers missing the
   hibernation tick); fixed in `Session.committed/2`.
-- **Next: admission/overload control (candidate 2).** Signals: `WriterPool.pressure/0`
-  (`oldest_ms` is the one that tracks the client; it reaches `INGEST_WRITER_DEADLINE_MS`
-  when batches start to expire; healthy is the hold plus a commit, so read it against the
-  configured hold; it reads 0 for an instant after each flush). The place to refuse is
-  `Session.push/4` next to back-pressure, one status mapping in
-  `PublishBuildEventServer`; `Ingest.push_all/3` skips `Limits`. Acceptance test: the paced
-  7,500-stream level that spiralled on 2026-11-06. No alert rules were added for the new
-  series (`deploy/` was out of scope): docs/operations.md "Commit pressure" has the
-  thresholds to start from.
-- **Then: raw bytes store behind the blob adapter (candidate 3).** `Writer.Store` is the
+- **Done 2026-11-10: admission (candidate 2), PLAN §26.4.** `Conveyor.Admission` is the one
+  module that refuses: three doors (a new stream, the next event, readiness), a pure
+  policy, a sampler that publishes its answer in atomics. `Drain` is gone, `Limits` only
+  counts. With it: histograms on counters (`Conveyor.Histogram`: the library's kept every
+  sample until a scrape), HTTP/2 flow control that follows the reader
+  (`Conveyor.Grpc.FlowControl`), keyless streams counted, `query_canceled` classed as
+  unavailable in the writer (it had groups halved under overload), an open-loop load
+  generator (`--arrival-rate`, `--retry-delay-ms` for Bazel's backoff) and
+  `bench/overload.sh`. **Read the experiment in §26.4 before trusting the defaults**: on
+  the laptop, against a database that turns nine times too slow at once, admission cuts
+  the amplification by an order of magnitude and does *not* keep the node under the
+  deadline, and fewer builds complete than without it when the outage is shorter than the
+  clients' patience. What is unverified is the case it was built for: the paced
+  7,500-stream fleet level (60 and 96 generator tasks × 125 paced streams, six
+  `t4g.xlarge`, `db.m6g.2xlarge`), where the overload builds up over minutes instead of
+  arriving in one sample.
+- **Open after admission.** (1) *Whether `ADMISSION=on` is the right default* is a product
+  decision the experiment sharpened, not settled: ask the user with the §26.4 table.
+  (2) The pressure signal is an age: it lags by one commit, so a sudden loss of capacity
+  larger than the deadline can absorb is seen too late whatever the thresholds. A faster
+  signal would be the commit rate against the arrival rate per shard (rows per second
+  in and out); `Writer` reports both already (`flush.events`, the backlog gauges).
+  (3) Refusals are immediate, and Bazel's default retry budget (4 retries, 1 s × 1.6ⁿ:
+  9 s) is then spent in seconds; docs recommend `--build_event_upload_max_retries=10`
+  (181 s). Holding a refusal for a second or two before answering ("slow down" at the
+  stream door) would stretch every client's budget for the price of a sleeping process;
+  not done, not measured. (4) `deploy/helm/conveyor/files/alerts.yml` is a copy of
+  `deploy/prometheus/alerts.yml` and was not updated (only the latter was in scope): copy
+  it over. `deploy/grafana/conveyor.json` has no admission panels. (5) The Helm/Kubernetes
+  readiness probe now reads the admission cell: a pod no longer goes unready because the
+  database is slow, only when it alone cannot reach it. (6) `docs/changelog.md` lags
+  `CHANGELOG.md` (it did before this step).
+- **Gotchas from the admission step.** (1) Never edit a shell script while it runs (bash reads it
+  as it goes; a run lost its last step that way). (2) `Sampler.inject/1` is how a test
+  sets pressure: it replaces the signal source, starts from a fresh policy state and
+  samples once; `inject([])` restores the node's own. Tests that inject must restore in
+  `on_exit`, the sampler is the application's. (3) The test node's writer hold is 2 ms:
+  an injected `oldest_ms` of exactly a threshold is just below it. (4) Policy shares are
+  floats (they fall by fractions of a point per sample); the cell holds their ceiling.
+  (5) The refusal log filter (`Endpoint.log_exception?/1`) silences UNAVAILABLE and
+  RESOURCE_EXHAUSTED handler exceptions on purpose: look at
+  `conveyor_admission_refused_count`, not at the log. (6) An overload run's node logs are
+  10 MB each; `bench/results/overload-*/` keeps the summary, the phases and the rows only.
+- **Next: raw bytes store behind the blob adapter (candidate 3).** What admission means for it: a put is inside the commit, so a slow object store raises the pressure by itself (`oldest_ms`) and the node sheds; nothing to wire. Bytes waiting for the writer count against `ADMISSION_MAX_BACKLOG_MB`. Background work that competes with commits (the sweep, object-first archiving) can ask `Conveyor.Admission.state().level` and yield above 0; nothing does yet. `Conveyor.Grpc.FlowControl` sits in front of every gRPC service, the CAS sink and ByteStream included: a large upload now gets window as the handler reads it (65 KB initial window plus cowboy's margin). The bytestream and CAS tests pass; the throughput of large uploads through it was **not measured** (measure before raising `initial_stream_window_size` through `FlowControl.adapter_opts/0`). New histograms go in `ConveyorWeb.Telemetry.histograms/0` (no labels: a labelled series is a counter or a gauge). `Writer.Store` is the
   pipeline's only contact with the object store (`new/4` fixes key and ranges, `put/1` is
   idempotent and retried under the same key). Objects may hold unreferenced bytes (units
   evicted after the put). `RawLog.put/2` on disk is now tmp + fsync + rename + directory
   fsync (`RAW_LOG_FSYNC`); it still bypasses the adapter, so the store-failure test blocks
   the directory instead of using `Blobs.Flaky`. The sweep's 10,000-per-day cap is still
   open (review defect table).
-- **Gotchas from this step.** (1) The laptop is shared with other projects' Bazel builds:
+- **Gotchas from the commit-pipeline step.** (1) The laptop is shared with other projects' Bazel builds:
   load average went 2 → 260 during this session. Check `uptime` before trusting a bench;
   events per app vCPU by OS time and per-process reductions do not depend on the load. The
   probes used here (a bench wrapper that samples worker heaps and counts raw-log objects,

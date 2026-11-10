@@ -48,6 +48,32 @@ The protocol lives in one pure module, so the mapping is by function:
 
 `session_test.exs` runs the model's scenarios as tables of inputs and expected effects.
 
+### Admission (stated, not modelled)
+
+`Conveyor.Admission` (PLAN §26.4) may refuse a stream, a build or the next event of an open
+stream. Two invariants hold by construction, and the tests name them:
+
+- **A refused event was never acknowledged.** The event door is asked before the event is
+  handed to its session (`PublishBuildEventServer`, `Ingest.push_all/3`): a refused event
+  is not absorbed, so no batch carries it and no commit can acknowledge it. The RPC ends
+  with UNAVAILABLE and the client resends from its last acknowledgement
+  (`admission_end_to_end_test.exs`, "at the deadline an open stream's next event is
+  refused").
+- **A refusal writes nothing.** A stream refused when it opens took no slot and started no
+  session; a build refused at its notification or at its first event has no row created
+  for it by that call (same file, "a shedding node refuses a new build and leaves no row").
+  A row can still exist for a refused stream when the build's notification was admitted
+  earlier or on another node; that is why a node under pressure asks whether the row
+  exists before it refuses a stream that starts at sequence 1 (`Ingest.announced?/2`).
+
+In the model's terms a refusal is the `Drop` action chosen by the server at a point where
+the node has absorbed nothing new: the connection ends, the client reconnects and resends
+from its last acknowledgement. `Durability` and `KnownCommitted` are checked over every
+interleaving of `Drop`, so they cover refusals; adding an action that changes no state
+would check nothing more. What the model cannot promise for admission is `Completes`: it
+holds with *bounded* drops, and a node that sheds for longer than the client's retry
+budget fails that upload by design.
+
 ## Blob lifecycle (`Blobs.tla`)
 
 One digest of one project: upload (object plus a row with a TTL), attach (exists check,

@@ -257,6 +257,36 @@ which `non_hermetic` alone is 1.1 s (a parallel hash self-join over every spawn,
 report to precompute at parse time); every rolled panel is under 15 ms.
 | 5 hibernate quiet workers | 990 | 68 / 255 | 96.1k | 443 KB | 0.50 | workers 179 MB (was 378); flat-out peak RSS 1.85 GB with 10,000 lingering workers (was 3.2 GB), CPU unchanged |
 
+### Overload (2026-11-10, PLAN §26.4)
+
+What happens past the limits above is no longer left to the clients. A node measures how
+far its commits are behind and refuses work it could not acknowledge in time, new builds
+first ([Operations: Overload](operations.md#overload)). Measured on a laptop, two nodes,
+440 paced streams arriving open loop at 20 builds a second, and a database that turns
+several times too slow for three minutes (`bench/overload.sh`):
+
+| | without admission | with admission |
+|---|---|---|
+| fenced commits; expired batches | 56,922; 45,192 | 5,705; 3,086 |
+| open streams at the peak (healthy: 440) | 3,258 | 542 |
+| builds completed during the three minutes | 1 | 81 (271 at half the throttle) |
+| builds completed in the whole run, of 6,401 | 5,634 | 2,805 |
+
+Two things to take from it. Admission removes the amplification (resends that fence each
+other, batches that expire, seven times the streams), so a node is healthy seconds after
+the cause is gone. It does not create capacity, and it fails fast what the unprotected
+node failed slowly: when the outage is shorter than the clients' patience, more builds
+complete without it, because a client that waits 22 s per attempt is still there when the
+database comes back. Give Bazel the retries to bridge a refusal
+(`--build_event_upload_max_retries=10`), and size the database so that the level stays at
+0: admission is the seat belt, not the engine. The overload that builds up over minutes
+(the 7,500-stream fleet level of the linearity run) has not been rerun with it.
+
+Benchmarking note: the load generator was a closed loop (a client starts its next build
+when the last one ends), which sends a slow server less load and hides an overload. Use
+`--arrival-rate N` (builds per second, open loop) and `--retry-delay-ms 1000` (Bazel's
+backoff) for anything about limits.
+
 ## Starting points
 
 | Concurrent builds | Nodes | PostgreSQL | Notes |

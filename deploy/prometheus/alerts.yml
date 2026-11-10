@@ -65,6 +65,59 @@ groups:
           summary: "Blob store errors"
           description: "Reads or writes against the disk or S3 store failed; check credentials, bucket policy and disk space."
 
+      - alert: ConveyorCommitPressure
+        expr: max by (instance) (conveyor_ingest_writer_backlog_oldest_ms) > 5000
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "The oldest uncommitted batch on {{ $labels.instance }} is older than 5 s"
+          description: "Commits are not keeping up (batches expire at INGEST_WRITER_DEADLINE_MS, 20 s). The node sheds new builds from here on; see the Overload runbook in docs/operations.md."
+
+      - alert: ConveyorShedding
+        expr: conveyor_admission_state_level >= 2
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} is refusing new builds"
+          description: "Admission level {{ $value }} (2 shedding, 3 critical): commit pressure is above a quarter of the writer deadline. Builds in progress continue; new ones get UNAVAILABLE and retry. One node: look at that node (a hot shard, a lock wait). Every node: the database or its volume is the bottleneck."
+
+      - alert: ConveyorCritical
+        expr: conveyor_admission_state_level >= 3
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.instance }} is refusing every new stream"
+          description: "Commit pressure is above three quarters of the writer deadline; the events of open streams are refused next (conveyor_admission_refused_count{door=\"event\"}). Add database capacity or lower the load; do not restart nodes, their streams would resend elsewhere."
+
+      - alert: ConveyorEventsRefused
+        expr: increase(conveyor_admission_refused_count{door="event"}[5m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Open streams are being failed to shed load"
+          description: "The last resort before batches expire: events of open streams were refused so their clients resend instead of waiting for an acknowledgement that would come too late. Builds are losing their upload; capacity is short now."
+
+      - alert: ConveyorBatchesExpired
+        expr: increase(conveyor_ingest_writer_expired_count[5m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "Batches passed the commit deadline"
+          description: "Admission did not shed early enough, or it is off (ADMISSION=off): batches waited INGEST_WRITER_DEADLINE_MS and their streams failed. Check conveyor_admission_state_level over the same window."
+
+      - alert: ConveyorKeyAboveShare
+        expr: increase(conveyor_admission_refused_count{reason="key_share"}[10m]) > 0
+        labels: {severity: info}
+        annotations:
+          summary: "New builds of an API key were refused under pressure"
+          description: "A node at the elevated level refused new builds of a key holding more than its share of the node's streams. If it repeats, find the key (stream counts per key are in the node, not in the metrics) and lower its MAX_STREAMS_PER_KEY override or add capacity."
+
+      - alert: ConveyorNotReadyForLong
+        expr: conveyor_admission_state_ready == 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.instance }} has reported not ready for 10 minutes"
+          description: "Draining that does not finish, a database only this node cannot reach, or a node that is overloaded while most of its peers are not. The balancer sends it no new connections meanwhile."
+
       - alert: ConveyorNodeNotReady
         expr: up == 0
         for: 2m
