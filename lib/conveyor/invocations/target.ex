@@ -11,6 +11,8 @@ defmodule Conveyor.Invocations.Target do
     field :aspect, :string, default: ""
     field :kind, :string
     field :test_size, :string
+    # the `cpu:N` tag of a test target, when it has one (Conveyor.ExecLog.Cores)
+    field :cpus, :integer
     field :status, :string, default: "configured"
     field :test_status, :string
     field :failure_message, :string

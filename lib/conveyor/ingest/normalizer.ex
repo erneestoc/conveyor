@@ -171,6 +171,14 @@ defmodule Conveyor.Ingest.Normalizer do
       first_seen_at: DateTime.utc_now()
     }
 
+    # Only a target that declares its cores gets the column: rows of one statement share
+    # their column set, and almost no target has the tag.
+    attrs =
+      case Conveyor.ExecLog.Cores.from_tags(c.tag) do
+        nil -> attrs
+        cpus -> Map.put(attrs, :cpus, cpus)
+      end
+
     {increment(state, :targets_configured), Batch.upsert_target(batch, target_key(attrs), attrs)}
   end
 

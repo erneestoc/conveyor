@@ -12,7 +12,7 @@ defmodule Conveyor.ExecLog do
   """
   import Ecto.Query
 
-  alias Conveyor.ExecLog.{Spawn, SpawnInput}
+  alias Conveyor.ExecLog.{ActionKey, Cores, Keys, Spawn, SpawnInput}
   alias Conveyor.Projects
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -49,14 +49,14 @@ defmodule Conveyor.ExecLog do
           _ -> nil
         end)
 
-      {spawns, _memo} =
-        Enum.flat_map_reduce(entries, %{}, fn
-          %{type: {:spawn, s}}, memo ->
+      {spawns, {_memo, _ordinal}} =
+        Enum.flat_map_reduce(entries, {%{}, 0}, fn
+          %{type: {:spawn, s}}, {memo, ordinal} ->
             {row, memo} = spawn_row(s, table, memo)
-            {[row], memo}
+            {[Map.put(row, :ordinal, ordinal)], {memo, ordinal + 1}}
 
-          _, memo ->
-            {[], memo}
+          _, acc ->
+            {[], acc}
         end)
 
       {:ok, %{invocation_id: invocation_id, spawns: spawns}}
@@ -96,8 +96,14 @@ defmodule Conveyor.ExecLog do
 
     outputs = Enum.map(s.outputs, &output(&1.type, table))
     m = s.metrics
+    inputs_digest = digest_of(Enum.map(inputs, fn {p, d, _} -> [p, "\t", d] end))
+    {action_key, key_source} = ActionKey.of(s, inputs_digest, Enum.map(outputs, & &1.path))
 
     row = %{
+      action_key: action_key,
+      key_source: key_source,
+      started_at: timestamp(m && m.start_time),
+      platform_cores: Cores.from_platform(s.platform),
       target_label: s.target_label,
       mnemonic: s.mnemonic,
       primary_output: primary_output(outputs),
@@ -119,7 +125,7 @@ defmodule Conveyor.ExecLog do
       input_bytes:
         (m && m.input_bytes > 0 && m.input_bytes) || Enum.sum(Enum.map(inputs, &elem(&1, 2))),
       output_bytes: Enum.sum(Enum.map(outputs, & &1.size)),
-      inputs_digest: digest_of(Enum.map(inputs, fn {p, d, _} -> [p, "\t", d] end)),
+      inputs_digest: inputs_digest,
       outputs_digest: digest_of(Enum.map(outputs, &[&1.path, "\t", &1.digest])),
       outputs: %{
         "files" =>
@@ -241,6 +247,12 @@ defmodule Conveyor.ExecLog do
   defp ms(nil), do: nil
   defp ms(%{seconds: s, nanos: n}), do: s * 1000 + div(n, 1_000_000)
 
+  defp timestamp(nil), do: nil
+  defp timestamp(%{seconds: 0, nanos: 0}), do: nil
+
+  defp timestamp(%{seconds: s, nanos: n}),
+    do: DateTime.from_unix!(s * 1_000_000 + div(n, 1000), :microsecond)
+
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(s), do: s
 
@@ -303,6 +315,9 @@ defmodule Conveyor.ExecLog do
   @spec store!(Invocation.t(), %{spawns: [spawn()]}) :: non_neg_integer()
   def store!(%Invocation{id: id, project_id: project_id} = inv, %{spawns: spawns}) do
     now = DateTime.utc_now()
+    scopes = project_id |> Projects.get_project!() |> Conveyor.Rbe.Groups.scopes()
+    spawns = spawns |> Cores.assign(Cores.context(inv)) |> Enum.map(&keyed/1)
+    entries = Keys.entries(spawns, id)
 
     lists = input_rows(project_id, spawns, now)
 
@@ -315,6 +330,13 @@ defmodule Conveyor.ExecLog do
       fn ->
         Repo.transaction(
           fn ->
+            # Two parses of one build (a log uploaded again while the first parse runs)
+            # take turns: the second replaces what the first stored instead of adding to it.
+            Repo.query!("SELECT pg_advisory_xact_lock(hashtextextended($1::text, 0))", [id],
+              timeout: @db_timeout
+            )
+
+            previous = executions(id)
             Repo.delete_all(from(s in Spawn, where: s.invocation_id == ^id), timeout: @db_timeout)
 
             Enum.each(
@@ -331,7 +353,20 @@ defmodule Conveyor.ExecLog do
               &Repo.insert_all(Spawn, &1, timeout: @db_timeout)
             )
 
+            # After the spawns, so the key rows other parsers wait for are held only for
+            # these statements; the project's scope first, then its group's.
+            affected =
+              Enum.flat_map(scopes, fn {scope, project_ids} ->
+                changed = update_keys(inv, scope, project_ids, previous, spawns, entries)
+                Keys.holders(project_ids, changed, id)
+              end)
+
             set_status(inv, "parsed")
+
+            # Last, so the stamp is as close to the commit as a rollup's margin assumes:
+            # this build's hour, and the hours of the builds whose executions changed
+            # class, are computed again (docs/spec/Rollup.tla).
+            Keys.touch!([id | affected], DateTime.utc_now())
           end,
           timeout: @db_timeout
         )
@@ -340,6 +375,51 @@ defmodule Conveyor.ExecLog do
     )
 
     length(rows)
+  end
+
+  # Only an execution a cache could have served has a key (and a position to be found by);
+  # a cache hit has no start or cores either.
+  defp keyed(spawn) do
+    cond do
+      ActionKey.execution?(spawn) ->
+        spawn
+
+      spawn.cache_hit ->
+        Map.merge(spawn, %{action_key: nil, key_source: nil, ordinal: nil, started_at: nil})
+
+      true ->
+        Map.merge(spawn, %{action_key: nil, key_source: nil, ordinal: nil})
+    end
+  end
+
+  defp executions(invocation_id) do
+    Repo.all(
+      from(s in Spawn,
+        where: s.invocation_id == ^invocation_id and not is_nil(s.action_key),
+        select: {s.action_key, s.ordinal, s.started_at, s.total_ms, s.exec_ms, s.outputs_digest}
+      ),
+      timeout: @db_timeout
+    )
+  end
+
+  # The same log again merges to the same rows (a minimum is idempotent). A different log
+  # for the same build cannot be subtracted from a minimum: the keys of both versions are
+  # recomputed from the executions stored.
+  defp update_keys(%Invocation{id: id} = inv, scope, project_ids, previous, spawns, entries) do
+    current =
+      for s <- spawns, s.action_key != nil do
+        {s.action_key, s.ordinal, s.started_at, s.total_ms, s.exec_ms, s.outputs_digest}
+      end
+
+    if previous == [] or Enum.sort(previous) == Enum.sort(current) do
+      Keys.merge!(scope, id, inv.project_id, entries)
+    else
+      Keys.rebuild!(
+        scope,
+        project_ids,
+        Enum.map(previous, &elem(&1, 0)) ++ Enum.map(entries, & &1.key)
+      )
+    end
   end
 
   @doc """

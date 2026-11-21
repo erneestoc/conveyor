@@ -31,13 +31,56 @@ defmodule Conveyor.Workers.BuildRetention do
         deleted = delete_before(project, cutoff, 0)
         if deleted > 0, do: Invocations.rebuild_tag_keys!(project.id)
         Conveyor.Metrics.Rollup.prune!(project.id, cutoff)
-        expired = ExecLog.expire_before(project, ExecLog.retention_cutoff(project, now))
+        spawn_cutoff = ExecLog.retention_cutoff(project, now)
+        expired = ExecLog.expire_before(project, spawn_cutoff)
+        Conveyor.Rbe.Fleet.prune!(project.id, cutoff)
         {project.slug, %{deleted: deleted, cutoff: cutoff, expired: expired}}
       end
 
+    pruned_keys = prune_action_keys(now)
+
     deleted = per_project |> Enum.map(fn {_, r} -> r.deleted end) |> Enum.sum()
     pruned_inputs = ExecLog.prune_orphan_inputs(now)
-    {:ok, %{deleted: deleted, pruned_inputs: pruned_inputs, projects: Map.new(per_project)}}
+
+    {:ok,
+     %{
+       deleted: deleted,
+       pruned_inputs: pruned_inputs,
+       pruned_keys: pruned_keys,
+       projects: Map.new(per_project)
+     }}
+  end
+
+  # Action keys leave a day after the spawn retention of their scope: by then every
+  # execution of the key belongs to a build whose spawns are gone and whose hours are
+  # frozen. A group keeps its keys as long as its longest-keeping member; rows of a scope
+  # that no longer exists leave after the global retention.
+  defp prune_action_keys(now) do
+    alias Conveyor.ExecLog.Keys
+    alias Conveyor.Rbe.Groups
+
+    projects = Projects.list_projects(include_archived: true)
+    cutoff = fn project -> DateTime.add(ExecLog.retention_cutoff(project, now), -1, :day) end
+    own = projects |> Enum.map(&Keys.prune!(&1.id, cutoff.(&1))) |> Enum.sum()
+
+    grouped =
+      projects
+      |> Enum.group_by(&Groups.name/1)
+      |> Map.delete(nil)
+      |> Enum.map(fn {name, members} ->
+        case Groups.get_by_name(name) do
+          nil ->
+            0
+
+          group ->
+            Keys.prune!(Groups.scope(group), members |> Enum.map(cutoff) |> Enum.min(DateTime))
+        end
+      end)
+      |> Enum.sum()
+
+    default = Application.get_env(:conveyor, :retention_spawn_days, 30)
+    orphans = Keys.prune_orphans!(Groups.live_scopes(), DateTime.add(now, -default - 1, :day))
+    own + grouped + orphans
   end
 
   @doc "Deletes a project's builds that started (or, lacking a start, were inserted) before `cutoff`."

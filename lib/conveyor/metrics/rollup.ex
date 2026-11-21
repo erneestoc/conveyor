@@ -45,6 +45,9 @@ defmodule Conveyor.Metrics.Rollup do
       field :spawn_misses, :map, default: %{}
       field :remote_sent, :integer
       field :remote_fetched, :integer
+      # the RBE opportunity reports (Conveyor.Rbe.Fleet, Conveyor.Rbe.Hour)
+      field :fleet, :map
+      field :rbe, :map
       field :updated_at, :utc_datetime_usec
     end
   end
@@ -214,7 +217,9 @@ defmodule Conveyor.Metrics.Rollup do
       spawn_mnemonics: spawn_mnemonics,
       spawn_misses: spawn_misses,
       remote_sent: num(sent),
-      remote_fetched: num(fetched)
+      remote_fetched: num(fetched),
+      fleet: Conveyor.Rbe.Fleet.compute(finished),
+      rbe: Conveyor.Rbe.Hour.compute(finished)
     }
   end
 
@@ -252,7 +257,7 @@ defmodule Conveyor.Metrics.Rollup do
   # Spawn rows are deleted after the project's spawn retention while builds stay; an hour
   # past that cutoff keeps the execution-log sums its existing row holds (computed while
   # the spawns existed) instead of recomputing them as zero.
-  @spawn_fields [:spawns, :spawn_mnemonics, :spawn_misses, :remote_sent, :remote_fetched]
+  @spawn_fields [:spawns, :spawn_mnemonics, :spawn_misses, :remote_sent, :remote_fetched, :rbe]
 
   defp freeze_spawn_sums(%Row{} = row, project_id, hour) do
     cutoff = Conveyor.ExecLog.retention_cutoff(project_id)
@@ -277,7 +282,12 @@ defmodule Conveyor.Metrics.Rollup do
   # Rolls the stale hours among the invocations `filter` selects in `[from, to)`; the read
   # path calls this so a window is exact even before the job has seen its hours.
   defp repair!(filter, from, to) do
-    stale = stale_hours(filter, from, to)
+    # Oldest first: a host's first builds are known before its later ones are counted.
+    stale =
+      filter
+      |> stale_hours(from, to)
+      |> Enum.sort_by(fn {project_id, hour} -> {DateTime.to_unix(to_utc(hour)), project_id} end)
+
     Enum.each(stale, fn {project_id, hour} -> roll!(project_id, to_utc(hour)) end)
     length(stale)
   end
@@ -408,7 +418,9 @@ defmodule Conveyor.Metrics.Rollup do
           end),
         spawn_misses: Map.merge(acc.spawn_misses, r.spawn_misses, fn _, a, b -> a + b end),
         remote_sent: nil_sum(acc.remote_sent, r.remote_sent),
-        remote_fetched: nil_sum(acc.remote_fetched, r.remote_fetched)
+        remote_fetched: nil_sum(acc.remote_fetched, r.remote_fetched),
+        fleet: Conveyor.Rbe.sum(acc.fleet, r.fleet),
+        rbe: Conveyor.Rbe.sum(acc.rbe, r.rbe)
       }
     end)
   end

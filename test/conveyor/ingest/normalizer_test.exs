@@ -104,6 +104,29 @@ defmodule Conveyor.Ingest.NormalizerTest do
            )
   end
 
+  test "a test target's cpu:N tag is kept; a target without one has no such column" do
+    configured = fn label, tags ->
+      %BES.BuildEvent{
+        id: %BES.BuildEventId{
+          id: {:target_configured, %BES.BuildEventId.TargetConfiguredId{label: label}}
+        },
+        payload:
+          {:configured, %BES.TargetConfigured{target_kind: "ios_unit_test rule", tag: tags}}
+      }
+    end
+
+    state = Normalizer.new(%Invocation{id: @id, project_id: 1})
+    batch = Batch.new(@id, 1, ~D[2026-09-18], 1, 0, 0)
+
+    {state, batch} =
+      Normalizer.apply(state, configured.("//ios:tests", ["cpu:4", "manual"]), 1, batch)
+
+    {_state, batch} = Normalizer.apply(state, configured.("//ios:lib", ["manual"]), 2, batch)
+
+    assert %{cpus: 4} = batch.targets[{"//ios:tests", ""}]
+    refute Map.has_key?(batch.targets[{"//ios:lib", ""}], :cpus)
+  end
+
   test "analysis failure is a failed build with no targets" do
     {state, _batch, _} = run("analysis_failure")
     assert state.inv.status == "failed" and state.inv.targets_configured == 0
