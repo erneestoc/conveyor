@@ -6,7 +6,9 @@ defmodule Conveyor.ExecLog.Keys do
   `merge!/4` is the path of every parse: the log's executions are reduced to one entry per
   key, existing rows are locked **in key order** (the order every parser uses, so two
   parsers sharing keys queue instead of deadlocking), and one upsert per chunk takes the
-  minimum. It returns the keys whose first execution or flags changed for executions that
+  minimum; a row the log changes nothing about is not written again (`last_finish` is kept
+  to the day for that: the hundredth execution of a key on one day costs a lock, not a
+  new row version). It returns the keys whose first execution or flags changed for executions that
   were already stored: the builds that hold those executions are the hours a rollup has to
   compute again.
 
@@ -72,7 +74,8 @@ defmodule Conveyor.ExecLog.Keys do
   INSERT INTO action_keys AS k
     (scope, key, first_finish, first_start, first_invocation_id, first_ordinal,
      last_finish, grp, multi, out, nondet)
-  SELECT $1::bigint, t.key, t.finish, t.start, $2::uuid, t.ordinal, t.last_finish,
+  SELECT $1::bigint, t.key, t.finish, t.start, $2::uuid, t.ordinal,
+         date_trunc('day', t.last_finish),
          $3::bigint, false, ('x' || t.out)::bit(64)::bigint, t.nondet
   FROM unnest($4::bytea[], $5::timestamptz[], $6::timestamptz[], $7::int[],
               $8::timestamptz[], $9::text[], $10::bool[])
@@ -89,6 +92,12 @@ defmodule Conveyor.ExecLog.Keys do
     multi = k.multi OR (k.grp IS NOT NULL AND EXCLUDED.grp IS NOT NULL AND k.grp <> EXCLUDED.grp),
     out = COALESCE(k.out, EXCLUDED.out),
     nondet = k.nondet OR EXCLUDED.nondet OR (k.out IS NOT NULL AND k.out <> EXCLUDED.out)
+  WHERE #{@less}
+     OR EXCLUDED.last_finish > k.last_finish
+     OR (k.grp IS NULL AND EXCLUDED.grp IS NOT NULL)
+     OR (NOT k.multi AND k.grp IS NOT NULL AND EXCLUDED.grp IS NOT NULL AND k.grp <> EXCLUDED.grp)
+     OR (k.out IS NULL AND EXCLUDED.out IS NOT NULL)
+     OR (NOT k.nondet AND (EXCLUDED.nondet OR (k.out IS NOT NULL AND k.out <> EXCLUDED.out)))
   RETURNING k.key, k.first_invocation_id, k.first_ordinal, k.multi, k.nondet, (k.xmax::text <> '0')
   """
 
@@ -148,7 +157,7 @@ defmodule Conveyor.ExecLog.Keys do
     SELECT DISTINCT ON (key) key, finish, start, invocation_id, ordinal
     FROM e ORDER BY key, finish, start, invocation_id, ordinal
   ), sums AS (
-    SELECT key, max(finish) AS last_finish, min(grp) AS grp, count(DISTINCT grp) > 1 AS multi,
+    SELECT key, date_trunc('day', max(finish)) AS last_finish, min(grp) AS grp, count(DISTINCT grp) > 1 AS multi,
            min(out) AS out, count(DISTINCT out) > 1 AS nondet
     FROM e GROUP BY key
   )
@@ -242,8 +251,9 @@ defmodule Conveyor.ExecLog.Keys do
   end
 
   @doc """
-  Deletes a scope's rows whose last execution finished before `cutoff`: every execution
-  of such a key belongs to a build older than the spawn retention, whose hours are frozen.
+  Deletes a scope's rows whose last execution finished before `cutoff` (`last_finish` is
+  the day of that finish, so callers leave two days of margin): every execution of such a
+  key belongs to a build older than the spawn retention, whose hours are frozen.
   A key forgotten this way starts over: its next execution is a first one, as it would be
   for a cache that evicted the entry.
   """

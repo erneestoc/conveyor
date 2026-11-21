@@ -40,6 +40,11 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     {:ok, b} = Projects.create_project(%{slug: "beta", name: "Beta"})
     {:ok, b} = Projects.put_allowed_groups(b, ["team-b"])
 
+    # Each in a cache group of its own: a group is visible to whoever sees one of its
+    # projects, so the group routes are project-bound through their members.
+    {:ok, a} = Conveyor.Rbe.Groups.put(a, "group-alpha")
+    {:ok, b} = Conveyor.Rbe.Groups.put(b, "group-beta")
+
     ids =
       Map.new([a, b], fn p ->
         {p.slug, ingest_fixture!("clean_build_and_test", context(p))}
@@ -93,6 +98,14 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     }
   end
 
+  defp path_for(%{path: "/groups/" <> _} = route, %{"slug" => slug} = values),
+    do:
+      path_for(%{route | path: "/~groups/" <> String.trim_leading(route.path, "/groups/")}, %{
+        values
+        | "name" => "group-" <> slug
+      })
+      |> String.replace("/~groups/", "/groups/")
+
   defp path_for(route, values) do
     route.path
     |> String.split("/")
@@ -112,7 +125,9 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     "/settings",
     "/metrics",
     "/health/live",
-    "/health/ready"
+    "/health/ready",
+    # bound to the project of the API key that calls it (rbe_live_test.exs)
+    "/api/v1/rbe"
   ]
 
   test "every project-bound route is 404 across the boundary and 200 inside it", ctx do

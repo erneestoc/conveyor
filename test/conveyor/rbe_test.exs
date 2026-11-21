@@ -526,14 +526,15 @@ defmodule Conveyor.RbeTest do
     end
 
     test "keys are forgotten once their last execution is older than the retention", %{project: p} do
+      day = 86_400_000
       store!(build!(p, 0))
-      store!(build!(p, 60_000), each: fn s, i -> if i < 6, do: s end)
-      assert Keys.prune!(p.id, at(30_000)) == 6
+      store!(build!(p, 2 * day), each: fn s, i -> if i < 6, do: s end)
+      assert Keys.prune!(p.id, at(day)) == 6
       assert length(keys(p.id)) == 6
       # rows of a scope that no longer exists
       Repo.update_all(ActionKey, set: [scope: -999])
-      assert Keys.prune_orphans!(Groups.live_scopes(), at(30_000)) == 0
-      assert Keys.prune_orphans!(Groups.live_scopes(), at(600_000)) == 6
+      assert Keys.prune_orphans!(Groups.live_scopes(), at(day)) == 0
+      assert Keys.prune_orphans!(Groups.live_scopes(), at(3 * day)) == 6
       assert Keys.holders([p.id], [], "x") == []
     end
 

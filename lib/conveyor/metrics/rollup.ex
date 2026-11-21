@@ -307,7 +307,13 @@ defmodule Conveyor.Metrics.Rollup do
       fragment("date_trunc('hour', ?)", i.started_at),
       r.updated_at
     ])
-    |> having([i, r], is_nil(r.updated_at) or r.updated_at < max(i.updated_at))
+    # A row from before the RBE reports existed has no `fleet`: it is rolled again, which
+    # is how the reports reach the hours already stored when a node is upgraded.
+    |> having(
+      [i, r],
+      is_nil(r.updated_at) or r.updated_at < max(i.updated_at) or
+        fragment("bool_or(? IS NULL)", r.fleet)
+    )
     |> select([i, r], {i.project_id, fragment("date_trunc('hour', ?)", i.started_at)})
     |> Repo.all()
   end

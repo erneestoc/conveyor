@@ -51,7 +51,7 @@ defmodule Conveyor.Workers.BuildRetention do
      }}
   end
 
-  # Action keys leave a day after the spawn retention of their scope: by then every
+  # Action keys leave two days after the spawn retention of their scope: by then every
   # execution of the key belongs to a build whose spawns are gone and whose hours are
   # frozen. A group keeps its keys as long as its longest-keeping member; rows of a scope
   # that no longer exists leave after the global retention.
@@ -60,7 +60,7 @@ defmodule Conveyor.Workers.BuildRetention do
     alias Conveyor.Rbe.Groups
 
     projects = Projects.list_projects(include_archived: true)
-    cutoff = fn project -> DateTime.add(ExecLog.retention_cutoff(project, now), -1, :day) end
+    cutoff = fn project -> DateTime.add(ExecLog.retention_cutoff(project, now), -2, :day) end
     own = projects |> Enum.map(&Keys.prune!(&1.id, cutoff.(&1))) |> Enum.sum()
 
     grouped =
@@ -79,7 +79,7 @@ defmodule Conveyor.Workers.BuildRetention do
       |> Enum.sum()
 
     default = Application.get_env(:conveyor, :retention_spawn_days, 30)
-    orphans = Keys.prune_orphans!(Groups.live_scopes(), DateTime.add(now, -default - 1, :day))
+    orphans = Keys.prune_orphans!(Groups.live_scopes(), DateTime.add(now, -default - 2, :day))
     own + grouped + orphans
   end
 

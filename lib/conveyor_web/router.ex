@@ -39,6 +39,8 @@ defmodule ConveyorWeb.Router do
       live "/p/:slug", BuildsLive, :project
       live "/p/:slug/dashboard", DashboardLive, :project
       live "/p/:slug/tests", TestsLive, :project
+      live "/p/:slug/rbe", RbeLive, :project
+      live "/groups/:name/rbe", RbeLive, :group
       live "/p/:slug/settings", ProjectLive, :settings
       live "/invocation/:id", InvocationLive, :overview
       live "/invocation/:id/:tab", InvocationLive, :tab
@@ -49,6 +51,8 @@ defmodule ConveyorWeb.Router do
     end
 
     get "/invocation/:id/download/:kind", DownloadController, :show
+    get "/p/:slug/rbe/json", RbeController, :project
+    get "/groups/:name/rbe/json", RbeController, :group
     get "/invocation/:id/artifact/:name", DownloadController, :artifact
   end
 
@@ -71,6 +75,16 @@ defmodule ConveyorWeb.Router do
 
   pipeline :api_upload do
     plug ConveyorWeb.Plugs.ApiAuth, scope: "upload"
+  end
+
+  pipeline :api_read do
+    plug ConveyorWeb.Plugs.ApiAuth, scope: "read"
+  end
+
+  scope "/api/v1", ConveyorWeb do
+    pipe_through [:api, :api_read]
+
+    get "/rbe", RbeController, :api
   end
 
   scope "/api/v1", ConveyorWeb do
