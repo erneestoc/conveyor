@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **RBE opportunity (PLAN §27, docs/rbe-opportunity.md):** a page per project
+  (`/p/<slug>/rbe`) and per cache group (`/groups/<name>/rbe`), with the same numbers as
+  JSON (`…/rbe/json`, `GET /api/v1/rbe` for a `read` key). From execution logs: every
+  execution is classed against the first execution of its action key (Bazel's action
+  digest, or a key Conveyor computes when the log has none) as first, racing (only RBE
+  saves it) or sequential (a shared cache saves it), within a project and across the
+  projects of a cache group; core time by mnemonic with the cores per action and their
+  source, top targets, racing per pipeline, near misses, cold machines, a parallelism
+  bound. From the event stream alone, as a bound: executed work by runner and mnemonic,
+  executed share per build, a host's first builds against its later ones. Parse order
+  and concurrent parses do not change the result (`docs/spec/ActionKeys.tla`).
+  **Migration `20261121150731`** adds nullable columns to `spawns`, `targets` and
+  `invocation_rollups`, a partial index on `spawns`, and the tables `action_keys`,
+  `cache_groups`, `build_hosts`; additive, safe during a rolling deploy. Parsing a log
+  costs about 1.6 times what it did; rollup rows from before the upgrade are computed
+  again when first read.
+- **A parsed execution log now shows in dashboards that were already rolled.** Storing a
+  log did not mark the build's hour stale, so the cache reports of an hour rolled before
+  its log arrived stayed empty until something else changed the build.
+- **A log uploaded again while the first parse runs no longer doubles the spawns**: parses
+  of one build take turns.
+
 - **Security: an invocation id belongs to its project.** An API key of one project that
   knew a build id of another could append events to that build and mark it finished over
   gRPC. Stream and lifecycle requests for an id owned by another project now get NOT_FOUND

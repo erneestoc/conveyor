@@ -2060,3 +2060,185 @@ HEAD per pin (one per archived blob); unchanged here. (9) An S3 lifecycle rule o
 `rawlog/` remains not recommended (rule 2 above); a long-margin backstop (for example 90
 days) is safe only when `R` and the longest partition hold stay far below it, and was
 not added. (10) The trial demo's archived builds need an image with the codec fix.
+
+## 27. RBE opportunity (2026-11-21)
+
+The owner's question: would a shared cache, or remote build execution, save work, in
+core-seconds and by kind of action. Two fleets: iOS shards that race to build identical
+actions against one central cache, and a Go monorepo of about 360 apps, a Conveyor
+project each, on autoscaled machines with a cache per machine. Reader documentation is
+`docs/rbe-opportunity.md`; this section is the design and its measurements.
+
+### 27.1 What the data sources provide (checked, not assumed)
+
+**The compact execution log** (`priv/protos/bazel/src/main/protobuf/spawn.proto`, Bazel
+9.2):
+
+- `ExecLogEntry.Spawn.digest` (field 16, "See SpawnExec.digest"; `SpawnExec.digest`,
+  field 19: "The action cache digest. Only available when remote execution, remote cache
+  or disk cache was enabled for this spawn."). It is the remote-execution action digest.
+  The recorded fixtures were built without any cache: **0 of their 20 spawns carry it**.
+- `SpawnMetrics.start_time` (field 20, "Instant when the spawn started to execute"),
+  `execution_wall_time` (8) and `total_time` (1). Millisecond resolution in the fixtures.
+  All 20 fixture spawns carry them.
+- **No CPU time** anywhere in the log, and **no execution requirements**: the compact
+  `Spawn` has `args`, `env_vars`, `platform`, the input and tool sets, `outputs`,
+  `target_label`, `mnemonic`, `exit_code`, `status`, `runner`, `cache_hit`, `remotable`,
+  `cacheable`, `remote_cacheable`, `digest`, `timeout_millis`, `metrics`. A `cpu:N` tag,
+  a `resources:cpu:N` tag or a test size therefore does not appear in it. The only
+  per-action statement of cores it can carry is a property of `platform` (the exec
+  properties). **0 of the 20 fixture spawns have a platform at all.**
+
+**The event stream as stored.** `invocation_metrics.build_metrics` is the whole
+`BuildMetrics` as JSON. `actionSummary.actionData[]` has `mnemonic`, `actionsExecuted`
+(cache hits included), `actionsCreated`, `firstStartedMs`, `lastEndedMs` and, when Bazel
+measured every action of the mnemonic, `userTime` and `systemTime` (present in the dev
+database: `TestRunner` and `Genrule` have them, internal mnemonics do not).
+`actionSummary.runnerCount[]` has spawns by runner name. `timingMetrics.criticalPathTime`
+is a column (`invocations.critical_path_ms`). `TargetConfigured.tag` was dropped by the
+normalizer; it now keeps `cpu:N` as `targets.cpus`. The build's `host` is a column. The
+host's core count is in neither source.
+
+### 27.2 Definitions as built
+
+- **Key**: Bazel's digest when present (`key_source` 0), else SHA-256 over the
+  length-prefixed command line, sorted environment, sorted platform properties, sorted
+  declared output paths and `inputs_digest` (`key_source` 1;
+  `Conveyor.ExecLog.ActionKey.of/3`). The fallback distinguishes what the digest
+  distinguishes except fields that are constant across a fleet with one Bazel
+  configuration (timeout, cache salt, default exec properties, digest function). A
+  fallback key never equals a digest key.
+- **Execution**: a spawn that ran, exited 0, may be cached remotely and has a start
+  time. Its finish is `start_time + total_time`; its cost is `execution_wall_time`.
+- **Scope**: the project (scope = its id) and, when it names one, its cache group
+  (scope = −group id; `cache_groups`, `projects.settings["cache_group"]`, set by a global
+  admin). An app of the Go monorepo is a project, so cross-app is cross-project inside a
+  group. An execution of a grouped project is merged into both scopes.
+- **First** of a key in a scope: the minimum of `(finish, start, invocation id, ordinal)`.
+- **Class** of an execution (`ActionKey.classify/4`; in SQL in `Conveyor.Rbe.Hour`):
+  against the group's row `first`, `racing` (start < first's finish) or `sequential`;
+  a duplicate is `_x` (cross-project) when against its own project's row it is the first
+  or was racing, i.e. only another project had finished it.
+- **Cores**: exec property (exact) > project setting per mnemonic > target `cpu:N` tag
+  > CPU ÷ wall of the mnemonic in the build (floor 1) > 1. The owner's order put the
+  project setting first; the exec property went ahead of it on the owner's later word
+  that cores are passed per action. The test-size default is not a source: Bazel's
+  default is one CPU for every size, which would hide the measured ratio for every test.
+
+### 27.3 Data model
+
+- `spawns` + `action_key bytea`, `key_source`, `started_at`, `ordinal`, `cores_milli`,
+  `cores_source`; partial index on `action_key`. All null on cache hits; key and ordinal
+  null on executions that are not cacheable, failed or untimed.
+- `action_keys (scope, key)` → `first_finish, first_start, first_invocation_id,
+  first_ordinal, last_finish (day), grp, multi, out, nondet`. No sums, no counts, no list
+  of executions.
+- `cache_groups (id, name)`, `build_hosts (project_id, host, firsts[3])`, `targets.cpus`,
+  `invocation_rollups.fleet` and `.rbe` (jsonb).
+
+**Why no stored class and no per-key list.** Roles change when a log parsed later holds
+an execution that finished earlier. A class stored at parse time needs a correction pass
+over other builds' rows; a bounded per-key list loses exactness past its bound (360
+machines compiling the standard library at once is past any small bound). Instead the
+class is not stored: it is a function of the spawn's own row and its key's row, evaluated
+when an hour is rolled, by primary key (`action_keys`), never against other builds'
+spawns. What a later arrival must do is only make the affected hours stale. The affected
+executions are found through the partial index on `spawns.action_key` (the unbounded
+"per-key list" that already exists), and their builds' `updated_at` is moved, which is
+exactly the staleness rule of `docs/spec/Rollup.tla`.
+
+**Exactness argument.** (1) The row of a key is a minimum (and `last_finish` a maximum,
+`multi`/`nondet` "two distinct values seen"): commutative, associative, idempotent, so
+any arrival order and any interleaving of parsers give the same row, and parsing a log
+again changes nothing. (2) The class is a pure function of row and spawn, so once the
+rows hold every execution, exactly one execution per key is `first`, and wasted time =
+total − first's time. (3) Freshness: `store!` ends by moving `updated_at` of its own
+build and of every build holding an execution of a key whose row changed; a rollup stamps
+before it reads. `docs/spec/ActionKeys.tla` checks (1) to (3) for three executions with
+every timing in 1..4 and two parsers (41,724 states): `fixed` holds; `arrival` (class
+fixed at parse) and `notouch` (only the parsed build marked stale) violate `Fresh`.
+`test/conveyor/rbe_property_test.exs` checks the same against PostgreSQL, two projects
+of a group, shuffled order, one build stored twice.
+
+**A different log for the same build** cannot be subtracted from a minimum: when the
+build already has keyed spawns that differ from the new ones, the rows of both versions'
+keys are rebuilt from the spawns stored (`Keys.rebuild!/3`). Limit: a key whose earlier
+executions have already expired from `spawns` restarts from the ones that remain.
+
+**Concurrency.** A store is one transaction: an advisory lock per build (two parses of
+one build take turns; before, a log uploaded again during a parse could double the
+spawn rows), spawn inputs upserted in digest order, spawns inserted, then per scope
+(project first, group second) existing key rows locked in key order and upserted in key
+order, then builds touched in id order. Every parser takes locks in that one order. Key
+rows are locked only for the last statements of the transaction, not while spawns are
+inserted. A row the log changes nothing about is not written (so the 360th execution of a
+standard-library action on a day costs a row lock, no new tuple). There is no row per
+project, per group or per hour that every parser writes: contention is per shared key,
+for milliseconds. Not measured: 360 projects parsing at once (the `parse` queue runs two
+jobs per node).
+
+**Sharding (PLAN §25 step 3).** `action_keys` rows of a project live with the project.
+The rows of a cache group must be written in the same transaction as the spawns of any
+member, so **all projects of a cache group belong to one metadata shard**: a cache group
+is a unit of placement, like the project group of §25.
+
+**Retention.** Keys leave two days after the spawn retention of their scope (a group:
+its longest-keeping member), when every execution they describe belongs to a build whose
+spawns are gone and whose hours are frozen (`freeze_spawn_sums` now covers `rbe`).
+
+### 27.4 The reports
+
+`Conveyor.Rbe.Fleet` (event stream; a bound): spawns by runner, per mnemonic actions and
+CPU time, the distribution of the executed share per build, and builds by their ordinal
+on their host (first three against later). `Conveyor.Rbe.Hour` (execution logs): cells
+`[count, wall ms, core ms, exact wall ms, exact core ms]` per mnemonic under class,
+project, origin project of the first execution, pipeline tag value, clock band, cold
+host, plus top 50 targets, near misses (same project, commit tag, target, mnemonic and
+primary output under two keys within the interval), the parallelism sums and the builds
+with a log. Both are fields of the hourly rollup row and are summed for a window
+(`Conveyor.Rbe.sum/2`); `Conveyor.Rbe.Report` reads them. The project's cores setting is
+applied at read time to the non-exact part of each cell, so changing it needs no
+re-parse and no re-roll.
+
+**The staleness gap, closed for these numbers and the older spawn sums alike:**
+`ExecLog.store!` did not change the build's `updated_at`, so an hour rolled before its
+log was parsed never showed the log. It does now (last statement of the transaction).
+
+Known limits: top targets are the top 50 of each hour, summed; near misses are found
+inside one hour's builds and need a `commit` tag; a host's ordinal is by distinct start
+time; a project joining a group contributes logs parsed afterwards; the clock band is
+reported, not corrected; time-based hit rates are over executed time (a hit has no
+duration in the log).
+
+### 27.5 Measurements (laptop, PostgreSQL 17, load average 4; `scratchpad` bench, a
+50,400-spawn log made of the fixture's 12 spawns × 4,200 with distinct command lines)
+
+| | before (`c685b1b`) | after |
+|---|---|---|
+| parse | 2.0–2.1 s | 2.7–2.8 s (the fallback key hashes every command line and environment; not needed when the log has digests) |
+| store, first shard | 1.73–1.83 s | 3.5 s |
+| store, second shard (every action a duplicate) | 2.73 s | 4.4 s |
+| spawns/s, parse + store | 13,200 / 10,100 | 8,100 / 7,000 |
+| `spawns` bytes per row (heap + indexes) | 937 | 1,087 (+74 heap, +76 index) |
+| `action_keys` | n/a | 227 bytes per key (158 heap, 69 index); unchanged by the second shard |
+
+The added store time is the key entries (0.44 s), the upsert (0.65 s per scope) and the
+wider spawn insert with its index (0.45 s). Factor 1.6 on parse + store; one transaction
+per log, 11 lock and 11 upsert statements per 50,000 keys and scope.
+
+Dev database (100,274 seeded builds, no logs with keys): the first read of a 7-day
+window after the upgrade rolled its hours again in 3.8 s; a later read took 0.15 s.
+
+### 27.6 Open
+
+- What identifies a pipeline run in the owner's CI metadata (the pipeline tag key is a
+  setting, empty by default), and whether `commit` is the tag near misses should use.
+- The owner said cores are passed per action for iOS: confirm it is an exec property
+  (the only place the compact log can carry it) and its name.
+- A backfill for a project that joins a cache group (`Keys.rebuild!` can do it from the
+  spawns stored; not wired).
+- The non-hermetic dashboard panel still self-joins `spawns` on `inputs_digest`; it can
+  move onto `action_keys.nondet` and drop that index (about 90 bytes per spawn).
+- Not verified: Bazel 7's flag name and whether its log has `start_time`; the page in a
+  real browser (LiveView tests only); behaviour with real digests from a remote cache
+  (constructed in tests).

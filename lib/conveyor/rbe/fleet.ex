@@ -23,6 +23,7 @@ defmodule Conveyor.Rbe.Fleet do
 
   alias Conveyor.ExecLog.Cores
   alias Conveyor.Invocations.Metrics
+  alias Conveyor.Rbe.Host
   alias Conveyor.Repo
 
   @firsts 3
@@ -63,30 +64,41 @@ defmodule Conveyor.Rbe.Fleet do
       end)
       |> Enum.sort_by(&{&1.project_id, &1.host})
 
-    rows
-    |> Enum.chunk_every(1000)
-    |> Enum.flat_map(fn chunk ->
-      {_, returned} =
-        Repo.insert_all(Conveyor.Rbe.Host, chunk,
-          conflict_target: [:project_id, :host],
-          on_conflict:
-            from(h in Conveyor.Rbe.Host,
-              update: [
-                set: [
-                  firsts:
-                    fragment(
-                      "(SELECT coalesce(array_agg(t ORDER BY t), '{}') FROM (SELECT DISTINCT t FROM unnest(? || EXCLUDED.firsts) t ORDER BY t LIMIT ?) x)",
-                      h.firsts,
-                      @firsts
-                    )
-                ]
+    # Only a host whose earliest starts change is written: this runs on read paths too
+    # (the partial hours of a window), where nearly every host is already known.
+    Enum.each(Enum.chunk_every(rows, 1000), fn chunk ->
+      Repo.insert_all(Host, chunk,
+        conflict_target: [:project_id, :host],
+        on_conflict:
+          from(h in Host,
+            where:
+              fragment(
+                "NOT (? @> EXCLUDED.firsts) AND NOT (cardinality(?) >= ? AND ?[?] <= (SELECT min(t) FROM unnest(EXCLUDED.firsts) t))",
+                h.firsts,
+                h.firsts,
+                @firsts,
+                h.firsts,
+                @firsts
+              ),
+            update: [
+              set: [
+                firsts:
+                  fragment(
+                    "(SELECT coalesce(array_agg(t ORDER BY t), '{}') FROM (SELECT DISTINCT t FROM unnest(? || EXCLUDED.firsts) t ORDER BY t LIMIT ?) x)",
+                    h.firsts,
+                    @firsts
+                  )
               ]
-            ),
-          returning: [:project_id, :host, :firsts]
-        )
-
-      returned
+            ]
+          )
+      )
     end)
+
+    project_ids = rows |> Enum.map(& &1.project_id) |> Enum.uniq()
+    hosts = rows |> Enum.map(& &1.host) |> Enum.uniq()
+
+    from(h in Host, where: h.project_id in ^project_ids and h.host in ^hosts)
+    |> Repo.all()
     |> Map.new(&{{&1.project_id, &1.host}, &1.firsts})
   end
 
@@ -186,7 +198,7 @@ defmodule Conveyor.Rbe.Fleet do
   def prune!(project_id, cutoff) do
     {n, _} =
       Repo.delete_all(
-        from h in Conveyor.Rbe.Host,
+        from h in Host,
           where: h.project_id == ^project_id and fragment("?[1] < ?", h.firsts, ^cutoff)
       )
 

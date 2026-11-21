@@ -302,6 +302,20 @@ good and an empty `in_progress` row stays behind (`Retention_current.cfg` violat
 `NoZombie`). Fixed: retention skips `in_progress` and `disconnected` builds whose row
 changed within two idle windows (`BuildRetention.delete_before/3`, `Retention_fixed.cfg`).
 
+## Action keys under any arrival order (`ActionKeys.tla`)
+
+The RBE opportunity analysis (PLAN §27) keeps, per action key, the execution that finished
+first, and classes every other execution as racing or sequential against it. Logs are
+parsed after builds finish, in any order, by several parsers. The model has three
+executions with every start and finish in 1..4 and two parsers. `ActionKeys_fixed.cfg`
+(the row is a minimum, the class is computed from the row when an hour is rolled, a merge
+that changes the row marks the stored executions stale) keeps `Exact` and `Fresh`.
+`ActionKeys_arrival.cfg` fixes the class when the execution is parsed and
+`ActionKeys_notouch.cfg` marks only the parsed build stale: both violate `Fresh`, which
+is why no class is stored and why `ExecLog.store!` touches other builds. Not modelled:
+several keys (rows are independent), cache groups (a second scope is a second instance of
+the model), a log replaced by a different one (`Keys.rebuild!`), retention.
+
 ## Running
 
 ```sh

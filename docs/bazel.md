@@ -80,6 +80,62 @@ Any artifact name containing `execution.log`, `exec_log` or `execlog` is parsed.
 only lists spawns that ran or were served from the remote cache; actions skipped by
 Bazel's local action cache do not appear, so a fully incremental build has an empty log.
 
+## RBE opportunity: execution logs for whole pipelines
+
+The [RBE opportunity](rbe-opportunity.md) report finds duplicate work between builds, so
+it needs the execution log of **every build of a pipeline run** (all shards, all jobs),
+not of a sample of builds. Sample by pipeline: enable it for all jobs of, say, one
+pipeline in ten, or of the main branch.
+
+```
+# .bazelrc of the CI jobs
+build --execution_log_compact_file=/tmp/exec.log.zst
+build --build_metadata=PIPELINE=<pipeline run id>   # optional: racing per pipeline
+build --build_metadata=COMMIT=<sha>                 # optional: near misses
+```
+
+| Bazel | Flag | Status |
+|---|---|---|
+| 8, 9 | `--execution_log_compact_file` | recorded with 9.2 for this repository's fixtures |
+| 7.1 and later 7.x | `--experimental_execution_log_compact_file` | not exercised here; check `bazel help build` |
+| 7.0 and earlier | no compact log | `--execution_log_binary_file` is another format and is not parsed |
+
+After each build, upload the file to its invocation with an `upload`-scoped key:
+
+```sh
+tools/bes-upload-profile --server https://conveyor.example.com --key conveyor_... \
+    --invocation "$INVOCATION_ID" --execution-log /tmp/exec.log.zst
+```
+
+Set `--invocation_id=$(uuidgen)` yourself (lowercase) so the job knows the id, or read it
+from the results URL Bazel prints.
+
+What makes the numbers exact:
+
+- **One key source per project.** With `--remote_cache`, `--disk_cache` or
+  `--remote_executor` Bazel writes the action digest of every spawn into the log; without
+  any of them it does not and Conveyor computes a key of its own. Do not mix both kinds of
+  job in one project.
+- **Cores per action.** The log has wall time and no CPU time. It carries the cores of an
+  action only as a platform property: `exec_properties = {"cores": "4"}` on the target or
+  the execution platform. A `cpu:4` tag does not reach the compact log (Conveyor reads it
+  from the event stream for test targets instead); otherwise set `TestRunner=4` in the
+  page's settings.
+- **Clocks.** Racing against sequential is decided by the machines' clocks; keep them on
+  NTP and set the project's tolerance.
+- **Grouping.** Shards of one pipeline need nothing: they are builds of one project and
+  are compared by action key and time. Apps that are separate projects are compared when
+  a global admin puts them into one cache group. `--build_metadata` keys become tags
+  (lowercased); `--bes_keywords=user_keyword=pipeline=123` works too.
+
+Volume: the log is a few bytes per spawn compressed (megabytes for a large clean build);
+in the database a build with a log costs a few megabytes until `RETENTION_SPAWN_DAYS`
+(30) removes its spawns, of which this analysis is about 150 bytes per executed spawn
+plus 230 per distinct action. Writing the log costs Bazel little; the upload is one PUT
+per build.
+
+Savings on the page are core time of actions, not build minutes.
+
 ## Versions
 
 Conveyor's protocol definitions come from Bazel 9.2 and are backwards compatible; builds

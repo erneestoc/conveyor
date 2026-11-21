@@ -662,6 +662,15 @@ defmodule Conveyor.RbeTest do
       # four cold builds executed 190 where four warm ones would have executed 40
       assert fleet.hosts.excess == %{builds: 4, executed: 150, cpu_ms: 150_000}
 
+      # reading the window again writes no host row: nothing about them changed
+      versions = fn ->
+        Repo.query!("SELECT host, xmin::text FROM build_hosts ORDER BY host").rows
+      end
+
+      before = versions.()
+      report(p)
+      assert versions.() == before
+
       assert Fleet.prune!(p.id, at(10_000)) == 1
     end
 

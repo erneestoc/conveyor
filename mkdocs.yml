@@ -40,6 +40,7 @@ nav:
       - Install: install.md
       - Configure Bazel: bazel.md
       - Conveyor in CI: ci.md
+      - RBE opportunity: rbe-opportunity.md
   - Concepts:
       - Architecture: architecture.md
       - Design decisions: decisions.md

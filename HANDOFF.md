@@ -104,6 +104,7 @@ lib/conveyor/
   projects.ex           projects + api keys (create/verify/rotate/revoke/touch/expiring); ApiKeyCache (ETS + PubSub invalidation); Segments defaults
   query.ex, query/parser.ex, query/values.ex   search language
   metrics/{scope,dashboard,tests}.ex           dashboard queries
+  exec_log/{action_key,keys,cores}.ex, rbe.ex, rbe/   the RBE opportunity analysis (PLAN §27)
   storage.ex, storage/partitions.ex            boot-time partition creation; drop_before/2 and oldest_day/0 are mechanisms, the rules are RawStore.Expiry
   workers/partition_maintenance.ex, raw_log_sweep.ex, archive_raw.ex   hourly / hourly at :30 / every 15 min: they run RawStore.expire_partitions/1, expire_objects/2 (continuation job when objects remain), compact_due/2 (snoozes when builds remain)
 lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor; server_opts/2 is the one place the server's options are built), auth_interceptor.ex, publish_build_event_server.ex, acker.ex, flow_control.ex (cowboy stream handler in front of grpc_stream_h: window granted when the body is read)
@@ -135,6 +136,48 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 - **Writer hot path (M7 profiling):** a group commit runs the fenced `UPDATE … FROM unnest` first (one per set of dirty columns, rows in invocation id order, so a stale group aborts before it writes a child row), then one statement per table and column set (segments, targets, tests, actions, metrics); rows of the same invocation across batches are merged in order (one upsert must not touch a row twice). `tag_keys` rows are shared per project and must never be updated inside the group transaction (it serialized every shard on their row locks) — counts go through `Conveyor.Ingest.TagCounter` (one sorted upsert per node per second). Never index `last_event_at` (or any column the per-batch update sets): it makes every update non-HOT. Tests that assert tag counts call `TagCounter.flush()` first. DB pool: dev 20, prod `POOL_SIZE` default 40, `queue_target 1s / queue_interval 10s` (overload → latency, not errors).
 
 ## 7. Next work, in order (with concrete specs)
+
+### RBE opportunity — 2026-11-21 (PLAN §27, docs/rbe-opportunity.md), unreleased
+
+- **What exists.** `Conveyor.ExecLog.{ActionKey,Keys,Cores}` (key per executed spawn,
+  the first execution per `(scope, key)` in `action_keys`, cores per action),
+  `Conveyor.Rbe.{Fleet,Hour,Report,Settings,Groups,Host}` (the two hourly reports inside
+  `invocation_rollups.fleet`/`.rbe`, the reader, project settings, cache groups),
+  `ConveyorWeb.{RbeLive,RbeController,RbeReport}` (`/p/:slug/rbe`, `/groups/:name/rbe`,
+  `…/rbe/json`, `GET /api/v1/rbe`). Tests: `test/conveyor/rbe_test.exs` (golden numbers
+  from logs built by `Conveyor.ExecLogBuilder` out of the recorded fixture),
+  `rbe_property_test.exs`, `rbe_live_test.exs`; model `docs/spec/ActionKeys.tla`.
+- **Rules to keep.** (1) Nothing stores a class: it is computed from the spawn and its
+  key's row when an hour is rolled. Do not add a column that caches it. (2) The key row
+  is a minimum; anything added to it must also be order-independent (a max, a "two
+  distinct values" flag). (3) Lock order of a store: advisory lock of the build, spawn
+  inputs by digest, key rows by key (project scope, then group scope), builds by id.
+  (4) `store!` ends by touching `updated_at` of its build and of the builds whose keys
+  changed: that is what makes rolled hours stale (it also fixed the old gap for the
+  existing spawn sums). (5) Cores settings apply at read time: every stored cell is per
+  mnemonic and keeps its exact part apart. (6) A scope is a project id or minus a group
+  id; group membership is a global admin's decision; `Report` takes `visible:` and never
+  returns names or targets of other projects.
+- **Decided with the owner (2026-11-21):** an app of the Go monorepo is a project, so
+  cross-app is cross-project inside a cache group; the cache opportunity (sequential
+  duplicates, within and across projects, cold machines) is its own headline apart from
+  racing; shards need no pipeline grouping (a pipeline tag key is optional, for the
+  racing-by-pipeline panel); cores per action come first from the action itself.
+- **Found while building.** The compact log has no CPU time and no execution
+  requirements; cores can only arrive as a platform (exec) property. The fixtures have
+  neither a digest nor a platform on any of their 20 spawns. `BuildMetrics.actionData`
+  has user/system time per mnemonic for spawned mnemonics.
+- **Gotchas.** `Ecto.Query` imports `lock/2` and `from/2`: private functions with those
+  names do not compile. A schemaless `"build_hosts"` source returns naive datetimes (use
+  `Conveyor.Rbe.Host`). `Repo.insert_all` rows of one statement share their keys:
+  `targets.cpus` is only in the map when the tag exists. The bench used
+  `MIX_TEST_PARTITION=_rbebench_…` to get a scratch database per side and
+  `Sandbox.mode(Repo, :auto)`.
+- **Open, for the owner** (PLAN §27.6): the tag that names a pipeline run; the name of the
+  exec property that carries cores for iOS; whether a project joining a group should be
+  backfilled. **Not verified:** the page in a real browser, Bazel 7's flag, real remote
+  cache digests. `deploy/trial/*.tf` had uncommitted changes that are not from this work
+  and were left alone.
 
 ### Architecture review 2026-11-09 (PLAN §26): candidates 5, 1, 4, 2 and 3 landed
 
