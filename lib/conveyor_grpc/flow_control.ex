@@ -18,6 +18,14 @@ defmodule Conveyor.Grpc.FlowControl do
   With a stalled reader the client can send what is left of its window (65,535 bytes
   initially, the last frame plus cowboy's 65,535-byte margin afterwards) and then waits.
 
+  **Off in releases unless `GRPC_FLOW_CONTROL=on`** (2026-11-21): behind an HTTP/2 reverse
+  proxy that multiplexes clients onto a few upstream connections (the trial's Caddy), the
+  first deploy stalled: lifecycle calls ended in "Timeout when reading full body" and
+  streams in client ack timeouts on an idle node, while direct connections (the tests, the
+  bench) were fine. Suspected: window withheld for bytes that are never read is lost to the
+  connection, which all proxied streams share. Until that is reproduced and fixed the
+  handler is opt-in; without it the unbounded buffer described above is back.
+
   It is installed through the adapter's options (`adapter_opts/0`), which
   `GRPC.Server.Adapters.Cowboy` merges over its own `stream_handlers`. Nothing under
   `deps/` is edited; `flow_control_test.exs` stalls a reader against the real server and
@@ -27,7 +35,11 @@ defmodule Conveyor.Grpc.FlowControl do
 
   @doc "Options for `GRPC.Server.Supervisor`'s `:adapter_opts`."
   @spec adapter_opts() :: keyword()
-  def adapter_opts, do: [stream_handlers: [__MODULE__, :grpc_stream_h]]
+  def adapter_opts do
+    if Application.get_env(:conveyor, __MODULE__, [])[:enabled] == false,
+      do: [],
+      else: [stream_handlers: [__MODULE__, :grpc_stream_h]]
+  end
 
   # {inner handler state, a read is waiting for data?, bytes buffered unread}
   @impl true

@@ -326,6 +326,7 @@ resource "aws_launch_template" "conveyor" {
     raw_archive     = var.raw_archive_enabled
     writer_shards   = var.writer_shards
     raw_log         = var.raw_log
+    admission       = var.admission
   }))
 }
 

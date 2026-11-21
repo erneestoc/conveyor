@@ -67,6 +67,9 @@ variable "raw_archive_enabled" { default = true }
 variable "writer_shards" { default = 8 }
 # PLAN §25 step 2: "blob" puts raw bytes into S3 objects from the writer; "postgres" keeps them in rows.
 variable "raw_log" { default = "postgres" }
+# Pressure-based admission (Conveyor.Admission, PLAN §26.4): off on the trial until refusal delay and a
+# faster pressure signal land and the fleet rerun passes; per-key limits and draining stay on.
+variable "admission" { default = "off" }
 
 data "aws_caller_identity" "me" {}
 data "aws_vpc" "default" { default = true }

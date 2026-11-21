@@ -182,6 +182,11 @@ if config_env() == :prod do
         ]
     end
 
+  # HTTP/2 flow control that follows the reader (Conveyor.Grpc.FlowControl). Off by default:
+  # it stalled streams behind an HTTP/2 reverse proxy on the trial (see the module).
+  config :conveyor, Conveyor.Grpc.FlowControl,
+    enabled: System.get_env("GRPC_FLOW_CONTROL", "off") in ~w(on true 1)
+
   config :conveyor,
          Conveyor.Admission,
          [
