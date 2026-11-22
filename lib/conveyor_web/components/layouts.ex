@@ -42,21 +42,27 @@ defmodule ConveyorWeb.Layouts do
     ~H"""
     <div class="flex min-h-screen flex-col bg-base-100 text-base-content">
       <header class="sticky top-0 z-30 border-b border-base-300/70 bg-base-100/90 backdrop-blur">
-        <div class="mx-auto flex h-12 max-w-screen-2xl items-center gap-4 px-4 sm:px-6">
+        <div class="mx-auto flex min-h-12 max-w-screen-2xl flex-wrap items-center gap-x-2 px-4 sm:flex-nowrap sm:gap-x-4 sm:px-6">
           <.link
             navigate={~p"/"}
             class="flex items-center gap-2 font-semibold tracking-tight"
             id="brand"
+            aria-label="Conveyor"
           >
             <span class="grid size-6 place-items-center rounded bg-primary text-primary-content">
               <.icon name="hero-forward-micro" class="size-3.5" />
             </span>
-            Conveyor
+            <span class="hidden sm:inline">Conveyor</span>
           </.link>
 
           <.project_switcher projects={@projects} project={@project} />
 
-          <nav class="ml-2 hidden items-center gap-1 text-sm sm:flex" id="main-nav">
+          <%!-- On a phone the navigation is a second row that scrolls sideways. --%>
+          <nav
+            class="order-last -mx-1 flex w-full items-center gap-1 overflow-x-auto pb-1.5 text-sm whitespace-nowrap sm:order-none sm:mx-0 sm:ml-2 sm:w-auto sm:overflow-visible sm:pb-0"
+            id="main-nav"
+            aria-label="Main"
+          >
             <.nav_link
               navigate={builds_path(@project)}
               active={
@@ -87,7 +93,7 @@ defmodule ConveyorWeb.Layouts do
             >Project settings</.nav_link>
           </nav>
 
-          <div class="ml-auto flex items-center gap-3">
+          <div class="ml-auto flex items-center gap-1 sm:gap-3">
             <span
               :if={@current_scope && @current_scope.user}
               id="nav-user"

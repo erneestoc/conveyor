@@ -130,6 +130,23 @@ How to set the property in Bazel: [Bazel setup](bazel.md#declaring-cores-with-ex
 | **Outside any cache** | core time of executions that are not cacheable or failed; time that may not run remotely | What neither a cache nor RBE touches. |
 | **Parallelism headroom** | Σ action wall time ÷ Σ critical path (bound), ÷ Σ execution phase (achieved) | The most cores a build could keep busy against what it used. A bound: the critical path assumes unlimited cores. The host's core count is not in either data source. |
 
+The two first tiles are the page's answers and are shown large, per day (the window's
+core time ÷ the window's days, whether or not a day had logs), with the window's total
+under them. Tables show totals of the window.
+
+**Projects of the group** (a group's page, and a member's): one row per project the viewer
+may see, with what it repeated (racing, after itself, after another project) and after
+whom. Found by name, sorted by any column, 25 per page; the footer sums what the search
+found. Projects the viewer may not see are one row without names.
+
+**The CI recipe.** The empty state and the settings panel show what a CI job adds to
+upload its log (`build:ci --execution_log_compact_file`, an `--invocation_id` the job
+chooses, a `PUT` to `/api/v1/invocations/<id>/artifacts/execution.log.zst` with
+`x-api-key` and `content-type: application/octet-stream`), with the address the page was
+reached at. The key in it is a placeholder. The flag does not change cache keys (Bazel
+9.2, checked 2026-11-22: a build without it hit every action cached by a build with it,
+and toggling it did not discard the analysis cache).
+
 Other panels: duplicates per target, per project of the group (with whose finished work
 each project repeated), racing per pipeline (set the pipeline tag key in the settings),
 near misses (one output of one target at one commit under two keys: inputs differ where

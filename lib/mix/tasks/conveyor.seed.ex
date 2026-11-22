@@ -20,6 +20,15 @@ defmodule Mix.Tasks.Conveyor.Seed do
   stats only; the builds have no events), for dashboard volume and load tests.
 
       mix conveyor.seed --invocations 5000 [--days 30] [--project default]
+
+  `--rbe-demo` fills the RBE opportunity pages (`Conveyor.Seed.RbeDemo`): projects
+  `rbe-demo-*` with execution logs that race, repeat, hit the cache, state cores or not,
+  miss by one input and are not deterministic, and the cache group `rbe-demo-monorepo`.
+  It uploads through the HTTP API of a **running** server (`--url`, default
+  `http://localhost:4100`), whose parse queue does the rest; a second run replaces the
+  first.
+
+      mix conveyor.seed --rbe-demo [--url http://localhost:4100]
   """
   use Mix.Task
 
@@ -34,7 +43,9 @@ defmodule Mix.Tasks.Conveyor.Seed do
     big_log: :integer,
     concurrency: :integer,
     days: :integer,
-    project: :string
+    project: :string,
+    rbe_demo: :boolean,
+    url: :string
   ]
   @users ~w(alice bob carol dave erin frank grace heidi)
   @hosts ~w(mac-1 mac-2 linux-a linux-b ci-runner-1 ci-runner-2 ci-runner-3)
@@ -56,6 +67,24 @@ defmodule Mix.Tasks.Conveyor.Seed do
   @impl true
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
+
+    if opts[:rbe_demo] do
+      start_repo()
+      counts = Conveyor.Seed.RbeDemo.run(Keyword.take(opts, [:url]) ++ demo_hooks())
+
+      for {slug, n} <- Enum.sort(counts),
+          do: Mix.shell().info("#{slug}: #{n} builds")
+
+      Mix.shell().info("open /p/rbe-demo-ios/rbe and /groups/rbe-demo-monorepo/rbe")
+    else
+      seed_builds(opts)
+    end
+  end
+
+  # Tests upload through the endpoint in process instead of a running server.
+  defp demo_hooks, do: Application.get_env(:conveyor, :rbe_demo_hooks, [])
+
+  defp seed_builds(opts) do
     days = Keyword.get(opts, :days, 30)
 
     if opts[:replay] || opts[:big_log], do: start_app(), else: start_repo()

@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **RBE opportunity: the page after a layout review in a real browser (PLAN §27.8).**
+  The two answers lead the page as large tiles, in core time per day with the window's
+  total and what each is made of: *cache opportunity* (a shared cache recovers this) and
+  *racing duplicates* (only RBE recovers this). Fixed: target labels were invisible in
+  "Targets that repeat the most work"; the projects of a cache group were cut at 15
+  without saying so (now found by name, sorted by any column, 25 per page, with sums);
+  tables scroll inside their panel on a phone instead of widening the page; the app
+  header wraps its navigation onto a second row on a phone (it was hidden); zeros are
+  dashes; the "across projects" row appears only for a project in a group. New: a
+  ready-to-copy CI recipe for uploading the execution log (empty state and settings),
+  with the address the page was reached at and a placeholder for the key.
+- **`mix conveyor.seed --rbe-demo`** uploads demo builds with execution logs through the
+  HTTP API of a running dev server (`Conveyor.Seed.RbeDemo`, `Conveyor.ExecLog.Synth`):
+  racing shards, sequential duplicates within a project and across a cache group, cache
+  hits, cores stated and estimated, a near miss, a non-deterministic action.
+  `e2e/rbe-shots.mjs` captures the pages at desktop and phone width, light and dark.
 - **RBE opportunity (PLAN §27, docs/rbe-opportunity.md):** a page per project
   (`/p/<slug>/rbe`) and per cache group (`/groups/<name>/rbe`), with the same numbers as
   JSON (`…/rbe/json`, `GET /api/v1/rbe` for a `read` key). From execution logs: every

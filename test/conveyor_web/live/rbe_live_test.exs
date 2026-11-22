@@ -80,6 +80,8 @@ defmodule ConveyorWeb.RbeLiveTest do
     end
 
     refute has_element?(view, "#rbe-headline")
+    assert has_element?(view, "#rbe-empty")
+    assert view |> element("#rbe-ci-snippet-empty-text") |> render() =~ "x-api-key"
     assert render(view) =~ "0 of 1 finished builds"
     assert render(view) =~ "GoCompilePkg"
   end
@@ -98,11 +100,24 @@ defmodule ConveyorWeb.RbeLiveTest do
     {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
 
     for id <-
-          ~w(rbe-headline tile-cache-gap tile-racing tile-cold tile-hit-rate tile-not-remotable tile-parallelism panel-cache-gap gap-same gap-cross gap-total panel-rbe-mnemonics mnemonic-TestRunner panel-rbe-targets rbe-target-0 panel-rbe-pipelines panel-rbe-near rbe-near-0 rbe-fallback-keys panel-rbe-fleet) do
+          ~w(rbe-headline tile-cache-gap tile-racing tile-cold tile-hit-rate tile-not-remotable tile-parallelism panel-cache-gap gap-same gap-cold gap-total rbe-ci-snippet rbe-ci-snippet-copy rbe-reread-button panel-rbe-mnemonics mnemonic-TestRunner panel-rbe-targets rbe-target-0 panel-rbe-pipelines panel-rbe-near rbe-near-0 rbe-fallback-keys panel-rbe-fleet) do
       assert has_element?(view, "##{id}"), id
     end
 
     refute has_element?(view, "#panel-rbe-projects")
+    # a project outside any group has no "across projects" row
+    refute has_element?(view, "#gap-cross")
+    # the two answers of the page lead it, per day, with the window's total under them
+    assert view |> element("#tile-cache-gap-value") |> render() =~ ~r/>\s*1\s*</
+    assert view |> element("#tile-cache-gap") |> render() =~ "core-s / day"
+    assert view |> element("#tile-racing") |> render() =~ "Only RBE recovers this"
+
+    # the CI recipe names the address the page was reached at and never a real key
+    snippet = view |> element("#rbe-ci-snippet-text") |> render()
+    assert snippet =~ "http://www.example.com/api/v1/invocations/$ID/artifacts/execution.log.zst"
+    assert snippet =~ "$CONVEYOR_UPLOAD_KEY"
+    assert snippet =~ "build:ci --execution_log_compact_file"
+    refute snippet =~ "conveyor_"
     html = render(view)
     assert html =~ "3 of 3 finished builds"
     assert view |> element("#gap-total") |> render() =~ "6.0s"
@@ -110,7 +125,7 @@ defmodule ConveyorWeb.RbeLiveTest do
 
     view |> element("#rbe-range-24h") |> render_click()
     assert_patch(view, ~p"/p/#{p.slug}/rbe?range=24h")
-    assert has_element?(view, "#rbe-range-24h[aria-selected=true]")
+    assert has_element?(view, "#rbe-range-24h[aria-pressed=true]")
 
     view
     |> form("#rbe-settings-form", %{
@@ -148,6 +163,32 @@ defmodule ConveyorWeb.RbeLiveTest do
     assert view |> element("#rbe-subtitle") |> render() =~ "2 projects"
     assert view |> element("#gap-cross") |> render() =~ "6.0s"
     refute has_element?(view, "#rbe-settings")
+
+    # the projects of a group: found by name, sorted by a column, paged
+    assert view |> element("#rbe-projects-count") |> render() =~ "2 of 2 projects"
+    assert has_element?(view, "#rbe-projects-total")
+    assert has_element?(view, "#rbe-projects-sort-wasted", "↓")
+    refute has_element?(view, "#rbe-projects-pages")
+
+    view |> form("#rbe-projects-filter", %{"q" => "other"}) |> render_change()
+    assert has_element?(view, "#rbe-project-#{other.id}")
+    refute has_element?(view, "#rbe-project-#{p.id}")
+    assert view |> element("#rbe-projects-count") |> render() =~ "1 of 2 projects"
+
+    view |> form("#rbe-projects-filter", %{"q" => "zzz"}) |> render_change()
+    assert has_element?(view, "#rbe-projects-none")
+    view |> form("#rbe-projects-filter", %{"q" => ""}) |> render_change()
+
+    for sort <- ~w(name racing own others shared) do
+      view |> element("#rbe-projects-sort-#{sort}") |> render_click()
+      assert has_element?(view, "#rbe-projects-sort-#{sort} span")
+    end
+
+    assert render_click(view, "projects_sort", %{"sort" => "bogus"}) =~ "rbe-projects-sort-wasted"
+    assert has_element?(view, "#rbe-projects-sort-wasted span")
+    render_click(view, "projects_page", %{"page" => "7"})
+    render_click(view, "projects_page", %{"page" => "x"})
+    assert has_element?(view, "#rbe-project-#{other.id}")
 
     assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/groups/nope/rbe") end
     assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/groups/nope/rbe/json") end

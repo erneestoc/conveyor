@@ -64,6 +64,21 @@ PORT=4100 mix phx.server                            # web :4100 (port 4000 is ta
 - Replay fixtures (no Bazel needed), with connection-drop chaos and the persistence oracle:
   `mix conveyor.replay test/fixtures/bep/*.bep --repeat 100 --concurrency 200 --drop-after 20 --verify`
 - Realistic browsing data: `mix conveyor.seed --replay 1500 --days 30 --big-log 50` (`--big-log MB` adds one CI build with a curses-style log of that size for the log viewer) replays the fixtures through the real pipeline (all tabs populated; varied users/hosts/branches/durations; starts the app without listeners, safe while the server runs; refresh the browser). Synthetic volume only: `mix conveyor.seed --invocations 5000 --days 30` (rows without events; starts only the Repo).
+- **CSS does not rebuild (`mix tailwind conveyor` exits 137, SIGKILL):** the Tailwind
+  standalone binary (`_build/tailwind-macos-arm64-4.3.0`, a Bun executable) is published
+  with an ad-hoc signature that does not cover the whole file (`codesign -v` says "invalid
+  signature"; its SHA-256 equals the release's, so it is not a corrupt download and
+  `mix tailwind.install` fetches the same bytes). macOS 27 kills it at the first unsigned
+  page (crash report: `SIGKILL (Code Signature Invalid)`, `CODESIGNING / Invalid Page`).
+  Fix, again after every reinstall: `codesign --force --sign - _build/tailwind-macos-arm64-4.3.0`,
+  then `mix assets.build`. The Docker image builds with the Linux binary and is not affected.
+- **RBE opportunity demo data:** with the dev server running,
+  `mix conveyor.seed --rbe-demo [--url http://localhost:4100]` (projects `rbe-demo-*`,
+  cache group `rbe-demo-monorepo`; a second run replaces the first; builds are stamped
+  relative to now, so nothing is moved with SQL). Screenshots of those pages:
+  `cd e2e && OUT=/some/dir ADMIN_TOKEN=<the server's> node rbe-shots.mjs` (start the
+  server with `ADMIN_TOKEN=x PORT=4100 mix phx.server` to get both an admin and a
+  non-admin view; Playwright connects the LiveView, unlike headless Chrome's `--screenshot`).
 - Screenshots for design review: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --screenshot=out.png --window-size=1440,1000 URL` (LiveView JS does not connect in headless screenshots; server-rendered HTML only).
 - Test DB: `mix test` migrates automatically. If migrations are edited in place (they were, pre-release), rebuild: `MIX_ENV=test mix do ecto.drop, ecto.create, ecto.migrate` and `mix ecto.reset` for dev.
 - Regenerate protobuf modules after changing `priv/protos/`: `priv/protos/gen.sh` (needs `protoc` and `~/.mix/escripts/protoc-gen-elixir`). `google/api`, `google/rpc`, `google/longrunning`, `google/bytestream` messages come from the `googleapis` hex dep and are NOT generated (the ByteStream *service* module is missing from the dep — hand-write a `GRPC.Service` for it when building the CAS sink).

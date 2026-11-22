@@ -2278,3 +2278,28 @@ project state how. Built:
   one, the wall-time share is always there.
 - Not measured: parse time with the tally (one map update per property per spawn), a
   re-read of 200 large logs on the trial database.
+
+### 27.8 Addendum (2026-11-22): the page in a real browser
+
+`mix tailwind conveyor` had exited 137 since the machine moved to macOS 27 (the standalone
+binary's ad-hoc signature does not cover the file; re-signed with `codesign --force --sign -`,
+HANDOFF §4), so the page had only been seen with a stylesheet of 2026-10-01 in which its
+newer classes had no rules. With a current bundle, demo data (`mix conveyor.seed --rbe-demo`)
+and Playwright at 1440 and 390 px, light and dark, admin and non-admin:
+
+| Found | Fix |
+|---|---|
+| Six equal tiles; the two answers did not lead | Two large tiles (cache opportunity; racing), per day, the window's total and their parts as rows, where the cores come from; four small tiles below |
+| "Targets that repeat the most work" showed no target label (`max-w-0 truncate` in an auto-layout table) | Fixed-layout table, labels wrap (`break-all`), headed columns |
+| Projects of a group cut at 15 rows, silently | Search, sort by column, 25 per page, sum of what is listed; "N projects you may not see" |
+| 390 px: the page was 60 to 170 px wider than the screen (tables, grid children without `min-w-0`, the header) | Tables scroll inside their panels; the header wraps and its navigation, hidden below 640 px before, is a scrolling second row |
+| Cores column mixed a number with a sentence and took the table's slack | `Cores` and `from` columns at the end; `1`, not `1.0` |
+| `0 core-s` everywhere, `0 · 0ms` | Dashes in tables, `none` |
+| "across projects of the group" shown to a project without a group | Row and tile line only with a group |
+| Range buttons were `aria-selected` without a tab role; no focus ring; 10 px text at 50 % opacity | `aria-pressed`, `focus-visible` outlines, 60 to 70 % |
+| Empty state told the reader to see the docs | The CI recipe itself (also in settings), copyable |
+
+Left as it is: the dashboard page is also wider than a phone (its chart panels); the
+event-stream half of the demo is the recorded fixture's (156 spawns) and does not match
+the synthetic logs. Decisions for the owner are in the review handed over with the
+screenshots (headline unit, per-day denominator, cold machines as a tile, money).
