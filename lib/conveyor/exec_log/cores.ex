@@ -7,10 +7,15 @@ defmodule Conveyor.ExecLog.Cores do
   remote-execution exec properties): the compact log has no field for execution
   requirements, so a `cpu:N` tag or a test size does not reach it. The sources, best first:
 
-    * `3`, **exec property** (exact, per action): a platform property named `cpu`, `cpus`,
-      `cores`, `num-cpus`, `EstimatedCPU` or `resources:cpu` (any case; `4`, `4.0` or
-      `4000m`). Set with `exec_properties = {"cores": "4"}` on the target or the
-      execution platform. Nothing overrides it;
+    * `3`, **exec property** (exact, per action): a platform property with one of the
+      project's names (`Conveyor.Rbe.Settings`, `cores_property`), tried in the
+      project's order: the first name the spawn carries with a readable value wins.
+      Names match in any case. Built in: `cpu`, `cpus`, `cores`, `num-cpus`,
+      `num_cpus`, `EstimatedCPU`, `resources:cpu`. The value reads by the project's
+      unit: `cores` (`4`, `0.5`), `millicores` (`4000`) or `auto` (a plain number is
+      cores); a value ending in `m` (`4000m`) is millicores under every unit. Set with
+      `exec_properties = {"cores": "4"}` on the target or the execution platform.
+      Nothing overrides it. It is read when the log is parsed and stored per spawn;
     * `2`, **target tag**: the `cpu:N` tag of the spawn's test target, taken from the
       event stream's `TargetConfigured` (test runner spawns only: that is what the tag
       reserves cores for);
@@ -33,7 +38,7 @@ defmodule Conveyor.ExecLog.Cores do
   @measured 1
   @target_tag 2
   @exec_property 3
-  @properties ~w(cpu cpus cores num-cpus num_cpus estimatedcpu resources:cpu)
+  @properties ~w(cpu cpus cores num-cpus num_cpus EstimatedCPU resources:cpu)
   @test_mnemonics ["TestRunner"]
 
   @doc "The name of a stored source number."
@@ -47,20 +52,38 @@ defmodule Conveyor.ExecLog.Cores do
   @spec exact() :: 3
   def exact, do: @exec_property
 
-  @doc "Milli-cores stated by a spawn's platform properties, or nil."
-  @spec from_platform(struct() | nil) :: pos_integer() | nil
-  def from_platform(nil), do: nil
+  @typedoc "How a project declares cores: property names in order, and the value's unit."
+  @type property :: %{names: [String.t()], unit: String.t()}
 
-  def from_platform(%{properties: properties}) do
-    Enum.find_value(properties, fn %{name: name, value: value} ->
-      if String.downcase(name) in @properties, do: milli(String.trim(value))
+  @doc "The built-in declaration: the names Conveyor has always looked for, unit `auto`."
+  @spec default_property() :: property()
+  def default_property, do: %{names: @properties, unit: "auto"}
+
+  @doc """
+  Milli-cores stated by a spawn's platform properties, or nil. The names are tried in the
+  declaration's order; the first one present (in any case) with a readable value wins.
+  """
+  @spec from_platform(struct() | nil, property()) :: pos_integer() | nil
+  def from_platform(platform, property \\ default_property())
+  def from_platform(nil, _property), do: nil
+
+  def from_platform(%{properties: properties}, %{names: names, unit: unit}) do
+    values = Map.new(Enum.reverse(properties), &{String.downcase(&1.name), &1.value})
+
+    Enum.find_value(names, fn name ->
+      case values[String.downcase(name)] do
+        nil -> nil
+        value -> milli(String.trim(value), unit)
+      end
     end)
   end
 
-  defp milli(value) do
+  # An `m` suffix is millicores whatever the unit says; a plain number reads by the unit.
+  defp milli(value, unit) do
     case Float.parse(value) do
-      {n, ""} when n > 0 and n <= 1024 -> round(n * 1000)
-      {n, "m"} when n > 0 and n <= 1_024_000 -> round(n)
+      {n, ""} when n > 0 and unit == "millicores" and n <= 1_024_000 -> max(round(n), 1)
+      {n, ""} when n > 0 and unit != "millicores" and n <= 1024 -> round(n * 1000)
+      {n, "m"} when n > 0 and n <= 1_024_000 -> max(round(n), 1)
       _ -> nil
     end
   end

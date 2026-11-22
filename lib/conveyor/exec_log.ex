@@ -12,7 +12,7 @@ defmodule Conveyor.ExecLog do
   """
   import Ecto.Query
 
-  alias Conveyor.ExecLog.{ActionKey, Cores, Keys, Spawn, SpawnInput}
+  alias Conveyor.ExecLog.{ActionKey, Cores, Keys, Properties, Spawn, SpawnInput}
   alias Conveyor.Projects
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -36,10 +36,24 @@ defmodule Conveyor.ExecLog do
 
   # --- parsing -------------------------------------------------------------------------------
 
-  @doc "Parses a compact execution log (zstd or raw) into spawns."
-  @spec parse(binary()) ::
-          {:ok, %{invocation_id: String.t() | nil, spawns: [spawn()]}} | {:error, term()}
-  def parse(binary) when is_binary(binary) do
+  @doc """
+  Parses a compact execution log (zstd or raw) into spawns, and into the exec property
+  names its spawns carry (`Conveyor.ExecLog.Properties`).
+
+  `:cores_property` is how the project declares cores per action
+  (`Conveyor.Rbe.Settings`); without it the built-in names are looked for.
+  """
+  @spec parse(binary(), keyword()) ::
+          {:ok,
+           %{
+             invocation_id: String.t() | nil,
+             spawns: [spawn()],
+             properties: [Properties.seen()]
+           }}
+          | {:error, term()}
+  def parse(binary, opts \\ []) when is_binary(binary) do
+    property = Keyword.get(opts, :cores_property, Cores.default_property())
+
     with {:ok, entries} <- decode(binary) do
       table = Map.new(entries, &{&1.id, &1.type})
 
@@ -49,17 +63,20 @@ defmodule Conveyor.ExecLog do
           _ -> nil
         end)
 
-      {spawns, {_memo, _ordinal}} =
-        Enum.flat_map_reduce(entries, {%{}, 0}, fn
-          %{type: {:spawn, s}}, {memo, ordinal} ->
-            {row, memo} = spawn_row(s, table, memo)
-            {[Map.put(row, :ordinal, ordinal)], {memo, ordinal + 1}}
+      {spawns, {_memo, _ordinal, tally}} =
+        Enum.flat_map_reduce(entries, {%{}, 0, %{}}, fn
+          %{type: {:spawn, s}}, {memo, ordinal, tally} ->
+            {row, memo} = spawn_row(s, table, memo, property)
+
+            {[Map.put(row, :ordinal, ordinal)],
+             {memo, ordinal + 1, Properties.observe(tally, s.platform)}}
 
           _, acc ->
             {[], acc}
         end)
 
-      {:ok, %{invocation_id: invocation_id, spawns: spawns}}
+      {:ok,
+       %{invocation_id: invocation_id, spawns: spawns, properties: Properties.summary(tally)}}
     end
   end
 
@@ -84,7 +101,7 @@ defmodule Conveyor.ExecLog do
   # so the verdict (same inputs or not) stays exact; only the per-path diff is bounded.
   @max_stored_inputs 50_000
 
-  defp spawn_row(s, table, memo) do
+  defp spawn_row(s, table, memo, property) do
     {inputs, memo} = expand(s.input_set_id, table, memo)
     {tools, memo} = expand(s.tool_set_id, table, memo)
 
@@ -103,7 +120,7 @@ defmodule Conveyor.ExecLog do
       action_key: action_key,
       key_source: key_source,
       started_at: timestamp(m && m.start_time),
-      platform_cores: Cores.from_platform(s.platform),
+      platform_cores: Cores.from_platform(s.platform, property),
       target_label: s.target_label,
       mnemonic: s.mnemonic,
       primary_output: primary_output(outputs),
@@ -312,8 +329,9 @@ defmodule Conveyor.ExecLog do
   re-checks references under the same lock) can neither delete it before the spawns that
   reference it are committed nor miss them (docs/spec/SpawnInputs.tla, `prune_orphan_inputs/2`).
   """
-  @spec store!(Invocation.t(), %{spawns: [spawn()]}) :: non_neg_integer()
-  def store!(%Invocation{id: id, project_id: project_id} = inv, %{spawns: spawns}) do
+  @spec store!(Invocation.t(), %{:spawns => [spawn()], optional(atom()) => term()}) ::
+          non_neg_integer()
+  def store!(%Invocation{id: id, project_id: project_id} = inv, %{spawns: spawns} = parsed) do
     now = DateTime.utc_now()
     scopes = project_id |> Projects.get_project!() |> Conveyor.Rbe.Groups.scopes()
     spawns = spawns |> Cores.assign(Cores.context(inv)) |> Enum.map(&keyed/1)
@@ -373,6 +391,10 @@ defmodule Conveyor.ExecLog do
       end,
       label: "store spawns #{id}"
     )
+
+    # After the commit and on its own: the names a project's logs carry are rows every
+    # parser of the project writes, so they are not held with the key rows.
+    Properties.record!(project_id, Map.get(parsed, :properties, []), now)
 
     length(rows)
   end

@@ -105,6 +105,7 @@ lib/conveyor/
   query.ex, query/parser.ex, query/values.ex   search language
   metrics/{scope,dashboard,tests}.ex           dashboard queries
   exec_log/{action_key,keys,cores}.ex, rbe.ex, rbe/   the RBE opportunity analysis (PLAN §27)
+  exec_log/properties.ex, rbe/reread.ex               exec property names seen per project (discovery); parse stored logs again after the cores declaration changes (PLAN §27.7)
   storage.ex, storage/partitions.ex            boot-time partition creation; drop_before/2 and oldest_day/0 are mechanisms, the rules are RawStore.Expiry
   workers/partition_maintenance.ex, raw_log_sweep.ex, archive_raw.ex   hourly / hourly at :30 / every 15 min: they run RawStore.expire_partitions/1, expire_objects/2 (continuation job when objects remain), compact_due/2 (snoozes when builds remain)
 lib/conveyor_grpc/      endpoint.ex (interceptors: Logger, AuthInterceptor; server_opts/2 is the one place the server's options are built), auth_interceptor.ex, publish_build_event_server.ex, acker.ex, flow_control.ex (cowboy stream handler in front of grpc_stream_h: window granted when the body is read)
@@ -158,6 +159,31 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
   mnemonic and keeps its exact part apart. (6) A scope is a project id or minus a group
   id; group membership is a global admin's decision; `Report` takes `visible:` and never
   returns names or targets of other projects.
+- **Cores declaration (PLAN §27.7, same day).** `settings["rbe"]["cores_property"]`
+  (`names` in order, `unit`) is read by `ParseExecLog` at parse time and passed to
+  `ExecLog.parse/2`; a change reaches earlier builds only through `Conveyor.Rbe.Reread`
+  (the page's button; 200 builds per request, priority 3). `ExecLog.parse` also returns
+  `properties` (names seen), which `store!` records in `exec_properties` after its
+  transaction (`Conveyor.ExecLog.Properties`: caps, no secret-looking samples, admin-only
+  on the page). The rollup has `srcn` (count per cores source) beside `src`; hours rolled
+  before it have none and `Report.cores_coverage.exact.n` is then nil. Tests:
+  `test/conveyor/rbe_cores_test.exs`, `test/conveyor_web/live/rbe_cores_live_test.exs`.
+  **Checked in a real browser** (Playwright's Chromium from `e2e/node_modules`, dev
+  server on :4100, two replayed builds with logs uploaded through the HTTP API and
+  parsed by Oban): the page renders with no server or console error, the names seen are
+  listed (no example for `api_token`), a bad name list is refused, the declaration
+  saves and reads back after a reload, the re-read button confirms, enqueues and the
+  coverage goes from 0 of 24 to 24 of 24 executions. **Not checked:** the layout. The
+  dev CSS bundle (`priv/static/assets/css/app.css`) is from 2026-10-01 and cannot be
+  rebuilt on this machine: `mix tailwind conveyor` exits 137 (the binary
+  `_build/tailwind-macos-arm64-4.3.0` is killed at start, sandboxed or not), so the
+  watcher does not run and utility classes added since then (this page's
+  `sm:col-span-2`, `pt-4`, `pl-3`) have no rules in dev. Reinstall the binary
+  (`mix tailwind.install`) and look at the settings panel once. A replayed fixture
+  build starts in September: past the spawn retention its hour is frozen, so a log
+  uploaded for it never shows on the page (the check moved the two builds' start to
+  now by SQL). Bazel's merging of `exec_properties` into the log's platform is still
+  unverified (docs/bazel.md lists what).
 - **Decided with the owner (2026-11-21):** an app of the Go monorepo is a project, so
   cross-app is cross-project inside a cache group; the cache opportunity (sequential
   duplicates, within and across projects, cold machines) is its own headline apart from

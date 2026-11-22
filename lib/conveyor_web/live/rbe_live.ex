@@ -11,7 +11,8 @@ defmodule ConveyorWeb.RbeLive do
   import ConveyorWeb.Charts, only: [hbars: 1]
 
   alias Conveyor.Accounts.Scope, as: Viewer
-  alias Conveyor.Rbe.{Groups, Settings}
+  alias Conveyor.ExecLog.Properties
+  alias Conveyor.Rbe.{Groups, Reread, Settings}
   alias ConveyorWeb.{Format, RbeReport}
 
   @impl true
@@ -68,16 +69,22 @@ defmodule ConveyorWeb.RbeLive do
       end
 
     settings = assigns.project && Settings.get(assigns.project)
+    admin? = assigns.admin? and connected?(socket)
 
     assign(socket,
       report: report,
       settings: settings,
+      # Only a project's admin reads which property names its logs carry.
+      properties: if(admin?, do: Properties.list(assigns.project.id), else: []),
+      reread: if(admin?, do: Reread.count(assigns.project, window_start(assigns.range)), else: 0),
       form:
         settings &&
           to_form(%{
             "cores" => Settings.cores_text(settings),
             "pipeline_key" => settings.pipeline_key || "",
             "tolerance_s" => Integer.to_string(settings.tolerance_s),
+            "cores_properties" => Settings.names_text(settings),
+            "cores_unit" => settings.cores_property.unit,
             "cache_group" => (assigns.group && assigns.group.name) || ""
           })
     )
@@ -97,7 +104,11 @@ defmodule ConveyorWeb.RbeLive do
       Conveyor.Audit.log(socket.assigns.current_scope, "project.rbe_settings",
         subject: {"project", project.id},
         project_id: project.id,
-        metadata: Map.take(params, ~w(cores pipeline_key tolerance_s cache_group))
+        metadata:
+          Map.take(
+            params,
+            ~w(cores pipeline_key tolerance_s cache_group cores_properties cores_unit)
+          )
       )
 
       {:noreply,
@@ -109,6 +120,35 @@ defmodule ConveyorWeb.RbeLive do
       {:error, message} -> {:noreply, put_flash(socket, :error, message)}
     end
   end
+
+  def handle_event("reread", _params, %{assigns: %{admin?: true}} = socket) do
+    project = socket.assigns.project
+    builds = Reread.enqueue!(project, window_start(socket.assigns.range))
+
+    Conveyor.Audit.log(socket.assigns.current_scope, "project.rbe_reread",
+      subject: {"project", project.id},
+      project_id: project.id,
+      metadata: %{
+        builds: builds,
+        range: socket.assigns.range,
+        cores_properties: Settings.names_text(socket.assigns.settings),
+        cores_unit: socket.assigns.settings.cores_property.unit
+      }
+    )
+
+    {:noreply,
+     put_flash(
+       socket,
+       :info,
+       "Reading #{builds} stored logs again; the numbers follow as each is parsed"
+     )}
+  end
+
+  # Settings and re-reads are a project admin's; anyone else's event changes nothing.
+  def handle_event(event, _params, socket) when event in ["save", "reread"],
+    do: {:noreply, socket}
+
+  defp window_start(range), do: Conveyor.Metrics.Scope.new(range, nil).from
 
   # Membership of a cache group is a global admin's decision (it shares totals between
   # projects); anyone else's form does not carry the field, and it is ignored if it does.
@@ -285,6 +325,7 @@ defmodule ConveyorWeb.RbeLive do
           <:note>
             Sorted by core time lost to duplicates. Cores: the average assumed, and where it comes from.
           </:note>
+          <.cores_coverage coverage={@report.cores_coverage} settings={@settings} />
           <div class="overflow-x-auto">
             <table class="w-full text-sm">
               <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/60">
@@ -307,7 +348,10 @@ defmodule ConveyorWeb.RbeLive do
                   <td class="py-1.5 text-right">{Format.duration(m.executed.ms)}</td>
                   <td class="py-1.5 text-right" title={m.cores_source}>
                     {cores(m.cores)}
-                    <span class="font-sans text-base-content/50">{m.cores_source}</span>
+                    <span class="font-sans text-base-content/50">
+                      {m.cores_source}{if m.exact_share && m.exact_share > 0 && m.exact_share < 1,
+                        do: " (#{pct(m.exact_share)} of wall by exec property)"}
+                    </span>
                   </td>
                   <td class="py-1.5 text-right">{core(m.executed.core_ms)}</td>
                   <td class="py-1.5 text-right">{core(m.racing.core_ms)}</td>
@@ -446,7 +490,14 @@ defmodule ConveyorWeb.RbeLive do
         </div>
 
         <.fleet report={@report} />
-        <.settings :if={@admin?} form={@form} global_admin?={@global_admin?} />
+        <.settings
+          :if={@admin?}
+          form={@form}
+          global_admin?={@global_admin?}
+          properties={@properties}
+          reread={@reread}
+          range={@range}
+        />
       </div>
     </Layouts.app>
     """
@@ -488,6 +539,32 @@ defmodule ConveyorWeb.RbeLive do
         both uploaded a log.
       </span>
     </.empty>
+    """
+  end
+
+  attr :coverage, :map, required: true
+  attr :settings, :map, default: nil
+
+  # How much of what executed states its own cores, and through which property names.
+  defp cores_coverage(assigns) do
+    ~H"""
+    <p id="rbe-cores-coverage" class="mb-3 text-xs text-base-content/70">
+      <span class="font-medium text-base-content">
+        {pct(@coverage.exact_share)} of executed wall time
+      </span>
+      ({Format.duration(@coverage.exact.ms)} of {Format.duration(@coverage.executed.ms)}<span
+        :if={@coverage.exact.n}
+        id="rbe-cores-coverage-count"
+      >; {Format.number(@coverage.exact.n)} of {Format.number(@coverage.executed.n)} executions</span>)
+      states its cores in an exec property<span :if={@settings} id="rbe-cores-names">
+        (<span class="font-mono">{Enum.join(@settings.cores_property.names, ", ")}</span>, unit {@settings.cores_property.unit})</span>.
+      <span :if={@coverage.fallbacks != []}>
+        The rest is estimated: {Enum.map_join(@coverage.fallbacks, ", ", fn f ->
+          "#{f.source} #{Format.duration(f.ms)}" <>
+            if(f.n, do: " (#{Format.number(f.n)})", else: "")
+        end)}; a cores-per-mnemonic setting replaces those estimates.
+      </span>
+    </p>
     """
   end
 
@@ -592,6 +669,9 @@ defmodule ConveyorWeb.RbeLive do
 
   attr :form, :map, required: true
   attr :global_admin?, :boolean, required: true
+  attr :properties, :list, required: true
+  attr :reread, :integer, required: true
+  attr :range, :string, required: true
 
   defp settings(assigns) do
     ~H"""
@@ -627,6 +707,33 @@ defmodule ConveyorWeb.RbeLive do
             placeholder="monorepo"
           />
         </div>
+        <fieldset class="rounded-md border border-base-300 p-3 sm:col-span-2" id="rbe-cores-property">
+          <legend class="px-1 text-xs font-medium">How this project declares cores per action</legend>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <.input
+              field={@form[:cores_properties]}
+              type="text"
+              label="Exec property names, in order (comma separated)"
+              placeholder="cores"
+            />
+            <.input
+              field={@form[:cores_unit]}
+              type="select"
+              label="Unit of the value"
+              options={[
+                {"auto: a plain number is cores, 4000m is millicores", "auto"},
+                {"cores (4, 0.5)", "cores"},
+                {"millicores (4000)", "millicores"}
+              ]}
+            />
+          </div>
+          <p class="mt-2 text-[11px] leading-snug text-base-content/60" id="rbe-cores-property-note">
+            The first name a spawn carries with a readable value wins; names match in any case;
+            blank restores the built-in list. The property is read when an execution log is
+            parsed and stored per action, so a change applies to <span class="font-medium text-base-content/80">logs parsed from now on</span>;
+            builds already parsed keep what they had until their stored log is read again (below).
+          </p>
+        </fieldset>
         <div class="sm:col-span-2">
           <button
             type="submit"
@@ -635,6 +742,64 @@ defmodule ConveyorWeb.RbeLive do
           >Save</button>
         </div>
       </.form>
+
+      <div class="mt-4 grid gap-4 border-t border-base-300 pt-4 lg:grid-cols-2">
+        <div id="rbe-properties">
+          <h3 class="text-xs font-medium">Exec properties seen in this project's logs</h3>
+          <p
+            :if={@properties == []}
+            class="mt-1 text-xs text-base-content/60"
+            id="rbe-properties-empty"
+          >
+            None yet: no log parsed since this version carried platform properties. Bazel
+            writes them for actions with <code class="font-mono">exec_properties</code>
+            (on the target or the execution platform).
+          </p>
+          <table :if={@properties != []} class="mt-1 w-full text-xs">
+            <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/60">
+              <tr>
+                <th class="py-1 font-medium">Name</th>
+                <th class="py-1 text-right font-medium">Spawns in its last log</th>
+                <th class="py-1 pl-3 font-medium">Example</th>
+                <th class="py-1 text-right font-medium">Last seen</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-base-300/70 font-mono tabular-nums">
+              <tr :for={{p, i} <- Enum.with_index(@properties)} id={"rbe-property-#{i}"}>
+                <td class="py-1">{p.name}</td>
+                <td class="py-1 text-right">{Format.number(p.spawns)}</td>
+                <td class="py-1 pl-3">
+                  {p.sample || "—"}
+                </td>
+                <td class="py-1 text-right font-sans text-base-content/60">
+                  {Calendar.strftime(p.last_seen_at, "%Y-%m-%d %H:%M")}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+          <p :if={@properties != []} class="mt-1 text-[11px] text-base-content/50">
+            Examples are shown only for short, plain values; anything that looks like a
+            credential is never stored.
+          </p>
+        </div>
+        <div id="rbe-reread">
+          <h3 class="text-xs font-medium">Builds already parsed</h3>
+          <p class="mt-1 text-xs text-base-content/60">
+            Reads the cores again from the stored execution logs of this window's builds
+            (last {@range}; the {Reread.max()} most recent at most), with the saved names and
+            unit. Each log is parsed again in the background, behind new uploads; nothing else
+            about the builds changes.
+          </p>
+          <button
+            type="button"
+            id="rbe-reread-button"
+            phx-click="reread"
+            disabled={@reread == 0}
+            data-confirm={"Parse the stored execution logs of #{@reread} builds again with the saved cores declaration?"}
+            class="mt-2 rounded-md border border-base-300 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-base-200 disabled:cursor-not-allowed disabled:opacity-50"
+          >Re-read cores from stored logs ({@reread} builds)</button>
+        </div>
+      </div>
     </.panel>
     """
   end

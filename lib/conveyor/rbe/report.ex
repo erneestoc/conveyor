@@ -82,6 +82,7 @@ defmodule Conveyor.Rbe.Report do
         examples: Enum.filter(rbe["near_ex"] || [], &visible?(&1["project"], visible))
       },
       parallelism: parallelism(rbe["par"]),
+      cores_coverage: cores_coverage(rbe["src"] || %{}, rbe["srcn"] || %{}, executed),
       mnemonics: mnemonics(mn, rbe["src"] || %{}, cores),
       targets: targets(rbe["tgt"] || %{}, cores, visible, names),
       projects: projects(rbe, cores, visible, names),
@@ -157,6 +158,33 @@ defmodule Conveyor.Rbe.Report do
 
   defp parallelism(_), do: nil
 
+  # How much of what executed states its cores in an exec property (the exact source),
+  # by wall time and by count, and what the rest fell back to. Counts per source are kept
+  # by hours summarized since they existed: `n` is nil while the window still holds an
+  # hour without them.
+  defp cores_coverage(src, srcn, executed) do
+    ms = by_source(src)
+    n = by_source(srcn)
+    counted? = n |> Map.values() |> Enum.sum() == executed.n
+
+    %{
+      executed: %{n: executed.n, ms: executed.ms},
+      exact: %{n: if(counted?, do: Map.get(n, "exec property", 0)), ms: ms["exec property"] || 0},
+      exact_share: rate(ms["exec property"] || 0, executed.ms),
+      fallbacks:
+        for {name, wall} <- ms, name != "exec property" do
+          %{source: name, n: if(counted?, do: Map.get(n, name, 0)), ms: wall}
+        end
+        |> Enum.sort_by(&{-&1.ms, &1.source})
+    }
+  end
+
+  defp by_source(by_mnemonic) do
+    by_mnemonic
+    |> Map.values()
+    |> Enum.reduce(%{}, &Map.merge(&2, &1, fn _source, a, b -> a + b end))
+  end
+
   # --- tables --------------------------------------------------------------------------------
 
   defp mnemonics(mn, sources, cores) do
@@ -175,6 +203,7 @@ defmodule Conveyor.Rbe.Report do
         executed: executed,
         cores: if(executed.ms > 0, do: executed.core_ms / executed.ms),
         cores_source: source(Map.get(sources, name, %{}), Map.has_key?(cores, name)),
+        exact_share: exact_share(Map.get(sources, name, %{})),
         racing: cell.(Hour.racing()),
         sequential: cell.(Hour.sequential())
       }
@@ -183,6 +212,10 @@ defmodule Conveyor.Rbe.Report do
       &{-(&1.racing.core_ms + &1.sequential.core_ms), -&1.executed.core_ms, &1.mnemonic}
     )
   end
+
+  # The share of a mnemonic's executed wall time whose cores an exec property states.
+  defp exact_share(by_source),
+    do: rate(Map.get(by_source, "exec property", 0), by_source |> Map.values() |> Enum.sum())
 
   # Where a mnemonic's cores come from, by the wall time each source covers.
   defp source(by_source, override?) do

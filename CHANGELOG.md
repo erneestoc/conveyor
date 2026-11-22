@@ -18,6 +18,16 @@
   `cache_groups`, `build_hosts`; additive, safe during a rolling deploy. Parsing a log
   costs about 1.6 times what it did; rollup rows from before the upgrade are computed
   again when first read.
+- **RBE opportunity: a project declares how its builds state cores per action.** In the
+  RBE settings: the exec property names to read, in order (first present wins, any
+  case), and the unit of the value (`cores`, `millicores`, `auto`). The default is the
+  built-in list with `auto`, as before. The setting is read when a log is parsed; "Re-read
+  cores from stored logs" parses the stored logs of the window's builds again (200 per
+  request, behind new uploads, audited). The settings panel lists the property names
+  seen in the project's logs with an example value, for a project admin only; the page
+  and the JSON state the share of executed wall time and executions whose cores came
+  from the exec property (`cores_coverage`). **Migration `20261122014625`** adds the
+  table `exec_properties` (at most 100 small rows per project); additive.
 - **A parsed execution log now shows in dashboards that were already rolled.** Storing a
   log did not mark the build's hour stale, so the cache reports of an hour rolled before
   its log arrived stayed empty until something else changed the build.

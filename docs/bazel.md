@@ -110,6 +110,58 @@ tools/bes-upload-profile --server https://conveyor.example.com --key conveyor_..
 Set `--invocation_id=$(uuidgen)` yourself (lowercase) so the job knows the id, or read it
 from the results URL Bazel prints.
 
+### Declaring cores with `exec_properties`
+
+Core time is wall time × cores, and the only per-action statement of cores the compact
+execution log can carry is a property of the spawn's execution platform
+(`ExecLogEntry.Spawn.platform`, name/value pairs; checked in the vendored
+`spawn.proto`). Bazel fills it from the action's exec properties. On a test target:
+
+```python
+go_test(
+    name = "integration_test",
+    srcs = ["integration_test.go"],
+    exec_properties = {"cores": "4"},
+)
+```
+
+For every action that runs on an execution platform:
+
+```python
+platform(
+    name = "rbe_linux",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    exec_properties = {
+        "OSFamily": "linux",
+        "cores": "2",
+    },
+)
+# build --extra_execution_platforms=//platforms:rbe_linux
+```
+
+Then tell Conveyor the name and its unit in the project's RBE settings
+([Declaring cores per action](rbe-opportunity.md#declaring-cores-per-action)): names in
+order, first present wins, any case; unit `cores`, `millicores` or `auto`. If you do not
+know which name your builds send, upload one log and read the list of property names on
+the settings panel. A changed setting applies to logs parsed afterwards; the "Re-read
+cores from stored logs" button applies it to builds already parsed.
+
+**Unverified** (Bazel behaviour not exercised against this repository; the recorded
+fixtures have no platform on any spawn):
+
+- that a target's `exec_properties` are merged over the platform's, the target winning
+  per key, and that the merged set is what the log's `platform` holds for locally
+  executed and sandboxed spawns as well as remote ones;
+- that `exec_properties` on a test target reach the `TestRunner` spawn without an exec
+  group prefix (test actions may run in a `test` exec group, for which the key would
+  be `"test.cores"`; if the test runner's spawns show no property, try that);
+- `--remote_default_exec_properties=cores=2` as a way to set a default without a
+  platform target;
+- what your RBE backend does with the property: the name that sizes a worker is the
+  backend's (`cores`, `cpu`, `EstimatedCPU`, a pool name…). Conveyor only reads it.
+
+Check with one build: the settings panel lists the names that arrived.
+
 What makes the numbers exact:
 
 - **One key source per project.** With `--remote_cache`, `--disk_cache` or
@@ -118,7 +170,8 @@ What makes the numbers exact:
   job in one project.
 - **Cores per action.** The log has wall time and no CPU time. It carries the cores of an
   action only as a platform property: `exec_properties = {"cores": "4"}` on the target or
-  the execution platform. A `cpu:4` tag does not reach the compact log (Conveyor reads it
+  the execution platform ([above](#declaring-cores-with-exec_properties); the name and
+  unit are a project setting). A `cpu:4` tag does not reach the compact log (Conveyor reads it
   from the event stream for test targets instead); otherwise set `TestRunner=4` in the
   page's settings.
 - **Clocks.** Racing against sequential is decided by the machines' clocks; keep them on

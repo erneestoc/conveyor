@@ -35,7 +35,15 @@ defmodule Conveyor.Workers.ParseExecLog do
   end
 
   defp parse(inv, binary) do
-    case ExecLog.parse(binary) do
+    # How the project declares cores is read here, at parse time: the cores an exec
+    # property states are stored per spawn (PLAN §27.7).
+    property =
+      inv.project_id
+      |> Conveyor.Projects.get_project!()
+      |> Conveyor.Rbe.Settings.get()
+      |> Map.fetch!(:cores_property)
+
+    case ExecLog.parse(binary, cores_property: property) do
       {:ok, parsed} ->
         {:ok, parsed}
 

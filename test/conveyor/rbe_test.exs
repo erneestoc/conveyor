@@ -505,7 +505,14 @@ defmodule Conveyor.RbeTest do
   describe "pipelines, retention, settings" do
     test "racing time per value of the pipeline tag", %{project: p} do
       {:ok, p} = Settings.put(p, %{"pipeline_key" => "pipeline", "tolerance_s" => "5"})
-      assert Settings.get(p) == %{cores: %{}, pipeline_key: "pipeline", tolerance_s: 5}
+
+      assert Settings.get(p) == %{
+               cores: %{},
+               pipeline_key: "pipeline",
+               tolerance_s: 5,
+               cores_property: Cores.default_property()
+             }
+
       store!(build!(p, 0, %{tags: %{"pipeline" => "run-1"}}))
       store!(build!(p, 200, %{tags: %{"pipeline" => "run-1"}}))
       store!(build!(p, 400, %{tags: %{"pipeline" => "run-2"}}))

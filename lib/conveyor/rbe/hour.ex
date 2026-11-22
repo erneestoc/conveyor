@@ -211,6 +211,7 @@ defmodule Conveyor.Rbe.Hour do
     |> add(["mn", r.class, r.mnemonic], cell)
     |> add(["proj", pid, r.class, r.mnemonic], cell)
     |> add_if(executed?, ["src", r.mnemonic, Cores.source_name(r.source)], int(r.ms))
+    |> add_if(executed?, ["srcn", r.mnemonic, Cores.source_name(r.source)], int(r.n))
     |> add_if(executed? and r.local, ["nonremote", r.mnemonic], cell)
     |> add_if(r.class in @racing and r.local, ["local", r.mnemonic], cell)
     |> add_if(r.class in @dups and r.band > 0, ["band", r.class, "#{r.band}", r.mnemonic], cell)

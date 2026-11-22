@@ -56,12 +56,13 @@ the time of each key's first finisher.
 **Core time** is wall time × cores of the action. Wall time is measured by Bazel. The
 cores come from, best first:
 
-1. **exec property**: a platform property of the spawn named `cpu`, `cpus`, `cores`,
-   `num-cpus`, `EstimatedCPU` or `resources:cpu`. Per action, exact, never overridden.
-   This is the only place the compact execution log states cores: it has no field for
-   execution requirements, so a `cpu:4` tag or a test size does not reach it. Set
-   `exec_properties = {"cores": "4"}` on the target (or on the execution platform) to
-   make core time exact;
+1. **exec property**: a platform property of the spawn with one of the names the
+   project declares ([below](#declaring-cores-per-action)); built in: `cpu`, `cpus`,
+   `cores`, `num-cpus`, `num_cpus`, `EstimatedCPU`, `resources:cpu`. Per action, exact,
+   never overridden. This is the only place the compact execution log states cores: it
+   has no field for execution requirements, so a `cpu:4` tag or a test size does not
+   reach it. Set `exec_properties = {"cores": "4"}` on the target (or on the execution
+   platform) to make core time exact;
 2. **project setting**: `Mnemonic=cores` in the page's settings (`TestRunner=4`);
 3. **target tag**: the `cpu:N` tag of a test target, from the event stream
    (test runner spawns);
@@ -69,7 +70,54 @@ cores come from, best first:
    in the log, at least 1;
 5. **default**: 1.
 
-The table by kind of action shows the average cores used and where they came from.
+The table by kind of action shows the average cores used and where they came from. The
+line above it says how much of what executed states its own cores: the share of executed
+wall time, and of executions, whose cores came from the exec property, and what the rest
+fell back to (`cores_coverage` in the JSON; per mnemonic `exact_share`). Counts per
+source exist for hours summarized since this was added; a window that still holds an
+older hour shows wall time only.
+
+## Declaring cores per action
+
+A project says how its builds declare cores on RBE in the page's settings ("How this
+project declares cores per action"; a project admin, audited as `project.rbe_settings`):
+
+- **Exec property names, in order.** Up to 8 names, comma separated; letters, digits and
+  `. _ : / -`, up to 64 characters each. For each spawn the names are tried in this
+  order and the first one the spawn carries *with a readable value* wins (a name present
+  with a value that is not a number in range is passed over). Names match in any case
+  (`Cores` = `cores`). Blank restores the built-in list. A name outside the list is not
+  read, built-in or not.
+- **Unit.** `cores`: `4`, `0.5` (up to 1024). `millicores`: `4000` (up to 1,024,000).
+  `auto` (default): a plain number is cores. Under every unit a value ending in `m`
+  (`4000m`) is millicores.
+
+The default (the built-in names, `auto`) is what Conveyor did before the setting existed,
+with one difference: when a spawn carries two of the built-in names with different
+values, the list's order now decides, not the order of the properties in the log.
+
+**Which name do my builds use?** The settings panel lists the property names seen in the
+project's parsed logs, with the number of spawns that carried each in the last log that
+had it and an example value. Only a project admin sees the list; it is not in the JSON.
+It holds at most 100 names per project (50 per log), no per-spawn data, and an example
+only when the value is short and plain (`[A-Za-z0-9_.:/+-]`, 40 characters) and neither
+name nor value looks like a credential (`token`, `secret`, `key`, `auth`, a URL…). A
+name is refreshed at most every ten minutes. Logs parsed before this version are not in
+it until one is parsed again.
+
+**Logs already parsed.** The property is read when a log is parsed and the result is
+stored per action as the exact source; the platform properties themselves are not
+stored. A changed declaration therefore applies to logs parsed afterwards. To apply it
+to earlier builds, use **Re-read cores from stored logs (N builds)** next to the
+settings: it parses the stored execution log of the builds in the page's window again
+(the 200 most recent that are parsed and still have their log attached; widen the range
+and repeat for more), in the background, behind new uploads, audited as
+`project.rbe_reread`. Parsing the same log again changes the cores and nothing else:
+keys, classes and counts stay (PLAN §27.3). Builds whose spawns passed retention
+(`expired`) are not re-read and keep their summarized numbers. Each re-parse costs what
+the first parse did (about 6 s for a 50,000-spawn log).
+
+How to set the property in Bazel: [Bazel setup](bazel.md#declaring-cores-with-exec_properties).
 
 ## The headline numbers
 

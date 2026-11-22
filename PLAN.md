@@ -2242,3 +2242,39 @@ window after the upgrade rolled its hours again in 3.8 s; a later read took 0.15
 - Not verified: Bazel 7's flag name and whether its log has `start_time`; the page in a
   real browser (LiveView tests only); behaviour with real digests from a remote cache
   (constructed in tests).
+
+### 27.7 Addendum (2026-11-21): the cores declaration is a project setting
+
+The owner confirmed that builds pass cores through `exec_properties` and asked that a
+project state how. Built:
+
+- **Setting** `projects.settings["rbe"]["cores_property"] = {names, unit}`
+  (`Conveyor.Rbe.Settings`): up to 8 property names in order, first present with a
+  readable value wins, any case; unit `auto | cores | millicores`. Not stored while it
+  equals the built-in list with `auto`. One behavioural difference of the default: the
+  list's order decides between two built-in names on one spawn (before: the log's order).
+- **Parse time, not read time.** `ParseExecLog` reads the setting and passes it to
+  `ExecLog.parse/2`; `cores_source = 3` stays "stated by the action". The platform
+  properties are not stored per spawn (they are in the fallback key's hash only), so a
+  changed declaration reaches earlier builds only by parsing their stored log again:
+  `Conveyor.Rbe.Reread` enqueues `ParseExecLog` for the window's builds that are
+  `parsed` and still have the artifact, 200 most recent per request, priority 3 behind
+  uploads, unique per build for a minute. Safe by §27.3: the same log merges to the same
+  key rows (`Keys.merge!`), spawns are replaced under the build's advisory lock, the
+  touched build's hours roll again. Not done: `expired` builds (their spawns must not
+  come back), a progress indicator, a re-read wider than the page's range.
+- **Discovery** `exec_properties (project_id, name) → spawns, sample, last_seen_at`
+  (`Conveyor.ExecLog.Properties`, migration `20261122014625`): filled by every parse,
+  outside the store transaction, one sorted upsert. `spawns` is the count of the log
+  that last refreshed the row (idempotent under a re-parse; not a total). A row is
+  rewritten at most every ten minutes, which bounds what §27.3 avoided (rows every
+  parser of a project writes) to one short statement per log that mostly updates
+  nothing. Caps: 50 names per log, 100 per project, names of 64 printable bytes, a
+  sample only if `^[\w.:/+-]{1,40}$` and `Scrub.candidate?("name=value")` is false.
+  Admin-only on the page; not in any JSON.
+- **Coverage** `Report.cores_coverage` and `exact_share` per mnemonic, from the rollup's
+  `src` (wall ms per source, existing) and a new `srcn` (count per source). Hours rolled
+  before `srcn` are not rolled again for it: the count is nil for a window that holds
+  one, the wall-time share is always there.
+- Not measured: parse time with the tally (one map update per property per spawn), a
+  re-read of 200 large logs on the trial database.
