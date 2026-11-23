@@ -10,6 +10,7 @@ defmodule Conveyor.Ingest.Normalizer do
   alias BuildEventStream, as: BES
   alias Conveyor.Bep.Event
   alias Conveyor.Ingest.{Batch, Status, Tags}
+  alias Conveyor.Rbe.StreamActions
 
   defmodule State do
     @moduledoc "In-memory view of the invocation row plus what changed since the last commit."
@@ -26,7 +27,7 @@ defmodule Conveyor.Ingest.Normalizer do
 
   @type state :: State.t()
 
-  @counter_fields ~w(targets_configured targets_completed targets_failed tests_total tests_passed tests_failed tests_flaky tests_timed_out actions_failed event_count events_skipped log_bytes log_lines)a
+  @counter_fields ~w(targets_configured targets_completed targets_failed tests_total tests_passed tests_failed tests_flaky tests_timed_out actions_failed event_count events_skipped stream_actions log_bytes log_lines)a
 
   @doc "Builds a state from an invocation row (a struct or map)."
   @spec new(map(), keyword()) :: state()
@@ -221,8 +222,30 @@ defmodule Conveyor.Ingest.Normalizer do
   # the command line, the outputs and the failure). Bazel sends failed actions by default
   # and every action with `--build_event_publish_all_actions`: a row with the whole
   # command line per successful action would be megabytes per build (PLAN §28.1).
-  defp handle(:action, %{payload: {:action, %{success: true}}}, _seq, state, batch),
-    do: {state, batch}
+  #
+  # A successful one leaves a compact record in the batch's chunk instead (PLAN §28.2):
+  # the command line is hashed here and not kept.
+  defp handle(:action, %{id: id, payload: {:action, %{success: true} = a}}, seq, state, batch) do
+    aid =
+      case id do
+        %{id: {:action_completed, aid}} -> aid
+        _ -> %{label: "", primary_output: ""}
+      end
+
+    record =
+      StreamActions.record(
+        blank_to_nil(a.label) || aid.label,
+        a.type,
+        aid.primary_output,
+        a.command_line,
+        micros(a.start_time),
+        micros(a.end_time),
+        build_start(state.inv),
+        seq
+      )
+
+    {increment(state, :stream_actions), Batch.add_stream(batch, record)}
+  end
 
   defp handle(
          :action,
@@ -581,6 +604,17 @@ defmodule Conveyor.Ingest.Normalizer do
 
   defp blank_to_nil(""), do: nil
   defp blank_to_nil(v), do: v
+
+  defp micros(nil), do: nil
+  defp micros(%{seconds: s, nanos: n}), do: s * 1_000_000 + div(n, 1_000)
+
+  # `BuildStarted.start_time`, known once that event was applied (it sets the version;
+  # before it `started_at` is when the stream arrived). A resumed stream reads both from
+  # the row.
+  defp build_start(%{bazel_version: v, started_at: %DateTime{} = at}) when is_binary(v),
+    do: DateTime.to_unix(at, :microsecond)
+
+  defp build_start(_inv), do: nil
 
   defp duration_ms(%DateTime{} = a, %DateTime{} = b), do: DateTime.diff(b, a, :millisecond)
   defp duration_ms(_, _), do: nil

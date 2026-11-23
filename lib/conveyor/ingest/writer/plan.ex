@@ -16,6 +16,7 @@ defmodule Conveyor.Ingest.Writer.Plan do
           targets: [map()],
           tests: [map()],
           actions: [map()],
+          stream_rows: [map()],
           metrics: [map()],
           tag_counts: %{{term(), String.t(), String.t()} => pos_integer()}
         }
@@ -49,6 +50,7 @@ defmodule Conveyor.Ingest.Writer.Plan do
       targets: merged_rows(units, :targets),
       tests: merged_rows(units, :tests),
       actions: flat_rows(units, :actions),
+      stream_rows: for(unit <- units, row = Batch.stream_row(unit), do: row),
       metrics: metrics_rows(units, now),
       tag_counts: tag_counts(units)
     }

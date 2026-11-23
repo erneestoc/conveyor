@@ -41,6 +41,9 @@ defmodule Conveyor.Invocations.Invocation do
     field :event_count, :integer, default: 0
     # Events counted in `event_count` whose frames are not in the raw store (PLAN §28.1).
     field :events_skipped, :integer, default: 0
+    # Successful per-action events (PLAN §28) and when their keys were merged.
+    field :stream_actions, :integer, default: 0
+    field :stream_keys_at, :utc_datetime_usec
     field :log_bytes, :integer, default: 0
     field :log_lines, :integer, default: 0
     field :targets_configured, :integer, default: 0
@@ -88,6 +91,14 @@ defmodule Conveyor.Invocations.Invocation do
   @doc "Columns the ingest worker is allowed to set on each batch commit."
   def ingest_fields do
     __schema__(:fields) --
-      [:id, :project_id, :api_key_id, :inserted_at, :updated_at, :last_event_seq]
+      [
+        :id,
+        :project_id,
+        :api_key_id,
+        :inserted_at,
+        :updated_at,
+        :last_event_seq,
+        :stream_keys_at
+      ]
   end
 end

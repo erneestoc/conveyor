@@ -100,6 +100,15 @@ defmodule Conveyor.Ingest.Writer.Transaction do
           timeout: timeout
         )
 
+    # The fence above makes a chunk exactly-once: the unit's sequence numbers were not
+    # committed before, and a stale worker's unit never gets here.
+    if plan.stream_rows != [],
+      do:
+        Repo.insert_all(Conveyor.Rbe.StreamChunk, plan.stream_rows,
+          on_conflict: :nothing,
+          timeout: timeout
+        )
+
     upsert_grouped(Metrics, plan.metrics, [:invocation_id], [:inserted_at], timeout)
     :ok
   end

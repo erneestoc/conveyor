@@ -30,24 +30,27 @@ defmodule Conveyor.Rbe.StreamActionsTest do
 
   test "a record is a hit when it started before its build, and timed when end is after start" do
     args = ["cc", "-c"]
-    record = &StreamActions.record("//x:y", "CppCompile", "x/y.o", args, &1, &2, &3)
+    record = &StreamActions.record("//x:y", "CppCompile", "x/y.o", args, &1, &2, &3, 7)
 
-    assert {_, @t0, 1_500, "CppCompile", "//x:y", false} = r = record.(@t0, @t0 + 1_500, @t0)
+    assert {key, @t0, 1_500, "CppCompile", "//x:y", false, 7} = r = record.(@t0, @t0 + 1_500, @t0)
     assert StreamActions.timed?(r)
+    assert StreamActions.execution?(r)
+    assert key == StreamActions.key("//x:y", "CppCompile", "x/y.o", args)
 
     # A cache hit carries the original execution's times.
-    assert {_, _, 2_000, _, _, true} = hit = record.(@t0 - 9_000, @t0 - 7_000, @t0)
+    assert {<<0::64>>, nil, 2_000, _, _, true, _} = hit = record.(@t0 - 9_000, @t0 - 7_000, @t0)
     assert StreamActions.timed?(hit)
+    refute StreamActions.execution?(hit)
 
     # Without BuildStarted's time nothing is a hit.
-    assert {_, _, _, _, _, false} = record.(@t0 - 9_000, @t0 - 7_000, nil)
+    assert {_, _, 2_000, _, _, false, _} = record.(@t0 - 9_000, @t0 - 7_000, nil)
 
     # Bazel 8.0 to 8.5: end == start. Bazel 7: no times.
-    assert {_, @t0, 0, _, _, false} = flat = record.(@t0, @t0, @t0)
+    assert {<<0::64>>, nil, 0, _, _, false, _} = flat = record.(@t0, @t0, @t0)
     refute StreamActions.timed?(flat)
-    assert {_, nil, 0, _, _, false} = none = record.(nil, nil, @t0)
+    assert {_, nil, 0, _, _, false, _} = none = record.(nil, nil, @t0)
     refute StreamActions.timed?(none)
-    assert {_, @t0, 0, _, _, false} = record.(@t0, nil, @t0)
+    assert {_, nil, 0, _, _, false, _} = record.(@t0, nil, @t0)
   end
 
   test "an empty chunk" do
@@ -62,9 +65,10 @@ defmodule Conveyor.Rbe.StreamActionsTest do
             out <- string(:alphanumeric, max_length: 12),
             args <- list_of(string(:printable, max_length: 8), max_length: 4),
             start <- one_of([constant(nil), integer((@t0 - 1_000_000)..(@t0 + 1_000_000))]),
-            length <- integer(0..5_000_000)
+            length <- integer(0..5_000_000),
+            seq <- integer(1..100_000)
           ) do
-        StreamActions.record(label, mnemonic, out, args, start, start && start + length, @t0)
+        StreamActions.record(label, mnemonic, out, args, start, start && start + length, @t0, seq)
       end
 
     check all(records <- list_of(record, max_length: 40)) do
@@ -82,7 +86,8 @@ defmodule Conveyor.Rbe.StreamActionsTest do
           ["tool", "-o", "#{i}"],
           @t0 + i * 37_123,
           @t0 + i * 37_123 + 250_000 + rem(i * 7919, 900_000),
-          @t0
+          @t0,
+          2 * i
         )
       end
 

@@ -16,27 +16,33 @@ defmodule Conveyor.Rbe.StreamActions do
 
   ## The record
 
-  `{key, start µs | nil, duration µs, mnemonic, label, hit?}`. An event without usable
+  `{key, start µs | nil, duration µs, mnemonic, label, hit?, seq}`. `seq` is the sequence
+  number of the event in its stream: the record's ordinal in the build. Only an execution
+  (timed, not a hit) carries its key and its start; the others are counted, never
+  matched: their key is eight zero bytes and their start nil. A hit keeps its duration:
+  the time the cache saved. An event without usable
   times (Bazel 7: no times; 8.0 to 8.5: `end == start`) has start `nil` or duration 0 and
   is counted, not timed (`timed?/1`). A cache hit carries the times of the original
   execution, so it is the action that started before its build did.
 
   ## The chunk
 
-  One binary per batch of records: a version byte, then zstd over a term-free columnar
-  layout (keys, starts, durations, mnemonic indices, label indices, flags, then the two
-  string tables), so equal bytes sit next to each other. `decode/1` returns the records
+  One binary per batch of records: a version byte, then zstd over columns (the keys of
+  the executions, finish times as distances, durations, mnemonic and label indices,
+  flags, sequence numbers as distances, then the two string tables), so equal bytes sit
+  next to each other. `decode/1` returns the records
   in the order they were added.
   """
 
   @version 1
   @domain "conveyor-stream-key-v1\0"
   @key_source 2
-  @no_start -0x8000000000000000
+  @no_key <<0::64>>
 
   @type action ::
           {key :: <<_::64>>, start_us :: integer() | nil, duration_us :: non_neg_integer(),
-           mnemonic :: String.t(), label :: String.t(), hit? :: boolean()}
+           mnemonic :: String.t(), label :: String.t(), hit? :: boolean(),
+           seq :: non_neg_integer()}
 
   @doc "The `key_source` of a stream key (beside 0, Bazel's digest, and 1, the fallback)."
   @spec key_source() :: 2
@@ -76,20 +82,29 @@ defmodule Conveyor.Rbe.StreamActions do
           [String.t()],
           integer() | nil,
           integer() | nil,
-          integer() | nil
+          integer() | nil,
+          non_neg_integer()
         ) :: action()
-  def record(label, mnemonic, primary_output, command_line, start_us, end_us, build_start_us) do
+  def record(label, mnemonic, primary_output, command_line, start_us, end_us, build_start, seq) do
     duration = if start_us && end_us && end_us > start_us, do: end_us - start_us, else: 0
-    hit? = start_us != nil and build_start_us != nil and start_us < build_start_us
+    hit? = start_us != nil and build_start != nil and start_us < build_start
 
-    {key(label, mnemonic, primary_output, command_line), start_us, duration, mnemonic, label,
-     hit?}
+    # Only an execution keeps its key and its start: a hit's times are those of the
+    # execution that filled the cache (its duration is the time the hit saved).
+    if duration > 0 and not hit?,
+      do:
+        {key(label, mnemonic, primary_output, command_line), start_us, duration, mnemonic, label,
+         false, seq},
+      else: {@no_key, nil, duration, mnemonic, label, hit?, seq}
   end
 
-  @doc "True when the record has a start and a duration (Bazel 8.6 and later)."
+  @doc "True when the event had usable times (Bazel 8.6 and later; a hit has them too)."
   @spec timed?(action()) :: boolean()
-  def timed?({_key, start, duration, _mnemonic, _label, _hit}),
-    do: start != nil and duration > 0
+  def timed?({_key, _start, duration, _mnemonic, _label, _hit, _seq}), do: duration > 0
+
+  @doc "True when the record is an execution: timed and not served from a cache."
+  @spec execution?(action()) :: boolean()
+  def execution?({_key, start, _duration, _mnemonic, _label, _hit, _seq}), do: start != nil
 
   @doc "A chunk of the records, in order. `[]` encodes to a chunk that decodes to `[]`."
   @spec encode([action()]) :: binary()
@@ -97,41 +112,87 @@ defmodule Conveyor.Rbe.StreamActions do
     {mnemonics, mnemonic_ids} = table(records, 3)
     {labels, label_ids} = table(records, 4)
 
+    # Sequence numbers as the distance to the record before: small and mostly equal.
+    {seqs, _} =
+      Enum.map_reduce(records, 0, fn record, last ->
+        seq = elem(record, 6)
+        {<<seq - last::signed-64>>, seq}
+      end)
+
+    # Finish times as the distance to the execution before: events arrive in the order
+    # actions finish, so the distances are small.
+    {ends, _} =
+      Enum.map_reduce(records, 0, fn
+        {_, nil, _, _, _, _, _}, last ->
+          {<<0::64>>, last}
+
+        {_, start, duration, _, _, _, _}, last ->
+          {<<start + duration - last::signed-64>>, start + duration}
+      end)
+
     columns = [
-      <<length(records)::32, length(mnemonics)::32, length(labels)::32>>,
-      for({key, _, _, _, _, _} <- records, do: key),
-      for({_, start, _, _, _, _} <- records, do: <<start || @no_start::signed-64>>),
-      for({_, _, duration, _, _, _} <- records, do: <<duration::64>>),
-      for({_, _, _, m, _, _} <- records, do: <<Map.fetch!(mnemonic_ids, m)::16>>),
-      for({_, _, _, _, l, _} <- records, do: <<Map.fetch!(label_ids, l)::32>>),
-      for({_, _, _, _, _, hit?} <- records, do: if(hit?, do: 1, else: 0)),
+      <<length(records)::32, Enum.count(records, &elem(&1, 1))::32, length(mnemonics)::32,
+        length(labels)::32>>,
+      for({key, start, _, _, _, _, _} <- records, start != nil, do: key),
+      ends,
+      for({_, _, duration, _, _, _, _} <- records, do: <<duration::64>>),
+      for({_, _, _, m, _, _, _} <- records, do: <<Map.fetch!(mnemonic_ids, m)::16>>),
+      for({_, _, _, _, l, _, _} <- records, do: <<Map.fetch!(label_ids, l)::32>>),
+      for({_, start, _, _, _, hit?, _} <- records) do
+        if(hit?, do: 1, else: 0) + if(start, do: 2, else: 0)
+      end,
+      seqs,
       Enum.map(mnemonics, &strz/1),
       Enum.map(labels, &strz/1)
     ]
 
-    IO.iodata_to_binary([@version, :zstd.compress(columns)])
+    IO.iodata_to_binary([@version, :zstd.compress(columns, %{compressionLevel: 9})])
   end
 
   @doc "The records of a chunk made by `encode/1`."
   @spec decode(binary()) :: [action()]
   def decode(<<@version, compressed::binary>>) do
-    <<n::32, nm::32, nl::32, rest::binary>> =
+    <<n::32, nx::32, nm::32, nl::32, rest::binary>> =
       compressed |> :zstd.decompress() |> IO.iodata_to_binary()
 
-    <<keys::binary-size(^n * 8), starts::binary-size(^n * 8), durations::binary-size(^n * 8),
+    <<keys::binary-size(^nx * 8), rest::binary>> = rest
+
+    <<ends::binary-size(^n * 8), durations::binary-size(^n * 8),
       mnemonic_ids::binary-size(^n * 2), label_ids::binary-size(^n * 4), flags::binary-size(^n),
-      strings::binary>> = rest
+      seqs::binary-size(^n * 8), strings::binary>> = rest
 
     {mnemonics, strings} = strings(strings, nm)
     {labels, ""} = strings(strings, nl)
+    flags = for <<f <- flags>>, do: f
+    durations = for <<d::64 <- durations>>, do: d
+
+    {seqs, _} =
+      Enum.map_reduce(for(<<d::signed-64 <- seqs>>, do: d), 0, fn d, last ->
+        {last + d, last + d}
+      end)
+
+    {starts, _} =
+      [flags, durations, for(<<e::signed-64 <- ends>>, do: e)]
+      |> Enum.zip()
+      |> Enum.map_reduce(0, fn
+        {f, duration, delta}, last when f >= 2 -> {last + delta - duration, last + delta}
+        _, last -> {nil, last}
+      end)
+
+    {keys, <<>>} =
+      Enum.map_reduce(flags, keys, fn
+        f, <<key::binary-size(8), rest::binary>> when f >= 2 -> {key, rest}
+        _, rest -> {@no_key, rest}
+      end)
 
     [
-      for(<<k::binary-size(8) <- keys>>, do: k),
-      for(<<s::signed-64 <- starts>>, do: if(s == @no_start, do: nil, else: s)),
-      for(<<d::64 <- durations>>, do: d),
+      keys,
+      starts,
+      durations,
       for(<<m::16 <- mnemonic_ids>>, do: elem(mnemonics, m)),
       for(<<l::32 <- label_ids>>, do: elem(labels, l)),
-      for(<<f <- flags>>, do: f == 1)
+      Enum.map(flags, &(rem(&1, 2) == 1)),
+      seqs
     ]
     |> Enum.zip()
   end

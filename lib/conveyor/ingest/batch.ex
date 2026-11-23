@@ -31,6 +31,9 @@ defmodule Conveyor.Ingest.Batch do
             targets: %{},
             tests: %{},
             actions: [],
+            # Compact records of successful per-action events (`Conveyor.Rbe.StreamActions`),
+            # newest first: the batch's chunk of `stream_actions`.
+            stream: [],
             metrics: nil,
             invocation: %{},
             tag_keys: %{},
@@ -111,6 +114,10 @@ defmodule Conveyor.Ingest.Batch do
   @spec add_action(t(), map()) :: t()
   def add_action(batch, attrs), do: %{batch | actions: [attrs | batch.actions]}
 
+  @doc "Adds the compact record of a successful per-action event (PLAN §28)."
+  @spec add_stream(t(), Conveyor.Rbe.StreamActions.action()) :: t()
+  def add_stream(batch, record), do: %{batch | stream: [record | batch.stream]}
+
   @spec put_metrics(t(), map()) :: t()
   def put_metrics(batch, attrs), do: %{batch | metrics: Map.merge(batch.metrics || %{}, attrs)}
 
@@ -163,6 +170,7 @@ defmodule Conveyor.Ingest.Batch do
       targets: Map.merge(a.targets, b.targets, fn _k, x, y -> Map.merge(x, y) end),
       tests: Map.merge(a.tests, b.tests, fn _k, x, y -> Map.merge(x, y) end),
       actions: b.actions ++ a.actions,
+      stream: b.stream ++ a.stream,
       metrics: merge_metrics(a.metrics, b.metrics),
       invocation: Map.merge(a.invocation, b.invocation),
       tag_keys: Map.merge(a.tag_keys, b.tag_keys, fn _k, x, y -> x + y end),
@@ -227,7 +235,7 @@ defmodule Conveyor.Ingest.Batch do
   @spec empty?(t()) :: boolean()
   def empty?(%__MODULE__{} = b) do
     b.events == [] and b.log == [] and b.targets == %{} and b.tests == %{} and b.actions == [] and
-      b.metrics == nil and b.invocation == %{} and b.last_seq < b.first_seq and
+      b.stream == [] and b.metrics == nil and b.invocation == %{} and b.last_seq < b.first_seq and
       b.tag_keys == %{}
   end
 
@@ -251,6 +259,20 @@ defmodule Conveyor.Ingest.Batch do
       Enum.reverse(b.events),
       compress
     )
+  end
+
+  @doc "The `stream_actions` row for this batch, or nil when it holds no per-action record."
+  @spec stream_row(t()) :: map() | nil
+  def stream_row(%__MODULE__{stream: []}), do: nil
+
+  def stream_row(%__MODULE__{} = b) do
+    %{
+      invocation_id: b.invocation_id,
+      first_seq: b.first_seq,
+      day: b.day,
+      n: length(b.stream),
+      records: b.stream |> Enum.reverse() |> Conveyor.Rbe.StreamActions.encode()
+    }
   end
 
   @doc "The `log_segments` row for this batch, or nil when it holds no log text."
