@@ -38,9 +38,12 @@ defmodule Conveyor.Rbe.StreamActionsTest do
     assert key == StreamActions.key("//x:y", "CppCompile", "x/y.o", args)
 
     # A cache hit carries the original execution's times.
-    assert {<<0::64>>, nil, 2_000, _, _, true, _} = hit = record.(@t0 - 9_000, @t0 - 7_000, @t0)
+    # A cache hit carries the original execution's times, and keeps them with its key.
+    origin = @t0 - 9_000
+    assert {^key, ^origin, 2_000, _, _, true, _} = hit = record.(origin, @t0 - 7_000, @t0)
     assert StreamActions.timed?(hit)
     refute StreamActions.execution?(hit)
+    assert StreamActions.linked_hit?(hit)
 
     # Without BuildStarted's time nothing is a hit.
     assert {_, _, 2_000, _, _, false, _} = record.(@t0 - 9_000, @t0 - 7_000, nil)

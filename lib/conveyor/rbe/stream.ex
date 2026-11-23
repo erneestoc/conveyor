@@ -34,6 +34,7 @@ defmodule Conveyor.Rbe.Stream do
 
   @timeout :timer.minutes(5)
   @chunk 5_000
+  @top 50
   @finished ["succeeded", "failed", "aborted"]
   # How far a build's actions may lie outside `[started_at, finished_at]` (clock
   # readings of one machine, rounded differently).
@@ -273,7 +274,14 @@ defmodule Conveyor.Rbe.Stream do
       saved) and of actions without times;
     * `"any"`, `"same"`: `class → mnemonic → cell` of the executions against the any-commit
       key and against the same-commit key (classes as in `Conveyor.Rbe.Hour`; in `"same"`
-      the executions of a build without a commit are `"nocommit"`).
+      the executions of a build without a commit are `"nocommit"`);
+    * `"est"`: the evidence for the estimate between the two (PLAN §28.4): `"xhit"`
+      (`mnemonic → cell` of hits served from a build at another commit), `"diff"`
+      (executions of a key although the build read the cache of the build that had
+      finished it: the work changed) and `"unk"` (`class → mnemonic → cell` of the
+      other executions that are duplicates at any commit only);
+    * `"tgt"`: `project → target → space_class → [count, wall ms, core ms]` of the
+      duplicates, for the #{@top} targets of the hour with the most.
 
   A cell is `[count, wall ms, core ms, 0, 0]` (no exact cores in a stream). Core time is
   wall × the CPU ÷ wall ratio of the mnemonic in the build (`BuildMetrics`; floor 1), or
@@ -301,6 +309,7 @@ defmodule Conveyor.Rbe.Stream do
     else
       used
       |> Enum.reduce(%{}, &build/2)
+      |> top_targets()
       |> cells_to_ms()
       |> Map.merge(%{
         "events" => length(builds),
@@ -329,21 +338,101 @@ defmodule Conveyor.Rbe.Stream do
         acc = if commit, do: acc, else: add(acc, ["no_commit"], 1)
         [{own, _} | _] = scopes = project_id |> Projects.get_project!() |> Groups.scopes()
         {wide, _} = List.last(scopes)
+        hits = Enum.filter(others, &StreamActions.linked_hit?/1)
         keys = Enum.map(executions, &elem(&1, 0))
         keys = if commit, do: keys ++ Enum.map(keys, &commit_key(&1, commit)), else: keys
         own_rows = rows(own, keys)
-        wide_rows = if wide == own, do: own_rows, else: rows(wide, keys)
-        ratio = ratios(id, executions)
 
-        Enum.reduce(executions, acc, fn {key, start, duration, mnemonic, _, _, seq}, acc ->
+        wide_rows =
+          if wide == own and hits == [],
+            do: own_rows,
+            else: rows(wide, Enum.uniq(keys ++ Enum.map(hits, &elem(&1, 0))))
+
+        ratio = ratios(id, executions)
+        {seen, acc} = seen(hits, id, commit, wide_rows, acc)
+        pid = Integer.to_string(project_id)
+
+        Enum.reduce(executions, acc, fn {key, start, duration, mnemonic, label, _, seq}, acc ->
           spawn = %{ordinal: seq, started_at: datetime(start)}
           class = &class(ActionKey.classify(spawn, id, own_rows[&1], wide_rows[&1]))
           cell = [1, duration, round(duration * Map.get(ratio, mnemonic, 1.0))]
+          any = class.(key)
           same = if commit, do: class.(commit_key(key, commit)), else: "nocommit"
 
-          acc |> add(["any", class.(key), mnemonic], cell) |> add(["same", same, mnemonic], cell)
+          acc
+          |> add(["any", any, mnemonic], cell)
+          |> add(["same", same, mnemonic], cell)
+          |> estimate(any, same, wide_rows[key], seen, commit, mnemonic, cell)
+          |> target(pid, label, any, same, cell)
         end)
     end
+  end
+
+  # The builds whose results this build read from a cache: a hit carries the start of the
+  # execution it was served from, and that start is the first execution of its key in a
+  # row held by another build. A hit served from a build at another commit (or with no
+  # commit on either side) is counted under `"est" → "xhit"`: an action seen unchanged
+  # across commits by a build that had the earlier result.
+  defp seen([], _id, _commit, _rows, acc), do: {%{}, acc}
+
+  defp seen(hits, id, commit, rows, acc) do
+    linked =
+      for {key, start, duration, mnemonic, _, _, _} <- hits,
+          row = rows[key],
+          row.first_invocation_id != id,
+          row.first_start != nil,
+          DateTime.to_unix(row.first_start, :microsecond) == start,
+          do: {row.first_invocation_id, mnemonic, duration}
+
+    seen = linked |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
+
+    commits =
+      from(i in Invocation, where: i.id in ^seen, select: {i.id, i.tags})
+      |> Repo.all(timeout: @timeout)
+      |> Map.new(fn {id, tags} -> {id, commit(tags)} end)
+
+    acc =
+      Enum.reduce(linked, acc, fn {from, mnemonic, duration}, acc ->
+        if commit == nil or commits[from] != commit,
+          do: add(acc, ["est", "xhit", mnemonic], [1, duration, duration]),
+          else: acc
+      end)
+
+    {commits, acc}
+  end
+
+  # The evidence for the estimate (PLAN §28.4). An execution that ran although its build
+  # read the cache of the build that had finished its key, at another commit, says the
+  # work changed between the two commits (`"diff"`, the counterpart of `"xhit"`). Such an
+  # execution is no duplicate of that first one; any other execution that repeats its key
+  # at any commit and is not a duplicate at its own commit is `"unk"`: nothing in the
+  # stream says (kept by its any-commit class).
+  defp estimate(acc, "first", _same, _row, _seen, _commit, _mnemonic, _cell), do: acc
+
+  defp estimate(acc, any, same, row, seen, commit, mnemonic, cell) do
+    from = row.first_invocation_id
+
+    different? =
+      any in ["seq", "seq_x"] and is_map_key(seen, from) and
+        (commit == nil or seen[from] != commit)
+
+    acc = if different?, do: add(acc, ["est", "diff", mnemonic], cell), else: acc
+
+    if same in ["first", "nocommit"] and not different?,
+      do: add(acc, ["est", "unk", any, mnemonic], cell),
+      else: acc
+  end
+
+  # Per project and target: `[count, wall, core]` of the duplicates in either key space.
+  defp target(acc, _pid, _label, "first", same, _cell) when same in ["first", "nocommit"],
+    do: acc
+
+  defp target(acc, pid, label, any, same, cell) do
+    acc = if any == "first", do: acc, else: add(acc, ["tgt", pid, label, "any_" <> any], cell)
+
+    if same in ["first", "nocommit"],
+      do: acc,
+      else: add(acc, ["tgt", pid, label, "same_" <> same], cell)
   end
 
   defp uuid(<<_::128>> = raw), do: Ecto.UUID.load!(raw)
@@ -375,6 +464,21 @@ defmodule Conveyor.Rbe.Stream do
     end
   end
 
+  # The hour keeps the #{@top} targets with the most duplicated time (any commit).
+  defp top_targets(%{"tgt" => by_project} = acc) do
+    kept =
+      for({pid, labels} <- by_project, {label, classes} <- labels, do: {pid, label, classes})
+      |> Enum.sort_by(fn {pid, label, classes} ->
+        {-(classes |> Map.values() |> Enum.map(&Enum.at(&1, 1)) |> Enum.sum()), pid, label}
+      end)
+      |> Enum.take(@top)
+      |> Enum.reduce(%{}, fn {pid, label, classes}, acc -> add(acc, [pid, label], classes) end)
+
+    Map.put(acc, "tgt", kept)
+  end
+
+  defp top_targets(acc), do: acc
+
   defp add(acc, [key], value), do: Map.update(acc, key, value, &Conveyor.Rbe.sum(&1, value))
 
   defp add(acc, [key | rest], value),
@@ -385,8 +489,19 @@ defmodule Conveyor.Rbe.Stream do
   defp cells_to_ms([n, us, core_us]) when is_integer(n),
     do: [n, round(us / 1000), round(core_us / 1000), 0, 0]
 
+  defp cells_to_ms(%{"tgt" => _} = map) do
+    {tgt, rest} = Map.pop(map, "tgt")
+    Map.put(cells_to_ms(rest), "tgt", tgt_to_ms(tgt))
+  end
+
   defp cells_to_ms(map) when is_map(map), do: Map.new(map, fn {k, v} -> {k, cells_to_ms(v)} end)
   defp cells_to_ms(n), do: n
+
+  # A target's cells stay `[count, wall ms, core ms]`.
+  defp tgt_to_ms([n, us, core_us]) when is_integer(n),
+    do: [n, round(us / 1000), round(core_us / 1000)]
+
+  defp tgt_to_ms(map), do: Map.new(map, fn {k, v} -> {k, tgt_to_ms(v)} end)
 
   @doc "An hour's stored report with its stream half (`\"stream\"`); nil when both are nil."
   @spec join(map() | nil, map() | nil) :: map() | nil

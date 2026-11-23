@@ -14,19 +14,31 @@ defmodule Conveyor.StreamFixture do
 
   @doc """
   The events of a recorded stream. `:shift_us` moves the build in time (its start, its
-  actions' times, its finish); `:tags` are what `--build_metadata` would have added.
+  actions' times, its finish), `:hits_shift_us` its cache hits (the times of the build
+  they were served from; by default with the build); `:tags` are what `--build_metadata`
+  would have added.
   """
   def events(name, opts \\ []) do
     shift = Keyword.get(opts, :shift_us, 0)
+    hits_shift = Keyword.get(opts, :hits_shift_us, shift)
     tags = Keyword.get(opts, :tags, %{})
+    events = name |> path("bep") |> Fixture.read!()
 
-    name
-    |> path("bep")
-    |> Fixture.read!()
-    |> Enum.map(fn
+    started =
+      Enum.find_value(events, fn
+        %{payload: {:started, s}} -> s.start_time
+        _ -> nil
+      end)
+
+    Enum.map(events, fn
       # Bazel always sends this event; `--build_metadata` fills it.
       %{payload: {:build_metadata, m}} = e ->
         %{e | payload: {:build_metadata, %{m | metadata: Map.merge(m.metadata, tags)}}}
+
+      # A cache hit carries the times of the build that filled the cache.
+      %{payload: {:action, %{start_time: %{} = at}}} = e
+      when {at.seconds, at.nanos} < {started.seconds, started.nanos} ->
+        shift(e, hits_shift)
 
       e ->
         shift(e, shift)

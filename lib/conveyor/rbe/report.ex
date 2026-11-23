@@ -21,6 +21,8 @@ defmodule Conveyor.Rbe.Report do
           names: %{integer() => String.t()}
         ]
 
+  @zero %{n: 0, ms: 0, core_ms: 0}
+
   @spec build(Scope.t(), opts()) :: map()
   def build(%Scope{} = scope, opts) do
     settings = Keyword.fetch!(opts, :settings)
@@ -66,7 +68,15 @@ defmodule Conveyor.Rbe.Report do
       # Where the figures above come from, and the same analysis from the event stream
       # alone for the builds without a parsed log (`Conveyor.Rbe.Stream`).
       source: source(rbe),
-      stream: stream(rbe["stream"], cores, row.succeeded + row.failed + row.aborted),
+      stream:
+        stream(
+          rbe["stream"],
+          cores,
+          row.succeeded + row.failed + row.aborted,
+          rows,
+          visible,
+          names
+        ),
       keys: rbe["keys"] || %{},
       executed: executed,
       cache: %{
@@ -125,9 +135,9 @@ defmodule Conveyor.Rbe.Report do
   # Two figures per class: against the key at the build's commit (a floor: duplicates at
   # one commit, exact) and against the key at any commit (a ceiling: every duplicate,
   # and actions whose inputs changed without changing their command line).
-  defp stream(nil, _cores, _builds), do: nil
+  defp stream(nil, _cores, _builds, _rows, _visible, _names), do: nil
 
-  defp stream(s, cores, builds) do
+  defp stream(s, cores, builds, rows, visible, names) do
     figure = fn space ->
       classes = s[space] || %{}
       cell = fn names -> names |> Enum.map(&total(classes[&1], cores)) |> add() end
@@ -148,6 +158,10 @@ defmodule Conveyor.Rbe.Report do
     end
 
     any = figure.("any")
+    same = figure.("same")
+    hits = total(s["hit"], cores)
+    spawns = hits.n + any.executed.n
+    days = stream_days(rows)
 
     %{
       builds: s["builds"] || 0,
@@ -155,19 +169,199 @@ defmodule Conveyor.Rbe.Report do
       no_commit_builds: s["no_commit"] || 0,
       pending_builds: s["pending"] || 0,
       logged_builds: s["logged"] || 0,
+      # builds merged after their hour's figures were final (not in them)
+      late_builds: s["late"] || 0,
       # builds that sent per-action events, of the finished builds of the window
       coverage: %{builds: builds, with_events: s["events"] || 0},
       executed: any.executed,
-      hits: total(s["hit"], cores),
+      hits: hits,
       untimed: total(s["untimed"], cores).n,
-      same_commit: figure.("same"),
-      any_commit: any
+      same_commit: same,
+      any_commit: any,
+      estimate: estimate(s, same, any, cores),
+      # UTC days with at least one build reported from its per-action events
+      days: days,
+      per_day: %{
+        same_commit: %{
+          sequential: per_day(same.sequential, days),
+          racing: per_day(same.racing, days)
+        },
+        any_commit: %{
+          sequential: per_day(any.sequential, days),
+          racing: per_day(any.racing, days)
+        }
+      },
+      # today; with a cache every build reads (sequential duplicates become hits); and
+      # with deduplication of actions in flight as well. `[same commit, any commit]`.
+      hit_rate: %{
+        today: rate(hits.n, spawns),
+        perfect_cache: for(f <- [same, any], do: rate(hits.n + f.sequential.n, spawns)),
+        with_in_flight_deduplication:
+          for(f <- [same, any], do: rate(hits.n + f.duplicate.n, spawns))
+      },
+      mnemonics: stream_mnemonics(s, cores),
+      targets: stream_targets(s["tgt"] || %{}, cores, visible, names)
     }
   end
 
-  # --- cells ---------------------------------------------------------------------------------
+  defp stream_days(rows) do
+    rows
+    |> Enum.filter(&((get_in(&1.rbe || %{}, ["stream", "builds"]) || 0) > 0))
+    |> Enum.map(&DateTime.to_date(&1.hour))
+    |> Enum.uniq()
+    |> length()
+  end
 
-  @zero %{n: 0, ms: 0, core_ms: 0}
+  # The estimate between the two figures (PLAN §28.4). An execution that repeats its key
+  # only across commits is a duplicate when the work did not change between them. The
+  # stream decides that for some (`different`: the build read the cache of the build
+  # that had finished the key, and ran it anyway) and leaves the rest `unknown`. Of the
+  # unknown ones the estimate counts the share of actions that builds with the earlier
+  # result at hand found unchanged across commits: `unchanged ÷ (unchanged + different)`
+  # per mnemonic, in count for counts and in time for times; the share over all
+  # mnemonics where a mnemonic has no such observation. Without any observation and
+  # with something unknown there is no estimate (nil).
+  defp estimate(s, same, any, cores) do
+    est = s["est"] || %{}
+    xhit = est["xhit"] || %{}
+    diff = est["diff"] || %{}
+    unk = est["unk"] || %{}
+    unchanged = total(xhit, cores)
+    different = total(diff, cores)
+    all = fn classes -> classes |> Enum.map(&total(unk[&1], cores)) |> add() end
+    unknown = all.(Hour.dups())
+    overall = share(unchanged, different)
+
+    scaled = fn classes ->
+      for class <- classes, {mnemonic, cell} <- unk[class] || %{} do
+        c = one(mnemonic, cell, cores)
+
+        {n, t} =
+          share(
+            one(mnemonic, xhit[mnemonic] || [0, 0, 0, 0, 0], cores),
+            one(mnemonic, diff[mnemonic] || [0, 0, 0, 0, 0], cores)
+          ) || overall
+
+        %{n: round(c.n * n), ms: round(c.ms * t), core_ms: round(c.core_ms * t)}
+      end
+      |> add()
+    end
+
+    if unknown.n > 0 and overall == nil do
+      nil
+    else
+      # Never below the floor, never above the ceiling, class by class.
+      figure = fn classes, floor, ceiling ->
+        e = add([floor, scaled.(classes)])
+
+        %{
+          n: e.n |> min(max(ceiling.n, floor.n)),
+          ms: e.ms |> min(max(ceiling.ms, floor.ms)),
+          core_ms: e.core_ms |> min(max(ceiling.core_ms, floor.core_ms))
+        }
+      end
+
+      racing = figure.(Hour.racing(), same.racing, any.racing)
+      sequential = figure.(Hour.sequential(), same.sequential, any.sequential)
+
+      %{
+        racing: racing,
+        sequential: sequential,
+        cross_project: figure.(~w(racing_x seq_x), same.cross_project, any.cross_project),
+        duplicate: add([racing, sequential]),
+        duplicate_time_share: rate(racing.ms + sequential.ms, any.executed.ms),
+        # what the estimate rests on
+        evidence: %{
+          unchanged: unchanged,
+          different: different,
+          unknown: unknown,
+          share: overall && %{n: elem(overall, 0), ms: elem(overall, 1)}
+        }
+      }
+    end
+  end
+
+  defp share(unchanged, different) do
+    if unchanged.n + different.n > 0 do
+      {unchanged.n / (unchanged.n + different.n),
+       if(unchanged.ms + different.ms > 0,
+         do: unchanged.ms / (unchanged.ms + different.ms),
+         else: unchanged.n / (unchanged.n + different.n)
+       )}
+    end
+  end
+
+  defp stream_mnemonics(s, cores) do
+    spaces = [s["any"] || %{}, s["same"] || %{}]
+
+    names =
+      [s["hit"] || %{} | Enum.flat_map(spaces, &Map.values/1)]
+      |> Enum.flat_map(&Map.keys/1)
+      |> Enum.uniq()
+
+    for name <- names do
+      cell = fn space, classes ->
+        classes |> Enum.map(&total(Map.take(space[&1] || %{}, [name]), cores)) |> add()
+      end
+
+      [any, same] = spaces
+      executed = cell.(any, ["first" | Hour.dups()])
+
+      %{
+        mnemonic: name,
+        hits: total(Map.take(s["hit"] || %{}, [name]), cores).n,
+        executed: executed,
+        cores: if(executed.ms > 0, do: executed.core_ms / executed.ms),
+        cores_source:
+          if(Map.has_key?(cores, name), do: "project setting", else: "cpu time ÷ wall time"),
+        same_commit: %{
+          racing: cell.(same, Hour.racing()),
+          sequential: cell.(same, Hour.sequential())
+        },
+        any_commit: %{
+          racing: cell.(any, Hour.racing()),
+          sequential: cell.(any, Hour.sequential())
+        }
+      }
+    end
+    |> Enum.sort_by(fn m ->
+      {-(m.any_commit.racing.core_ms + m.any_commit.sequential.core_ms), -m.executed.core_ms,
+       m.mnemonic}
+    end)
+  end
+
+  # A target's cells have no mnemonic: the cores are those measured in its builds.
+  defp stream_targets(by_project, _cores, visible, names) do
+    for {pid, labels} <- by_project, visible?(pid, visible), {label, classes} <- labels do
+      cell = fn names ->
+        names
+        |> Enum.map(&(classes[&1] || [0, 0, 0]))
+        |> Enum.reduce(@zero, fn [n, ms, core_ms], acc ->
+          %{n: acc.n + n, ms: acc.ms + ms, core_ms: acc.core_ms + core_ms}
+        end)
+      end
+
+      space = fn prefix ->
+        %{
+          racing: cell.(Enum.map(Hour.racing(), &(prefix <> &1))),
+          sequential: cell.(Enum.map(Hour.sequential(), &(prefix <> &1)))
+        }
+      end
+
+      %{
+        project: name(pid, names),
+        target: label,
+        same_commit: space.("same_"),
+        any_commit: space.("any_")
+      }
+    end
+    |> Enum.sort_by(fn t ->
+      {-(t.any_commit.racing.core_ms + t.any_commit.sequential.core_ms), t.target}
+    end)
+    |> Enum.take(20)
+  end
+
+  # --- cells ---------------------------------------------------------------------------------
 
   # The sum of a `mnemonic → cell` map, with the project's cores applied to the part
   # whose cores are not exact.

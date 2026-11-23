@@ -17,10 +17,11 @@ defmodule Conveyor.Rbe.StreamActions do
   ## The record
 
   `{key, start µs | nil, duration µs, mnemonic, label, hit?, seq}`. `seq` is the sequence
-  number of the event in its stream: the record's ordinal in the build. Only an execution
-  (timed, not a hit) carries its key and its start; the others are counted, never
-  matched: their key is eight zero bytes and their start nil. A hit keeps its duration:
-  the time the cache saved. An event without usable
+  number of the event in its stream: the record's ordinal in the build. A timed action
+  carries its key and its start; an untimed one is counted, never matched: its key is
+  eight zero bytes and its start nil. A hit's start and duration are those of the
+  execution it was served from: the duration is the time the cache saved, the start
+  names that execution. An event without usable
   times (Bazel 7: no times; 8.0 to 8.5: `end == start`) has start `nil` or duration 0 and
   is counted, not timed (`timed?/1`). A cache hit carries the times of the original
   execution, so it is the action that started before its build did.
@@ -89,12 +90,13 @@ defmodule Conveyor.Rbe.StreamActions do
     duration = if start_us && end_us && end_us > start_us, do: end_us - start_us, else: 0
     hit? = start_us != nil and build_start != nil and start_us < build_start
 
-    # Only an execution keeps its key and its start: a hit's times are those of the
-    # execution that filled the cache (its duration is the time the hit saved).
-    if duration > 0 and not hit?,
+    # A timed action keeps its key and its start. A hit's times are those of the
+    # execution that filled the cache: its duration is the time the hit saved, and its
+    # start names that execution (the evidence the estimate works from, PLAN §28.4).
+    if duration > 0,
       do:
         {key(label, mnemonic, primary_output, command_line), start_us, duration, mnemonic, label,
-         false, seq},
+         hit?, seq},
       else: {@no_key, nil, duration, mnemonic, label, hit?, seq}
   end
 
@@ -104,7 +106,16 @@ defmodule Conveyor.Rbe.StreamActions do
 
   @doc "True when the record is an execution: timed and not served from a cache."
   @spec execution?(action()) :: boolean()
-  def execution?({_key, start, _duration, _mnemonic, _label, _hit, _seq}), do: start != nil
+  def execution?({_key, start, _duration, _mnemonic, _label, hit?, _seq}),
+    do: start != nil and not hit?
+
+  @doc """
+  True when the record is a cache hit that names the execution it was served from (its
+  key and that execution's start). Chunks written before 2026-11-24 hold hits without.
+  """
+  @spec linked_hit?(action()) :: boolean()
+  def linked_hit?({_key, start, _duration, _mnemonic, _label, hit?, _seq}),
+    do: start != nil and hit?
 
   @doc "A chunk of the records, in order. `[]` encodes to a chunk that decodes to `[]`."
   @spec encode([action()]) :: binary()
@@ -120,14 +131,18 @@ defmodule Conveyor.Rbe.StreamActions do
       end)
 
     # Finish times as the distance to the execution before: events arrive in the order
-    # actions finish, so the distances are small.
+    # actions finish, so the distances are small. Hits have their own chain: their times are those of
+    # earlier builds.
     {ends, _} =
-      Enum.map_reduce(records, 0, fn
+      Enum.map_reduce(records, {0, 0}, fn
         {_, nil, _, _, _, _, _}, last ->
           {<<0::64>>, last}
 
-        {_, start, duration, _, _, _, _}, last ->
-          {<<start + duration - last::signed-64>>, start + duration}
+        {_, start, duration, _, _, true, _}, {last, last_hit} ->
+          {<<start + duration - last_hit::signed-64>>, {last, start + duration}}
+
+        {_, start, duration, _, _, _, _}, {last, last_hit} ->
+          {<<start + duration - last::signed-64>>, {start + duration, last_hit}}
       end)
 
     columns = [
@@ -174,8 +189,9 @@ defmodule Conveyor.Rbe.StreamActions do
     {starts, _} =
       [flags, durations, for(<<e::signed-64 <- ends>>, do: e)]
       |> Enum.zip()
-      |> Enum.map_reduce(0, fn
-        {f, duration, delta}, last when f >= 2 -> {last + delta - duration, last + delta}
+      |> Enum.map_reduce({0, 0}, fn
+        {3, duration, delta}, {last, hit} -> {hit + delta - duration, {last, hit + delta}}
+        {2, duration, delta}, {last, hit} -> {last + delta - duration, {last + delta, hit}}
         _, last -> {nil, last}
       end)
 
