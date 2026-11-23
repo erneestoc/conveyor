@@ -26,8 +26,10 @@ defmodule Conveyor.Rbe.Report do
     settings = Keyword.fetch!(opts, :settings)
     visible = Keyword.get(opts, :visible, :all)
     names = Keyword.get(opts, :names, %{})
-    row = scope |> Rollup.rows() |> Rollup.combine()
+    rows = Rollup.rows(scope)
+    row = Rollup.combine(rows)
     rbe = row.rbe || %{}
+    logged_days = logged_days(rows)
     cores = settings.cores
     days = max(DateTime.diff(scope.to, scope.from, :second) / 86_400, 1 / 24)
 
@@ -44,22 +46,38 @@ defmodule Conveyor.Rbe.Report do
     spawns = hits.n + executed.n
     sequential = add([same, cross])
 
+    today = rate(hits.n, spawns)
+    perfect = rate(hits.n + sequential.n, spawns)
+    dedup = rate(hits.n + sequential.n + racing.n - local.n, spawns)
+    cold = total(rbe["cold"], cores)
+
     %{
       days: days,
+      # UTC days (of the build's start) with at least one build whose log was parsed,
+      # and the UTC days the window touches: what a "per logged day" figure divides by.
+      logged_days: logged_days,
+      window_days: Date.diff(DateTime.to_date(scope.to), DateTime.to_date(scope.from)) + 1,
+      per_logged_day: %{
+        sequential: per_day(sequential, logged_days),
+        racing: per_day(sub(racing, local), logged_days),
+        cold: per_day(cold, logged_days)
+      },
       coverage: %{builds: row.succeeded + row.failed + row.aborted, logs: rbe["builds"] || 0},
       keys: rbe["keys"] || %{},
       executed: executed,
       cache: %{
         hits: hits.n,
         spawns: spawns,
-        actual_rate: rate(hits.n, spawns),
-        ideal_rate: rate(hits.n + sequential.n, spawns),
-        rbe_rate: rate(hits.n + sequential.n + racing.n - local.n, spawns),
+        hit_rate: %{today: today, perfect_cache: perfect, with_in_flight_deduplication: dedup},
+        # the names of the first release, kept as aliases for one more
+        actual_rate: today,
+        ideal_rate: perfect,
+        rbe_rate: dedup,
         gap: sequential,
         gap_time_share: rate(sequential.ms, executed.ms),
         same_project: same,
         cross_project: cross,
-        cold: total(rbe["cold"], cores)
+        cold: cold
       },
       racing: %{
         total: racing,
@@ -120,6 +138,22 @@ defmodule Conveyor.Rbe.Report do
       %{n: acc.n + c.n, ms: acc.ms + c.ms, core_ms: acc.core_ms + c.core_ms}
     end)
   end
+
+  # A day is the UTC day of a build's start: the day of the hour it is summarized in.
+  # (The window's last, partly computed bucket of up to two hours counts as the day it
+  # starts in.)
+  defp logged_days(rows) do
+    rows
+    |> Enum.filter(&(((&1.rbe || %{})["builds"] || 0) > 0))
+    |> Enum.map(&DateTime.to_date(&1.hour))
+    |> Enum.uniq()
+    |> length()
+  end
+
+  defp per_day(_cell, 0), do: nil
+
+  defp per_day(cell, days),
+    do: %{n: cell.n / days, ms: round(cell.ms / days), core_ms: round(cell.core_ms / days)}
 
   defp sub(a, b), do: %{n: a.n - b.n, ms: a.ms - b.ms, core_ms: a.core_ms - b.core_ms}
 

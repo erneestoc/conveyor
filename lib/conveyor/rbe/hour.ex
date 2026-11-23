@@ -219,7 +219,7 @@ defmodule Conveyor.Rbe.Hour do
     |> add_if(r.multi and r.class in ["first" | @dups], ["multi", pid, r.mnemonic], cell)
     |> add_if(r.nondet and r.class in ["first" | @dups], ["nondet", r.mnemonic], cell)
     |> add_if(
-      r.class in @racing and is_binary(r.pipeline),
+      r.class in @racing and not r.local and is_binary(r.pipeline),
       ["pipe", pid, r.pipeline || "", r.mnemonic],
       cell
     )

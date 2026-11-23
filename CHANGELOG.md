@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Duplicate work: three named hit rates.** The tile "Hit rate, actual → ideal" is
+  "Cache hit rate" with three values: *today* (served from cache), *perfect cache* (if
+  every finished result were shared) and *with in-flight deduplication* (also merging
+  identical actions still running). JSON: `cache.hit_rate.{today, perfect_cache,
+  with_in_flight_deduplication}`; `cache.actual_rate`, `ideal_rate` and `rbe_rate`
+  remain as aliases for one release.
+- **Duplicate work: per logged day.** Per-day figures divide the window's total by the
+  UTC days in which a build with a parsed execution log started, not by the window's
+  length (logs on one day of a 7-day window showed a seventh of the day's figure). The
+  tiles say "per logged day · N of M days have logs" and keep the window's total. JSON:
+  `logged_days`, `window_days`, `per_logged_day`; `days` is unchanged.
+- **Duplicate work, smaller changes.** "Racing by pipeline" leaves out racing executions
+  that may not run remotely, so it sums to the headline (hours summarized earlier keep
+  the old sums until they are summarized again); the four small tiles say "exact"; the
+  "Cold machines" tile is folded into the first tile's row when it equals the sequential
+  duplicates (`cache.cold` stays in the JSON).
 - **"RBE opportunity" is now "Duplicate work".** The feature reports metrics and their
   definitions, not advice. Renamed in the navigation, the page, the docs
   (`docs/duplicate-work.md`) and the routes: `/p/<slug>/duplicate-work`,

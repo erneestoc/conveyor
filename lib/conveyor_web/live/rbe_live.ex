@@ -228,7 +228,11 @@ defmodule ConveyorWeb.RbeLive do
   defp core_cell(0), do: "—"
   defp core_cell(ms), do: core(ms)
 
-  defp per_day(ms, days), do: core(round(ms / days)) <> "/day"
+  # Per logged day: the window's total over its UTC days that have a parsed log.
+  defp per_day(_ms, 0), do: "—"
+  defp per_day(ms, days), do: core(round(ms / days)) <> " per logged day"
+
+  defp cold_is_all?(cache), do: cache.cold.core_ms > 0 and cache.cold.core_ms == cache.gap.core_ms
 
   # The exact figure behind a rounded one, for the tooltip.
   defp core_exact(ms), do: "#{Format.number(round(ms / 1000))} core-seconds"
@@ -344,7 +348,8 @@ defmodule ConveyorWeb.RbeLive do
               claim="Executed although the same action had already finished elsewhere."
               help="The result existed when the execution started. A cache shared by the machines involved serves such a result."
               ms={@report.cache.gap.core_ms}
-              days={@report.days}
+              logged_days={@report.logged_days}
+              window_days={@report.window_days}
               range={@range}
               coverage={@report.cores_coverage}
             >
@@ -360,7 +365,8 @@ defmodule ConveyorWeb.RbeLive do
                 {core(@report.cache.cross_project.core_ms)}
               </:row>
               <:row label="Of it, on a host's first three builds">
-                {core(@report.cache.cold.core_ms)}
+                {core(@report.cache.cold.core_ms)}{if cold_is_all?(@report.cache),
+                  do: " (all of it)"}
               </:row>
             </.hero>
             <.hero
@@ -370,7 +376,8 @@ defmodule ConveyorWeb.RbeLive do
               claim="Executed while the same action was still running elsewhere."
               help="No result existed yet when the execution started, so a cache has nothing to serve. An executor that merges identical actions in flight (remote build execution, RBE) runs such an action once."
               ms={@report.racing.remotable.core_ms}
-              days={@report.days}
+              logged_days={@report.logged_days}
+              window_days={@report.window_days}
               range={@range}
               coverage={@report.cores_coverage}
             >
@@ -390,16 +397,40 @@ defmodule ConveyorWeb.RbeLive do
             </.hero>
           </div>
 
-          <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <.tile id="tile-hit-rate" label="Hit rate, actual → ideal" standing={:exact}>
-              <:value>{pct(@report.cache.actual_rate)} → {pct(@report.cache.ideal_rate)}</:value>
-              By count, of {Format.number(@report.cache.spawns)} spawns; {pct(@report.cache.rbe_rate)} with in-flight deduplication. By time, {pct(
+          <div class={[
+            "grid gap-3 sm:grid-cols-2",
+            if(cold_is_all?(@report.cache), do: "lg:grid-cols-3", else: "lg:grid-cols-4")
+          ]}>
+            <.tile id="tile-hit-rate" label="Cache hit rate" standing={:exact}>
+              <:value>
+                <dl class="mt-1 grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-0.5 text-xs font-normal">
+                  <dt>today</dt>
+                  <dd id="hit-rate-today" class="text-right text-base font-semibold">
+                    {pct(@report.cache.hit_rate.today)}
+                  </dd>
+                  <dt>perfect cache</dt>
+                  <dd id="hit-rate-perfect-cache" class="text-right text-base font-semibold">
+                    {pct(@report.cache.hit_rate.perfect_cache)}
+                  </dd>
+                  <dt>with in-flight deduplication</dt>
+                  <dd id="hit-rate-in-flight" class="text-right text-base font-semibold">
+                    {pct(@report.cache.hit_rate.with_in_flight_deduplication)}
+                  </dd>
+                </dl>
+              </:value>
+              Share of {Format.number(@report.cache.spawns)} spawns, by count. Today: served
+              from cache. Perfect cache: if every finished result were shared. With in-flight
+              deduplication: also merging identical actions still running. By time, {pct(
                 @report.cache.gap_time_share
-              )} of executed
-              wall time was a result a cache already had.
+              )} of executed wall time repeated a finished result.
             </.tile>
-            <.tile id="tile-cold" label="Cold machines" standing={:exact}>
-              <:value>{per_day(@report.cache.cold.core_ms, @report.days)}</:value>
+            <.tile
+              :if={not cold_is_all?(@report.cache)}
+              id="tile-cold"
+              label="Cold machines"
+              standing={:exact}
+            >
+              <:value>{per_day(@report.cache.cold.core_ms, @report.logged_days)}</:value>
               Part of the sequential duplicates: {Format.number(@report.cache.cold.n)} executed
               in the first three builds of a host.
             </.tile>
@@ -590,7 +621,10 @@ defmodule ConveyorWeb.RbeLive do
 
           <div class="space-y-4">
             <.panel :if={@report.pipelines != []} id="panel-rbe-pipelines" title="Racing by pipeline">
-              <:note>Racing core time in the window, per value of the pipeline tag.</:note>
+              <:note>
+                Racing core time in the window, per value of the pipeline tag (executions that
+                may run remotely, as in the headline).
+              </:note>
               <.hbars
                 id="rbe-pipelines"
                 items={Enum.map(@report.pipelines, &{&1.value, &1.core_ms})}
@@ -1292,7 +1326,8 @@ defmodule ConveyorWeb.RbeLive do
   attr :help, :string, required: true
   attr :tone, :atom, required: true
   attr :ms, :integer, required: true
-  attr :days, :float, required: true
+  attr :logged_days, :integer, required: true
+  attr :window_days, :integer, required: true
   attr :range, :string, required: true
   attr :coverage, :map, required: true
 
@@ -1303,7 +1338,7 @@ defmodule ConveyorWeb.RbeLive do
   # One of the two headline metrics: core time per day, large, with what it is made of,
   # what the number is (claim) and which mechanism addresses the class (help), as facts.
   defp hero(assigns) do
-    {number, unit} = core_parts(round(assigns.ms / assigns.days))
+    {number, unit} = core_parts(round(assigns.ms / max(assigns.logged_days, 1)))
     assigns = assign(assigns, number: number, unit: unit)
 
     ~H"""
@@ -1331,10 +1366,13 @@ defmodule ConveyorWeb.RbeLive do
           @tone == :good && "text-emerald-700 dark:text-emerald-400",
           @tone == :warn && "text-amber-700 dark:text-amber-400"
         ]}
-        title={"#{core_exact(@ms)} in the window ÷ #{:erlang.float_to_binary(@days * 1.0, decimals: 1)} days"}
+        title={"#{core_exact(@ms)} in the window ÷ #{@logged_days} logged days"}
       >
         <span class="text-4xl leading-none sm:text-5xl" id={"#{@id}-value"}>{@number}</span>
-        <span class="text-base">{@unit} / day</span>
+        <span class="text-base">{@unit} per logged day</span>
+      </p>
+      <p class="mt-1 text-xs text-base-content/70" id={"#{@id}-days"}>
+        {@logged_days} of {@window_days} days have logs
       </p>
       <p class="mt-2 text-sm font-medium">{@claim}</p>
       <p class="mt-1 text-xs leading-snug text-base-content/70" id={"#{@id}-help"}>{@help}</p>
@@ -1348,8 +1386,8 @@ defmodule ConveyorWeb.RbeLive do
       </dl>
       <p class="mt-3 text-[11px] leading-snug text-base-content/70">
         Wall time exact; cores stated by an exec property for {pct(@coverage.exact_share)} of
-        executed wall time, estimated for the rest. Averaged over the window's days, logged or
-        not.
+        executed wall time, estimated for the rest. A logged day is a UTC day with at least
+        one build whose execution log was parsed.
       </p>
     </section>
     """
@@ -1369,7 +1407,7 @@ defmodule ConveyorWeb.RbeLive do
     >
       <div class="flex items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-base-content/70">
         <span>{@label}</span>
-        <.standing kind={@standing} />
+        <.standing kind={@standing} short />
       </div>
       <div class="mt-0.5 text-xl font-semibold tabular-nums">
         {render_slot(@value)}
@@ -1380,6 +1418,7 @@ defmodule ConveyorWeb.RbeLive do
   end
 
   attr :kind, :atom, required: true
+  attr :short, :boolean, default: false
 
   defp standing(assigns) do
     ~H"""
@@ -1395,7 +1434,11 @@ defmodule ConveyorWeb.RbeLive do
           else: "an upper bound, not a measurement of duplicates"
         )
       }
-    >{if @kind == :exact, do: "exact wall · cores as stated", else: "bound"}</span>
+    >{cond do
+      @kind == :bound -> "bound"
+      @short -> "exact"
+      true -> "exact wall · cores as stated"
+    end}</span>
     """
   end
 end

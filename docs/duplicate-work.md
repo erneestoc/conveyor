@@ -131,18 +131,47 @@ How to set the property in Bazel: [Bazel setup](bazel.md#declaring-cores-with-ex
 
 | Tile | Formula | What it measures |
 |---|---|---|
-| **Sequential duplicates** | core time of sequential duplicates ÷ days of the window | "Executed although the same action had already finished elsewhere." Split into within the project, across projects, and the part on a host's first three builds (cold machines). |
-| **Hit rate, actual → ideal** | actual = hits ÷ spawns; ideal = (hits + sequential) ÷ spawns; with RBE also + racing. By time: sequential wall time ÷ executed wall time | The log has no time for a hit (nothing ran), so the time rate is the share of *executed* time that should have been a hit. |
-| **Racing duplicates** | core time of racing duplicates that may run remotely ÷ days | "Executed while the same action was still running elsewhere." |
-| **Cold machines** | sequential duplicates of builds that are among the first three of their host | The part of the sequential duplicates executed on machines that had run at most two builds before. |
+| **Sequential duplicates** | core time of sequential duplicates ÷ logged days of the window | "Executed although the same action had already finished elsewhere." Split into within the project, across projects, and the part on a host's first three builds (cold machines). |
+| **Cache hit rate** | three values, by count of spawns ([below](#the-three-hit-rates)). By time: sequential wall time ÷ executed wall time | The log has no time for a hit (nothing ran), so the time rate is the share of *executed* time that repeated a finished result. |
+| **Racing duplicates** | core time of racing duplicates that may run remotely ÷ logged days | "Executed while the same action was still running elsewhere." |
+| **Cold machines** | sequential duplicates of builds that are among the first three of their host | The part of the sequential duplicates executed on machines that had run at most two builds before. When it equals the sequential duplicates (machines that live for one to three builds) the tile is not shown: the row inside the first tile says "all of it". The JSON always has `cache.cold`. |
 | **Outside any cache** | core time of executions that are not cacheable or failed; time that may not run remotely | Executions that take part in no class: no cache stores their result. |
 | **Parallelism headroom** | Σ action wall time ÷ Σ critical path (bound), ÷ Σ execution phase (achieved) | The most cores a build could keep busy against what it used. A bound: the critical path assumes unlimited cores. The host's core count is not in either data source. |
 
 The two first tiles are the page's headline metrics and are shown large, each with a
 help line that states which mechanism addresses its class (the sentences under
-[Classes](#definitions)). They are per day (the window's
-core time ÷ the window's days, whether or not a day had logs), with the window's total
-under them. Tables show totals of the window.
+[Classes](#definitions)). They are per logged day, with the window's total
+under them. Tables show totals of the window. The four small tiles carry the short
+standing "exact"; its long form ("exact wall · cores as stated") is on the two headline
+tiles and in the legend line.
+
+### Per logged day
+
+A **logged day** is a UTC day in which at least one build *started* whose execution log
+was parsed. Every per-day figure of both pages is the window's total ÷ the window's
+logged days, and each headline tile says "N of M days have logs", M being the UTC days
+the window touches (a 7-day window that starts and ends at noon touches 8). A project
+that enabled logs yesterday therefore shows the same daily figure in the 24h and the 7d
+view. With no logged day there is no per-day figure. One approximation: the window's
+last two hours are summarized as one bucket, so builds of both sides of a midnight that
+falls inside it count as one day. In the JSON: `logged_days`, `window_days`,
+`per_logged_day.{sequential,racing,cold}` (each `n`, `ms`, `core_ms`; null without a
+logged day) beside the totals (`cache.gap`, `racing.remotable`, `cache.cold`); `days`
+is still the window's length.
+
+### The three hit rates
+
+All three are shares of the window's spawns in parsed logs (cache hits + executions), by
+count. In the JSON they are `cache.hit_rate`.
+
+| Name | JSON key | Formula | Meaning |
+|---|---|---|---|
+| **today** | `today` | hits ÷ spawns | Served from cache. |
+| **perfect cache** | `perfect_cache` | (hits + sequential duplicates) ÷ spawns | If every finished result were shared: an execution that started after the same action had finished would have been a hit. |
+| **with in-flight deduplication** | `with_in_flight_deduplication` | (hits + sequential + racing duplicates that may run remotely) ÷ spawns | Also merging identical actions that were still running. It is the largest of the three by construction. |
+
+`cache.actual_rate`, `cache.ideal_rate` and `cache.rbe_rate` are the same three values
+under their first names, kept for one release.
 
 **Projects of the group** (a group's page, and a member's): one row per project the viewer
 may see, with what it repeated (racing, after itself, after another project) and after
@@ -158,7 +187,7 @@ reached at. The key in it is a placeholder. The flag does not change cache keys 
 and toggling it did not discard the analysis cache).
 
 Other panels: duplicates per target, per project of the group (with whose finished work
-each project repeated), racing per pipeline (set the pipeline tag key in the settings),
+each project repeated), racing per pipeline (set the pipeline tag key in the settings; racing executions that may not run remotely are left out, as in the headline, so the panel sums to it when every build carries the tag),
 near misses (one output of one target at one commit under two keys: inputs differ where
 they should not; the input diff is on the builds' Actions tab) and actions whose outputs
 differ between executions of one key (not deterministic).

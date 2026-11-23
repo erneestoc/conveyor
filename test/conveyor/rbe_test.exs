@@ -85,6 +85,11 @@ defmodule Conveyor.RbeTest do
       assert r.racing.remotable == r.racing.total
       assert r.racing.time_share == 0.5
       assert r.cache.gap == %{n: 0, ms: 0, core_ms: 0}
+
+      assert r.cache.hit_rate ==
+               %{today: 0.0, perfect_cache: 0.0, with_in_flight_deduplication: 0.5}
+
+      # the first release's names, kept as aliases
       assert r.cache.actual_rate == 0.0 and r.cache.ideal_rate == 0.0 and r.cache.rbe_rate == 0.5
       # Each started 300 ms before the first one finished: inside any tolerance.
       assert r.racing.uncertain.racing.n == 12 and r.racing.uncertain.sequential.n == 0
@@ -502,7 +507,69 @@ defmodule Conveyor.RbeTest do
     end
   end
 
+  describe "per logged day" do
+    defp week(project),
+      do: %Scope{from: at(-6 * 86_400_000 - 3_600_000), to: at(3_600_000), project_id: project.id}
+
+    defp week_report(project),
+      do: Report.build(week(project), settings: Settings.get(Projects.get_project!(project.id)))
+
+    test "logs on one day of seven: the divisor is 1, the window's total stays", %{project: p} do
+      # builds on every day, logs on the last one only
+      for d <- 1..6, do: build!(p, -d * 86_400_000)
+      store!(build!(p, 0))
+      store!(build!(p, 200))
+
+      r = week_report(p)
+      assert r.coverage == %{builds: 8, logs: 2}
+      assert r.logged_days == 1 and r.window_days == 7
+      assert r.racing.remotable == %{n: 12, ms: 6000, core_ms: 6000}
+      assert r.per_logged_day.racing == %{n: 12.0, ms: 6000, core_ms: 6000}
+      assert r.per_logged_day.sequential == %{n: 0.0, ms: 0, core_ms: 0}
+      assert Report.to_json(r)["logged_days"] == 1
+    end
+
+    test "logs on two UTC days: the total over two; a day is the UTC day of the build's start",
+         %{project: p} do
+      store!(build!(p, 0))
+      store!(build!(p, 200))
+      # 23:59:50 two days earlier: its log's spawns run past midnight, the day is the start's
+      late = -2 * 86_400_000 + 14 * 3_600_000 - 10_000
+      store!(build!(p, late))
+      store!(build!(p, late + 200))
+
+      r = week_report(p)
+      assert r.logged_days == 2
+      # the earlier pair raced; today's 24 executions repeat finished results
+      assert r.racing.remotable.core_ms == 6000 and r.cache.gap.core_ms == 12_000
+      assert r.per_logged_day.racing.core_ms == 3000
+      assert r.per_logged_day.sequential == %{n: 12.0, ms: 6000, core_ms: 6000}
+    end
+
+    test "logs on no day: no per-day figure", %{project: p} do
+      for d <- 0..6, do: build!(p, -d * 86_400_000)
+      r = week_report(p)
+      assert r.coverage == %{builds: 7, logs: 0}
+      assert r.logged_days == 0 and r.window_days == 7
+      assert r.per_logged_day == %{sequential: nil, racing: nil, cold: nil}
+      assert Report.to_json(r)["per_logged_day"]["racing"] == nil
+    end
+  end
+
   describe "pipelines, retention, settings" do
+    test "racing per pipeline leaves out what may not run remotely, like the headline", %{
+      project: p
+    } do
+      {:ok, p} = Settings.put(p, %{"pipeline_key" => "pipeline"})
+      each = fn s, i -> if i == 3, do: %{s | remotable: false}, else: s end
+      store!(build!(p, 0, %{tags: %{"pipeline" => "run-1"}}), each: each)
+      store!(build!(p, 200, %{tags: %{"pipeline" => "run-1"}}), each: each)
+
+      r = report(p)
+      assert r.racing.local.n == 1 and r.racing.remotable.n == 11
+      assert [%{value: "run-1", n: 11, ms: 5500}] = r.pipelines
+    end
+
     test "racing time per value of the pipeline tag", %{project: p} do
       {:ok, p} = Settings.put(p, %{"pipeline_key" => "pipeline", "tolerance_s" => "5"})
 

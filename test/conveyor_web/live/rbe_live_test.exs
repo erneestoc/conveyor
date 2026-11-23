@@ -86,6 +86,20 @@ defmodule ConveyorWeb.RbeLiveTest do
     assert render(view) =~ "GoCompilePkg"
   end
 
+  test "the cold-machines tile shows when it differs from the sequential duplicates", %{
+    conn: conn,
+    project: p,
+    t0: t0
+  } do
+    for i <- 0..4 do
+      store!(build!(p, DateTime.add(t0, i * 60, :second), %{host: "ci-1"}))
+    end
+
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
+    assert view |> element("#tile-cold") |> render() =~ "per logged day"
+    refute view |> element("#tile-cache-gap") |> render() =~ "(all of it)"
+  end
+
   test "with logs: headline tiles, tables, range, settings", %{conn: conn, project: p, t0: t0} do
     {:ok, p} = Settings.put(p, %{"pipeline_key" => "pipeline"})
     a = build!(p, t0)
@@ -100,16 +114,33 @@ defmodule ConveyorWeb.RbeLiveTest do
     {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
 
     for id <-
-          ~w(rbe-headline tile-cache-gap tile-racing tile-cold tile-hit-rate tile-not-remotable tile-parallelism panel-cache-gap gap-same gap-cold gap-total rbe-ci-snippet rbe-ci-snippet-copy rbe-reread-button panel-rbe-mnemonics mnemonic-TestRunner panel-rbe-targets rbe-target-0 panel-rbe-pipelines panel-rbe-near rbe-near-0 rbe-fallback-keys panel-rbe-fleet) do
+          ~w(rbe-headline tile-cache-gap tile-racing tile-hit-rate tile-not-remotable tile-parallelism panel-cache-gap gap-same gap-cold gap-total rbe-ci-snippet rbe-ci-snippet-copy rbe-reread-button panel-rbe-mnemonics mnemonic-TestRunner panel-rbe-targets rbe-target-0 panel-rbe-pipelines panel-rbe-near rbe-near-0 rbe-fallback-keys panel-rbe-fleet) do
       assert has_element?(view, "##{id}"), id
     end
+
+    # every sequential duplicate is on a host's first three builds: no tile repeats the
+    # headline, the row inside it says so
+    refute has_element?(view, "#tile-cold")
+    assert view |> element("#tile-cache-gap") |> render() =~ "(all of it)"
 
     refute has_element?(view, "#panel-rbe-projects")
     # a project outside any group has no "across projects" row
     refute has_element?(view, "#gap-cross")
     # the two answers of the page lead it, per day, with the window's total under them
-    assert view |> element("#tile-cache-gap-value") |> render() =~ ~r/>\s*1\s*</
-    assert view |> element("#tile-cache-gap") |> render() =~ "core-s / day"
+    assert view |> element("#tile-cache-gap-value") |> render() =~ ~r/>\s*6\s*</
+    assert view |> element("#tile-cache-gap") |> render() =~ "core-s per logged day"
+    assert view |> element("#tile-cache-gap-days") |> render() =~ ~r/1 of \d days have logs/
+
+    for id <- ~w(hit-rate-today hit-rate-perfect-cache hit-rate-in-flight) do
+      assert view |> element("##{id}") |> render() =~ "%"
+    end
+
+    tile = view |> element("#tile-hit-rate") |> render()
+    assert tile =~ "perfect cache" and tile =~ "with in-flight deduplication"
+    refute tile =~ "ideal"
+    # small tiles carry the short standing, the headline tiles the long one
+    refute tile =~ "cores as stated"
+    assert view |> element("#tile-racing") |> render() =~ "exact wall · cores as stated"
     # metrics, not advice: each tile says what its number is, and a help line which
     # mechanism addresses the class
     cache_tile = view |> element("#tile-cache-gap") |> render()
