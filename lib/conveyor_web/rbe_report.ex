@@ -10,6 +10,9 @@ defmodule ConveyorWeb.RbeReport do
   alias Conveyor.Projects.Project
   alias Conveyor.Rbe.{Groups, Report, Settings}
 
+  # What the report reads of an hour.
+  @fields [:builds, :succeeded, :failed, :aborted, :fleet, :rbe]
+
   @spec ranges() :: [String.t()]
   def ranges, do: Scope.ranges()
 
@@ -19,7 +22,7 @@ defmodule ConveyorWeb.RbeReport do
   @doc "The report of one project."
   @spec project(Viewer.t(), Project.t(), String.t()) :: map()
   def project(viewer, %Project{} = project, range) do
-    scope = range |> Scope.new(project.id) |> Rollup.ensure!()
+    scope = Rollup.ensure!(%{Scope.new(range, project.id) | rollup_fields: @fields})
     related = [project | Groups.members(Groups.of(project))]
     Report.build(scope, [settings: Settings.get(project)] ++ visibility(viewer, related))
   end
@@ -34,11 +37,17 @@ defmodule ConveyorWeb.RbeReport do
         nil
 
       [first | _] = seen ->
+        # A group's window starts on the hour and is read from stored hours alone
+        # (`Scope` `stored`): nothing is computed over every member at once.
+        scope = range |> Scope.new(nil) |> Scope.restrict(Enum.map(members, & &1.id))
+
         scope =
-          range
-          |> Scope.new(nil)
-          |> Scope.restrict(Enum.map(members, & &1.id))
-          |> Rollup.ensure!()
+          Rollup.ensure!(%{
+            scope
+            | stored: true,
+              from: Rollup.truncate(scope.from, :hour),
+              rollup_fields: @fields
+          })
 
         # One cores setting for a sum over projects: the members' settings merged, the
         # first project to name a mnemonic wins.

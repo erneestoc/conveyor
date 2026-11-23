@@ -283,12 +283,27 @@ defmodule Conveyor.Metrics.Rollup do
   # path calls this so a window is exact even before the job has seen its hours.
   defp repair!(filter, from, to) do
     # Oldest first: a host's first builds are known before its later ones are counted.
-    stale =
-      filter
-      |> stale_hours(from, to)
-      |> Enum.sort_by(fn {project_id, hour} -> {DateTime.to_unix(to_utc(hour)), project_id} end)
+    # Hosts belong to a project, so the projects of one hour are rolled side by side
+    # (four at a time: a cache group's page after an upgrade has hundreds of them).
+    stale = stale_hours(filter, from, to)
 
-    Enum.each(stale, fn {project_id, hour} -> roll!(project_id, to_utc(hour)) end)
+    stale
+    |> Enum.group_by(fn {_project_id, hour} -> DateTime.to_unix(to_utc(hour)) end)
+    |> Enum.sort()
+    |> Enum.each(fn
+      {_hour, [{project_id, hour}]} ->
+        roll!(project_id, to_utc(hour))
+
+      {_hour, projects} ->
+        projects
+        |> Enum.sort()
+        |> Task.async_stream(fn {project_id, hour} -> roll!(project_id, to_utc(hour)) end,
+          max_concurrency: 4,
+          timeout: :infinity
+        )
+        |> Stream.run()
+    end)
+
     length(stale)
   end
 
@@ -338,8 +353,16 @@ defmodule Conveyor.Metrics.Rollup do
     if applicable?(scope) do
       {first_full, last_full} = full_hours(scope)
 
-      if DateTime.compare(first_full, last_full) == :lt,
-        do: repair!(filter(scope), first_full, last_full)
+      cond do
+        scope.stored ->
+          repair!(filter(scope), truncate(scope.from, :hour), nil)
+
+        DateTime.compare(first_full, last_full) == :lt ->
+          repair!(filter(scope), first_full, last_full)
+
+        true ->
+          0
+      end
 
       scope = %{scope | rolled: true}
       %{scope | rollup_rows: rows(scope)}
@@ -361,6 +384,21 @@ defmodule Conveyor.Metrics.Rollup do
   @spec rows(Scope.t()) :: [Row.t()]
   def rows(%Scope{rollup_rows: rows}) when is_list(rows), do: rows
 
+  # Stored hours only, each rolled again when one of its builds changed since: what a
+  # page over hundreds of projects reads. Computing the window's edges exactly, as below,
+  # reads every spawn of every project's builds of up to two hours on each view (5.8 s
+  # for 300 builds of 360 projects; PLAN §27.9); here only the projects whose builds
+  # changed are computed again, one project and hour at a time.
+  def rows(%Scope{stored: true, from: from} = scope) do
+    first = truncate(from, :hour)
+    unless scope.rolled, do: repair!(filter(scope), first, nil)
+
+    Row
+    |> where([r], r.hour >= ^first)
+    |> rollup_filter(scope)
+    |> load(scope)
+  end
+
   def rows(%Scope{from: from, to: to} = scope) do
     filter = filter(scope)
     # the stored middle stops one hour before the end, that hour is computed exactly
@@ -380,10 +418,22 @@ defmodule Conveyor.Metrics.Rollup do
         Row
         |> where([r], r.hour >= ^first_full and r.hour < ^last_full)
         |> rollup_filter(scope)
-        |> Repo.all()
+        |> load(scope)
 
       [compute(filter, last_full, to) | head] ++ middle
     end
+  end
+
+  # A reader that names its columns gets rows with the others at their defaults: some
+  # columns are large (the targets that missed the cache, megabytes per window) and a
+  # page that does not show them should not load and decode them.
+  defp load(query, %Scope{rollup_fields: nil}), do: Repo.all(query)
+
+  defp load(query, %Scope{rollup_fields: fields}) do
+    query
+    |> select([r], map(r, ^Enum.uniq([:project_id, :hour, :updated_at | fields])))
+    |> Repo.all()
+    |> Enum.map(&struct(Row, &1))
   end
 
   @doc "Combines rows into one (sums, unions, merged digests)."

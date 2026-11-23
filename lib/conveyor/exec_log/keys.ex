@@ -63,6 +63,8 @@ defmodule Conveyor.ExecLog.Keys do
   """
   @spec merge!(integer(), String.t(), integer(), [map()]) :: [binary()]
   def merge!(scope, invocation_id, project_id, entries) do
+    scope_lock!(scope, :shared)
+
     entries
     |> Enum.chunk_every(@chunk)
     |> Enum.flat_map(&merge_chunk(scope, invocation_id, project_id, &1))
@@ -77,8 +79,8 @@ defmodule Conveyor.ExecLog.Keys do
   SELECT $1::bigint, t.key, t.finish, t.start, $2::uuid, t.ordinal,
          date_trunc('day', t.last_finish),
          $3::bigint, false, ('x' || t.out)::bit(64)::bigint, t.nondet
-  FROM unnest($4::bytea[], $5::timestamptz[], $6::timestamptz[], $7::int[],
-              $8::timestamptz[], $9::text[], $10::bool[])
+  FROM unnest($4::bytea[], $5::timestamp[], $6::timestamp[], $7::int[],
+              $8::timestamp[], $9::text[], $10::bool[])
        AS t(key, finish, start, ordinal, last_finish, out, nondet)
   ORDER BY t.key
   ON CONFLICT (scope, key) DO UPDATE SET
@@ -102,46 +104,109 @@ defmodule Conveyor.ExecLog.Keys do
   """
 
   defp merge_chunk(scope, invocation_id, project_id, entries) do
-    keys = Enum.map(entries, & &1.key)
-    before = lock_rows(scope, keys)
+    holder = Ecto.UUID.dump!(invocation_id)
+    seen = read_rows(scope, Enum.map(entries, & &1.key))
 
-    %{rows: rows} =
-      Repo.query!(
-        @merge,
-        [
-          scope,
-          Ecto.UUID.dump!(invocation_id),
-          project_id,
-          keys,
-          Enum.map(entries, & &1.finish),
-          Enum.map(entries, & &1.start),
-          Enum.map(entries, & &1.ordinal),
-          Enum.map(entries, & &1.last_finish),
-          Enum.map(entries, & &1.out),
-          Enum.map(entries, & &1.nondet)
-        ],
-        timeout: @timeout
-      )
+    # A row only ever moves one way (an earlier first, a later last day, a flag that
+    # turns true), so an entry that would change nothing in the row as it was read
+    # changes nothing in the row as it is by now: it is left out, and its row is not
+    # locked. Most executions of a group are of this kind (the 360th build of a shared
+    # library); locking their rows made four parsers wait for each other 12 % of their
+    # time (PLAN §27.9). `rebuild!`, the one writer that moves a row the other way,
+    # excludes merges with the scope's advisory lock.
+    case Enum.reject(entries, &settled?(&1, Map.get(seen, &1.key), holder, project_id)) do
+      [] ->
+        []
 
-    for [key, holder, ordinal, multi, nondet, existed] <- rows,
-        existed,
-        # A row another parser inserted between the lock and the upsert was not read: its
-        # executions are stored by now (the upsert waited for that commit), so they count
-        # as changed.
-        Map.get(before, key) != {Ecto.UUID.load!(holder), ordinal, multi, nondet},
-        do: key
+      entries ->
+        keys = Enum.map(entries, & &1.key)
+        lock_rows(scope, Enum.filter(keys, &Map.has_key?(seen, &1)))
+
+        %{rows: rows} =
+          Repo.query!(
+            @merge,
+            [
+              scope,
+              holder,
+              project_id,
+              keys,
+              Enum.map(entries, & &1.finish),
+              Enum.map(entries, & &1.start),
+              Enum.map(entries, & &1.ordinal),
+              Enum.map(entries, & &1.last_finish),
+              Enum.map(entries, & &1.out),
+              Enum.map(entries, & &1.nondet)
+            ],
+            timeout: @timeout
+          )
+
+        for [key, first, ordinal, multi, nondet, existed] <- rows,
+            existed,
+            # Against the row as it was read: one that another parser inserted or changed
+            # since counts as changed, which at worst rolls an hour once more.
+            before(Map.get(seen, key)) != {first, ordinal, multi, nondet},
+            do: key
+    end
+  end
+
+  defp before(nil), do: nil
+
+  defp before(%ActionKey{} = row),
+    do: {Ecto.UUID.dump!(row.first_invocation_id), row.first_ordinal, row.multi, row.nondet}
+
+  # True when merging the entry cannot change the row: the conditions of the upsert's
+  # WHERE, evaluated here.
+  defp settled?(_entry, nil, _holder, _project_id), do: false
+
+  defp settled?(entry, %ActionKey{} = row, holder, project_id) do
+    <<out::signed-64>> = Base.decode16!(entry.out, case: :mixed)
+
+    first =
+      {DateTime.to_unix(row.first_finish, :microsecond),
+       DateTime.to_unix(row.first_start, :microsecond), Ecto.UUID.dump!(row.first_invocation_id),
+       row.first_ordinal}
+
+    mine =
+      {DateTime.to_unix(entry.finish, :microsecond), DateTime.to_unix(entry.start, :microsecond),
+       holder, entry.ordinal}
+
+    mine >= first and
+      Date.compare(DateTime.to_date(entry.last_finish), DateTime.to_date(row.last_finish)) != :gt and
+      row.grp != nil and (row.multi or row.grp == project_id) and
+      row.out != nil and (row.nondet or (not entry.nondet and row.out == out))
+  end
+
+  defp read_rows(scope, keys) do
+    from(k in ActionKey, where: k.scope == ^scope and k.key in ^keys)
+    |> Repo.all(timeout: @timeout)
+    |> Map.new(&{&1.key, &1})
   end
 
   # Existing rows, locked in key order.
+  defp lock_rows(_scope, []), do: :ok
+
   defp lock_rows(scope, keys) do
     from(k in ActionKey,
       where: k.scope == ^scope and k.key in ^keys,
       order_by: k.key,
       lock: "FOR UPDATE",
-      select: {k.key, {k.first_invocation_id, k.first_ordinal, k.multi, k.nondet}}
+      select: k.key
     )
     |> Repo.all(timeout: @timeout)
-    |> Map.new()
+
+    :ok
+  end
+
+  # Merges of a scope share this lock; a rebuild of the scope takes it alone.
+  defp scope_lock!(scope, mode) do
+    function =
+      if mode == :shared, do: "pg_advisory_xact_lock_shared", else: "pg_advisory_xact_lock"
+
+    Repo.query!(
+      "SELECT #{function}(hashtextextended('action_keys:' || $1::text, 0))",
+      [Integer.to_string(scope)],
+      timeout: @timeout
+    )
   end
 
   @rebuild """
@@ -183,6 +248,7 @@ defmodule Conveyor.ExecLog.Keys do
   @spec rebuild!(integer(), [integer()], [binary()]) :: [binary()]
   def rebuild!(scope, project_ids, keys) do
     keys = keys |> Enum.uniq() |> Enum.sort()
+    scope_lock!(scope, :exclusive)
 
     Enum.each(Enum.chunk_every(keys, @chunk), fn chunk ->
       lock_rows(scope, chunk)
@@ -210,22 +276,37 @@ defmodule Conveyor.ExecLog.Keys do
   def holders(_project_ids, [], _except), do: []
 
   def holders(project_ids, keys, except) do
-    keys
-    |> Enum.uniq()
+    # In two steps, each with one possible plan: by key through the partial index of
+    # `spawns`, then the builds of these projects among what that found. As one join the
+    # statement averaged 52 ms under four parsers (PLAN §27.9).
+    ids =
+      keys
+      |> Enum.uniq()
+      |> Enum.chunk_every(@chunk)
+      |> Enum.flat_map(fn chunk ->
+        Repo.all(
+          from(s in Spawn,
+            where: s.action_key in ^chunk,
+            distinct: true,
+            select: s.invocation_id
+          ),
+          timeout: @timeout
+        )
+      end)
+      |> Enum.uniq()
+      |> List.delete(except)
+
+    ids
     |> Enum.chunk_every(@chunk)
     |> Enum.flat_map(fn chunk ->
       Repo.all(
-        from(s in Spawn,
-          join: i in Invocation,
-          on: i.id == s.invocation_id,
-          where: s.action_key in ^chunk and i.project_id in ^project_ids and i.id != ^except,
-          distinct: true,
-          select: s.invocation_id
+        from(i in Invocation,
+          where: i.id in ^chunk and i.project_id in ^project_ids,
+          select: i.id
         ),
         timeout: @timeout
       )
     end)
-    |> Enum.uniq()
   end
 
   @doc """

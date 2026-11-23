@@ -197,8 +197,23 @@ a cache that evicted it.
 
 ## Data and cost
 
-Per executed spawn the analysis adds about 150 bytes to its row and index; per distinct
-action key about 230 bytes (twice for a project in a cache group). Parsing a 50,000-spawn
-log takes about 1.6 times what it took before (measurements in PLAN §27). Tenancy: a
+Measured with 360 projects in one cache group and 2,000 builds of 1,668 spawns on
+average (PLAN §27.9, `bench/rbe_scale.sh`): per spawn about 820 bytes in `spawns`
+(heap and indexes; the analysis' own share is about 150), about 480 bytes of input
+lists, about 80 bytes of action keys (a key is one row in its project and one in its
+group) and 3.2 KB of write-ahead log. A node parses about 12,700 spawns per second with
+its two parse jobs (460 logs of that size per minute), two nodes 1.74 times that, without
+lock waits. A 3,500-spawn log therefore costs about 4.8 MB of database until its spawns
+expire (`RETENTION_SPAWN_DAYS`, 30) and 0.5 s of one parse worker; 360 apps at 50 builds
+a day are 87 GB a day. The hourly numbers of the page survive the expiry, so a short
+spawn retention is the first thing to set for a fleet of that size.
+
+A cache group's page reads stored hours only: its window starts at the top of the hour
+(a "24h" view covers up to 24 h 59 min) and hours whose builds changed are summarized
+again first, four projects at a time. With 360 projects it answers in under a second
+when the hours are current and in about 12 s when all 1,400 of them have to be
+summarized.
+
+Tenancy: a
 project's numbers are visible to whoever may see the project; a group's totals to whoever
 may see one of its projects, with the other projects summed without names or targets.

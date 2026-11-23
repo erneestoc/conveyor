@@ -270,8 +270,13 @@ defmodule Conveyor.Rbe.Hour do
   # Builds with a parsed log, and what a parallelism bound needs from them: the wall time
   # of their actions against their critical path and their execution phase.
   defp builds(finished) do
+    # Joined to the interval's builds inside the aggregate: grouped on its own, the
+    # subquery read every spawn of the table for every hour rolled (1.5 s of a 1.75 s
+    # roll at 3.3 million spawns; PLAN §27.9).
     per_build =
       from s in Spawn,
+        join: i in subquery(finished),
+        on: i.id == s.invocation_id,
         where: not s.cache_hit,
         group_by: s.invocation_id,
         select: %{invocation_id: s.invocation_id, ms: sum(coalesce(s.exec_ms, 0))}

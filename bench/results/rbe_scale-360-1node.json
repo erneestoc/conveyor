@@ -1,0 +1,614 @@
+{
+  "label": "360-1node",
+  "nodes": 1,
+  "at": "2026-11-23T15:28:39.097201Z",
+  "read": {
+    "project_hours": 1377,
+    "roll_hour_ms_p50": 231,
+    "roll_hour_ms_max": 4548,
+    "group_page_cold_ms": 348029,
+    "group_page_warm_ms": 10109,
+    "project_page_cold_ms": 1127,
+    "project_page_warm_ms": 9,
+    "group_json_bytes": 5433293
+  },
+  "load": {
+    "seconds": 263.659,
+    "rows": {
+      "action_keys": 1055426,
+      "exec_properties": 718,
+      "invocation_rollups": 5,
+      "oban_jobs": 2002,
+      "spawn_inputs": 788348,
+      "spawns": 3336934
+    },
+    "pg_cpu_seconds": 102.2,
+    "samples": 526,
+    "jobs": {
+      "completed": 2000
+    },
+    "upload_seconds": 72.078,
+    "logs_per_min": 455.1,
+    "spawns_per_s": 12656,
+    "parse_ms_p50": 201,
+    "parse_ms_p99": 704,
+    "parse_ms_max": 1096,
+    "retried_jobs": 0,
+    "job_errors": 0,
+    "pg_exec_seconds": 82.9,
+    "deadlocks": 0,
+    "commits": 49960,
+    "rollbacks": 0,
+    "lock_wait_samples": 3,
+    "max_backends_waiting": 1,
+    "longest_lock_wait_s": 0.09,
+    "wal_bytes_per_build": 5419773,
+    "bytes_per_build": {
+      "action_keys": 130842,
+      "exec_properties": 110,
+      "spawn_inputs": 778440,
+      "spawns": 1372299
+    },
+    "spawns_per_build": 1668,
+    "log_bytes_per_build": 1444492
+  },
+  "exact": true,
+  "projects": 360,
+  "builds": 2000,
+  "spawns": 3336934,
+  "checks": {
+    "app-007": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          2304,
+          3466108,
+          3598260
+        ],
+        "got": [
+          2304,
+          3466108,
+          3598260
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          636,
+          895684,
+          895684
+        ],
+        "got": [
+          636,
+          895684,
+          895684
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          447,
+          0,
+          0
+        ],
+        "got": [
+          447,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-048": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          5174,
+          8234192,
+          8864327
+        ],
+        "got": [
+          5174,
+          8234192,
+          8864327
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          1319,
+          1766130,
+          1766130
+        ],
+        "got": [
+          1319,
+          1766130,
+          1766130
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          1,
+          2893,
+          2893
+        ],
+        "got": [
+          1,
+          2893,
+          2893
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          1,
+          2893,
+          2893
+        ],
+        "got": [
+          1,
+          2893,
+          2893
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          668,
+          0,
+          0
+        ],
+        "got": [
+          668,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-089": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          10390,
+          15464423,
+          16329521
+        ],
+        "got": [
+          10390,
+          15464423,
+          16329521
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          2701,
+          3626420,
+          3626420
+        ],
+        "got": [
+          2701,
+          3626420,
+          3626420
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          1409,
+          0,
+          0
+        ],
+        "got": [
+          1409,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-154": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          1407,
+          2143603,
+          2311870
+        ],
+        "got": [
+          1407,
+          2143603,
+          2311870
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          1472,
+          1939111,
+          1939111
+        ],
+        "got": [
+          1472,
+          1939111,
+          1939111
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          1,
+          648,
+          648
+        ],
+        "got": [
+          1,
+          648,
+          648
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          1,
+          648,
+          648
+        ],
+        "got": [
+          1,
+          648,
+          648
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          688,
+          0,
+          0
+        ],
+        "got": [
+          688,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-288": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          4019,
+          6300867,
+          6851973
+        ],
+        "got": [
+          4019,
+          6300867,
+          6851973
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          866,
+          1162104,
+          1162104
+        ],
+        "got": [
+          866,
+          1162104,
+          1162104
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          0,
+          0,
+          0
+        ],
+        "got": [
+          0,
+          0,
+          0
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          758,
+          0,
+          0
+        ],
+        "got": [
+          758,
+          0,
+          0
+        ]
+      }
+    ],
+    "group": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          2263649,
+          3553707372,
+          3822450307
+        ],
+        "got": [
+          2263649,
+          3553707372,
+          3822450307
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          501333,
+          683905369,
+          683905369
+        ],
+        "got": [
+          501333,
+          683905369,
+          683905369
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          565,
+          2735385,
+          2735385
+        ],
+        "got": [
+          565,
+          2735385,
+          2735385
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          565,
+          2735385,
+          2735385
+        ],
+        "got": [
+          565,
+          2735385,
+          2735385
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          293827,
+          0,
+          0
+        ],
+        "got": [
+          293827,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "model": {
+    "hours": 6,
+    "shared_pool": 12000,
+    "spawns_min": 500,
+    "spawns_max": 4000,
+    "share_min": 0.6,
+    "share_max": 0.8,
+    "wave": 50
+  },
+  "top_statements": [
+    [
+      "INSERT INTO \"spawns\" (\"status\",\"started_at\",\"runner\",\"exit_code\",\"outputs\",\"inserted_at\",\"queue_ms\",\"invocatio",
+      32376,
+      37381,
+      1.15
+    ],
+    [
+      "INSERT INTO \"spawn_inputs\" AS s0 (\"digest\",\"blob\",\"project_id\",\"touched_at\") VALUES ($1,$2,$3,$4),($5,$6,$7,$8",
+      32376,
+      16620,
+      0.51
+    ],
+    [
+      "INSERT INTO action_keys AS k (scope, key, first_finish, first_start, first_invocation_id, first_ordinal, last_",
+      4000,
+      11925,
+      2.98
+    ],
+    [
+      "SELECT a0.\"key\", a0.\"first_invocation_id\", a0.\"first_ordinal\", a0.\"multi\", a0.\"nondet\" FROM \"action_keys\" AS a",
+      4000,
+      8076,
+      2.02
+    ],
+    [
+      "SELECT DISTINCT s0.\"invocation_id\" FROM \"spawns\" AS s0 INNER JOIN \"invocations\" AS i1 ON i1.\"id\" = s0.\"invocat",
+      1934,
+      2252,
+      1.16
+    ],
+    [
+      "SELECT $2 FROM ONLY \"public\".\"invocations\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+      3338934,
+      1998,
+      0.0
+    ],
+    [
+      "SELECT $2 FROM ONLY \"public\".\"projects\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+      795071,
+      500,
+      0.0
+    ],
+    [
+      "SELECT count(*), sum(s1.\"ms\"), sum(s0.\"critical_path_ms\"), sum(s0.\"execution_ms\"), count(s0.\"critical_path_ms\"",
+      2,
+      468,
+      233.89
+    ],
+    [
+      "SELECT p0.\"id\", p0.\"slug\", p0.\"name\", p0.\"settings\", p0.\"archived_at\", p0.\"inserted_at\", p0.\"updated_at\" FROM ",
+      2000,
+      343,
+      0.17
+    ],
+    [
+      "SELECT o0.\"id\", o0.\"state\", o0.\"queue\", o0.\"worker\", o0.\"args\", o0.\"meta\", o0.\"tags\", o0.\"errors\", o0.\"attempt",
+      2000,
+      235,
+      0.12
+    ],
+    [
+      "SELECT count(*) FROM \"invocations\" AS i0 WHERE (i0.\"id\" = ANY($1) AND (i0.\"exec_log_status\" = $2))",
+      382,
+      173,
+      0.45
+    ],
+    [
+      "UPDATE \"invocations\" AS i0 SET \"updated_at\" = $1 WHERE (i0.\"id\" IN (SELECT si0.\"id\" FROM \"invocations\" AS si0 ",
+      2000,
+      148,
+      0.07
+    ]
+  ],
+  "cold_page_statements": [
+    [
+      "SELECT count(*), sum(s1.\"ms\"), sum(s0.\"critical_path_ms\"), sum(s0.\"execution_ms\"), count(s0.\"critical_path_ms\"",
+      2874,
+      1521542,
+      529.42
+    ],
+    [
+      "SELECT s0.\"project_id\", s0.\"mnemonic\", s0.\"class\", s0.\"source\", s0.\"key_source\", s0.\"local\", s0.\"band\", s0.\"fr",
+      2876,
+      615891,
+      214.15
+    ],
+    [
+      "SELECT s0.\"project_id\", s0.\"target_label\", s0.\"mnemonic\", s0.\"class\", count(*), sum(s0.\"ms\"), sum(s0.\"ms\"::big",
+      2876,
+      26156,
+      9.09
+    ],
+    [
+      "SELECT i0.\"project_id\", i0.\"hour\", i0.\"builds\", i0.\"succeeded\", i0.\"failed\", i0.\"aborted\", i0.\"running\", i0.\"o",
+      1,
+      4923,
+      4922.6
+    ],
+    [
+      "SELECT s0.\"mnemonic\", count(s0.\"id\"), count(*) FILTER (WHERE s0.\"cache_hit\") FROM \"spawns\" AS s0 INNER JOIN (S",
+      2875,
+      2683,
+      0.93
+    ],
+    [
+      "SELECT s0.\"target_label\", count(s0.\"id\") FROM \"spawns\" AS s0 INNER JOIN (SELECT si0.\"id\" AS \"id\", si0.\"project",
+      2875,
+      2377,
+      0.83
+    ]
+  ]
+}

@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Fix: wrong RBE classes on a PostgreSQL whose `TimeZone` is not UTC.** The first
+  execution of every action key was stored shifted by the server's UTC offset, so with
+  a zone west of UTC no execution was ever classed as racing (all became sequential).
+  Sessions now run in UTC (`Conveyor.Repo.init/2`), which also covers the ingest
+  writer's statements, and the key upsert passes `timestamp[]`. RDS and the Docker image
+  default to UTC and were not affected. Key rows written before the fix on an affected
+  database stay shifted until they expire (spawn retention plus two days) or are rebuilt
+  from the stored spawns (`Conveyor.ExecLog.Keys.rebuild!/3`).
+- **RBE opportunity at 360 projects in one cache group (PLAN §27.9,
+  `bench/rbe_scale.sh`):** exact against a brute-force computation over 3.3 million
+  spawns; the group's page went from 348 s cold and 10 s warm to 12 s and 0.9 s, a
+  rollup of one project-hour from 231 ms to 23 ms, and two nodes parse 1.74 times what
+  one does (1.36 before; lock waits gone). A group's report reads stored hours only and
+  its window starts on the hour; key rows a log cannot change are no longer locked.
+- **RBE opportunity: the CI recipe prints the upload's HTTP status** and the settings
+  panel says whether the project has a live API key with the `upload` scope (a key
+  without it is answered 403, which `curl -sf` hides).
 - **RBE opportunity: the page after a layout review in a real browser (PLAN §27.8).**
   The two answers lead the page as large tiles, in core time per day with the window's
   total and what each is made of: *cache opportunity* (a shared cache recovers this) and

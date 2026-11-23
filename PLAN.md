@@ -2303,3 +2303,127 @@ Left as it is: the dashboard page is also wider than a phone (its chart panels);
 event-stream half of the demo is the recorded fixture's (156 spawns) and does not match
 the synthetic logs. Decisions for the owner are in the review handed over with the
 screenshots (headline unit, per-day denominator, cold machines as a tile, money).
+
+### 27.9 Addendum (2026-11-23): 360 projects in one cache group, measured
+
+`bench/rbe_scale.sh` (driver `bench/rbe_scale.exs`, results in
+`bench/results/rbe_scale-360-*.json`). Laptop (16 cores, the driver on the same machine),
+native PostgreSQL 17 (`bench/pg.sh`), prod-mode nodes with the real `parse` queue (two
+jobs per node).
+
+**The model.** 360 projects in one group; 2,000 builds in 40 waves over six hours (a
+commit fans out to 50 apps that start within 90 s). A log has 500 to 4,000 spawns,
+log-uniform (mean 1,668; 3.34 million spawns in all; disk on this machine did not allow
+the owner's 2,000 to 5,000, the per-spawn figures below scale to it). 60 to 80 % of an
+app's actions come from a pool of 12,000 shared library actions, weighted to popular
+ones; the rest are its own. `GoStdlib`, `GoCompilePkg`, `GoLink`, `TestRunner`; 6 to 24
+inputs per action; Bazel action digests (a disk cache per machine). A commit changes 1 %
+of the shared actions and 10 % of the built apps' own; a build runs on a new machine
+(35 %) or one of the 60 most recent, whose earlier actions are cache hits; half of the
+tests state `cores=2`. Builds are inserted as rows (event-stream ingest is
+`mix conveyor.bench`'s subject); every log goes through `PUT …/artifacts/execution.log.zst`
+roughly in start order (shuffled inside windows of 100).
+
+**Exactness.** The generator classes all 3.04 million keyed executions by brute force
+and the driver compares count, wall ms and core ms of sequential within a project
+(2,263,649), sequential across projects (501,333), racing (565, all across projects) and
+cache hits (293,827) with the group's JSON and five projects' JSON: 30 of 30 figures
+equal in every run, one node and two. The first run was **not** exact, which is the
+first fix below.
+
+| | first run | after the fixes | two nodes, before → after the lock fix |
+|---|---|---|---|
+| logs/min, end to end | 455 | 459 | 632 → 797 |
+| spawns/s | 12,656 | 12,758 | 17,583 → 22,166 |
+| parse per log, p50 / p99 / max | 201 / 704 / 1,096 ms | 200 / 701 / 1,028 ms | 326 / 902 → 233 / 841 ms |
+| Postgres CPU / statement time | 102 s / 83 s | 110 s / 90 s | 228 s / 286 s → 111 s / 92 s |
+| samples (0.5 s) with a backend waiting for a lock | 3 of 526 | 1 of 521 | 132 of 378 → 2 of 300 |
+| longest lock wait seen; deadlocks; retried jobs | 0.09 s; 0; 0 | 0.3 s; 0; 0 | 0.4 s; 0; 0 → 0.02 s; 0; 0 |
+| roll one project-hour, p50 / max | 231 ms / 4.5 s | 23 ms / 3.7 s | 24 ms / 3.5 s |
+| group page (JSON), cold / warm | 348 s / 10.1 s | 11.9 s / 0.9 s | 12.4 s / 0.8 s |
+| project page (JSON), cold / warm | 1,127 / 9 ms | 201 / 74 ms | 188 / 72 ms |
+
+Per build (1,668 spawns): `spawns` 1.37 MB (823 B per spawn, 79 % heap), `spawn_inputs`
+0.8 to 1.2 MB (about 480 B per spawn), `action_keys` 131 KB (1.06 million rows: 277
+thousand of the group, 779 thousand of projects), `exec_properties` under 300 B, WAL 5.1
+to 5.4 MB, the uploaded log 1.44 MB. Postgres CPU 26 to 33 µs per spawn; parse worker
+time 155 µs per spawn. The group's JSON is 5.4 MB: `from` (who repeated whom, 360 × 360
+× mnemonic) and `tgt` are nine tenths of every stored hour.
+
+**Found and fixed.**
+
+1. **Wrong on a PostgreSQL whose `TimeZone` is not UTC.** `Keys.merge!` passed its
+   times as `timestamptz[]` into `timestamp` columns: the server converted them with its
+   own zone (the bench cluster: UTC−7), every key's first execution was stored seven
+   hours early and **no execution was ever racing** (79 expected in the smoke run, 0
+   reported, all counted as sequential). RDS and the Docker image default to UTC, which
+   is why nothing showed before. Fixed twice: the arrays are `timestamp[]`, and
+   `Conveyor.Repo.init/2` sets `timezone=UTC` on every session, which also covers the
+   ingest writer's `timestamptz` arrays (`Writer.Transaction`, same pattern, not
+   exercised by this bench). `test/conveyor/repo_timezone_test.exs`.
+2. **A rollup read every spawn of the table per hour.** `Rbe.Hour.builds/1` aggregated
+   `spawns` by build before joining the hour's builds (a parallel sequential scan of 3.3
+   million rows: 1.5 s of a 1.75 s roll). Joined inside the aggregate: 10 times faster,
+   and the cold group page with it.
+3. **The group page computed its last full hour live over all members on every view**
+   (5.8 s for 300 builds) and loaded every column of 1,400 stored rows (5.6 s, of which
+   4 s for `spawn_misses`, a dashboard column of 14 MB the page does not show). A group's
+   report now reads stored hours only, through the current one and from the top of the
+   window's first hour (`Scope.stored`; stale hours are rolled per project as before),
+   and both reports load six columns (`Scope.rollup_fields`). Stale hours of different
+   projects are rolled four at a time. Consequence: a group's window starts on the hour.
+4. **Key rows were locked whether or not the log could change them.** With four parsers
+   the `FOR UPDATE` of existing rows averaged 22 ms (2 ms alone) and one backend in three
+   samples was waiting. A row only moves one way (earlier first, later last day, flags
+   to true), so an entry that changes nothing in the row as read changes nothing later:
+   it is left out of the upsert and its row is not locked. `rebuild!`, the one writer
+   that moves a row back, takes the scope's advisory lock exclusively; merges share it.
+   `Keys.holders/3` became two statements with one plan each (52 ms mean under four
+   parsers as one join). Two nodes now scale 1.74 times (1.36 before).
+
+**Not fixed, found on the way.** `invocation_rollups.spawn_misses` holds every target
+that missed the cache in the hour, unbounded (10 KB per project-hour here): every
+dashboard read of a busy project decodes it. Input lists are stored per project, so a
+shared library's list exists once per app (788 thousand rows for 277 thousand distinct
+lists: 2.85 times). The same keep-alive connection could not be used for two uploads in
+the demo seed (the second request got 400, `Bandit.HTTPError: Request line HTTP error`
+after a body); the seed and the bench close the connection per request, the cause is
+open.
+
+**The owner's fleet, estimated.** Assumptions: 360 apps, 3,500 spawns per log (the
+middle of 2,000 to 5,000), every CI build uploads, the per-spawn costs above, list
+prices of us-east-1 from memory (gp3 $0.115 per GB-month, S3 standard $0.023; check
+before quoting), 30 days of spawn retention.
+
+| builds per app per day | 10 | 50 | 200 |
+|---|---|---|---|
+| builds / spawns per day | 3,600 / 12.6 M | 18,000 / 63 M | 72,000 / 252 M |
+| parse worker time per day (a node has 2 workers) | 0.5 h | 2.7 h | 10.8 h |
+| Postgres CPU per day (laptop core) | 5 min | 27 min | 1.8 h |
+| database growth per day | 17 GB | 87 GB | 349 GB |
+| WAL per day | 41 GB | 205 GB | 820 GB |
+| uploaded logs per day | 11 GB | 55 GB | 218 GB |
+| database at 30 days of spawns / at 7 | 0.5 TB / 0.12 TB | 2.6 TB / 0.6 TB | 10.5 TB / 2.4 TB |
+| storage per day: database + logs, 30 days | $2.0 + $0.25 | $10 + $1.3 | $40 + $5 |
+| the same without input lists / with 7 days | $1.3 / $0.5 | $6.5 / $2.3 | $26 / $9 |
+
+One node parses 310 thousand such logs a day flat out, so parsing is not the limit even
+at 200 (peaks of three times the average use 1.4 of its 2 workers). Storage is: the
+analysis keeps a row of 823 B per spawn for 30 days when the hourly summaries it needs
+are a few kilobytes. The trial's `db.t3.micro` (20 GB) holds about one day at 10 builds
+per app.
+
+**Is "no input lists" worth a setting?** Yes, as part of a larger one. Lists are 35 %
+of the database bytes and are not needed for any number on the RBE page (the key comes
+from Bazel's digest, or from `inputs_digest` computed at parse); what goes with them is
+the input diff on a build's Actions tab. The larger levers, in order: a spawn retention
+of days, not 30, for projects that only want the RBE numbers (hours are frozen when
+spawns expire: 4 times less at 7 days); lists stored per cache group instead of per
+project (2.85 times fewer here); and a narrow spawn row for such projects (key, start,
+times, cores, mnemonic, target: about a fifth of 823 B; not measured). Proposed as one
+project setting, "RBE analysis only": no lists, short retention.
+
+Not measured: real logs of the owner's size and shape (the model's hit rate is 9 %; a
+fleet with warm machines has more hits and fewer executions per log); `db.t3.micro` or
+any network between node and database; a parse concurrency other than 2 per node; the
+LiveView render of the 360-row group page (the JSON is timed; the page shows 25 rows).

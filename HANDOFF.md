@@ -79,6 +79,13 @@ PORT=4100 mix phx.server                            # web :4100 (port 4000 is ta
   `cd e2e && OUT=/some/dir ADMIN_TOKEN=<the server's> node rbe-shots.mjs` (start the
   server with `ADMIN_TOKEN=x PORT=4100 mix phx.server` to get both an admin and a
   non-admin view; Playwright connects the LiveView, unlike headless Chrome's `--screenshot`).
+- **RBE at scale:** `bench/rbe_scale.sh --label x [--nodes 2] [--projects 360] [--builds 2000]`
+  (bench Postgres on 5441, database `conveyor_rbe_scale` dropped and created per run,
+  prod-mode nodes on 4199/4198; about 6 minutes and 8 GB of disk per run at the defaults;
+  drop the database afterwards). It prints throughput, lock waits, sizes, page times and
+  `RESULT: exact` or the mismatching figures; a mismatch is a bug. PLAN §27.9 has the
+  model, the table and what it found (a time-zone bug among them: every session now runs
+  in UTC, `Conveyor.Repo.init/2`).
 - Screenshots for design review: `"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --screenshot=out.png --window-size=1440,1000 URL` (LiveView JS does not connect in headless screenshots; server-rendered HTML only).
 - Test DB: `mix test` migrates automatically. If migrations are edited in place (they were, pre-release), rebuild: `MIX_ENV=test mix do ecto.drop, ecto.create, ecto.migrate` and `mix ecto.reset` for dev.
 - Regenerate protobuf modules after changing `priv/protos/`: `priv/protos/gen.sh` (needs `protoc` and `~/.mix/escripts/protoc-gen-elixir`). `google/api`, `google/rpc`, `google/longrunning`, `google/bytestream` messages come from the `googleapis` hex dep and are NOT generated (the ByteStream *service* module is missing from the dep — hand-write a `GRPC.Service` for it when building the CAS sink).

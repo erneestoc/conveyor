@@ -27,7 +27,13 @@ defmodule Conveyor.Metrics.Scope do
             # set by Conveyor.Metrics.Rollup.ensure!/1 once a page has verified the window,
             # with the window's rows so every panel of the page reuses them
             rolled: false,
-            rollup_rows: nil
+            rollup_rows: nil,
+            # `Conveyor.Metrics.Rollup.rows/1` for a reader that sums many projects:
+            # `stored` reads stored hours only, through the current one and from the
+            # start of the window's first hour (no interval is computed over every
+            # project at once); `rollup_fields` loads those columns alone
+            stored: false,
+            rollup_fields: nil
 
   @ranges %{"24h" => 24 * 3600, "7d" => 7 * 86_400, "30d" => 30 * 86_400, "90d" => 90 * 86_400}
 
