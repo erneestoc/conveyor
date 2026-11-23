@@ -2662,3 +2662,58 @@ models were not changed and `check.sh` was not run again for this step).
   input lists and their difference, near misses, non-determinism, Bazel 7.
 - **Follow-up:** fetching the execution log by reference from a reachable remote cache
   (`BuildToolLogs` carries a bytestream URI; a worker like `fetch_profile.ex`).
+
+### 28.3 State / next (2026-11-23, second worker; ran out of context after one small step)
+
+**Done in this step (pure, nothing calls it yet):** `Conveyor.Rbe.StreamActions`
+(`lib/conveyor/rbe/stream_actions.ex`, `test/conveyor/rbe_stream_actions_test.exs`):
+
+- `key/4`: the §28.2 key (8 bytes; command line hashed argument by argument, never
+  held). `key_source/0` = 2. `ActionKey.source_name/1` does not name it yet.
+- `record/7` → `{key, start µs | nil, duration µs, mnemonic, label, hit?}`; hit =
+  `start < build start` (strict; no build start: never a hit); `timed?/1` is false for
+  no times (Bazel 7) and `end == start` (8.0 to 8.5). Microseconds, not milliseconds, so
+  the class boundary (`start < first finish`) is compared at the log's precision.
+- `encode/1` / `decode/1`: version byte + zstd over columns (keys, starts, durations,
+  mnemonic index, label index, flags, two string tables local to the chunk, so a chunk
+  decodes alone). **15.1 B per action on a synthetic chunk** (1,000 actions, 50 labels,
+  3 mnemonics); not measured on the recorded streams.
+
+**Decisions taken from reading the code, for whoever builds the rest:**
+
+- Storage: a table, not the blob store (`stream_actions (invocation_id, day, first_seq,
+  n, records bytea)`, primary key `(invocation_id, day, first_seq)`, daily partitions like
+  the segment tables). Insert it in `Writer.Transaction.write!/3` after
+  `update_invocations!` with `on_conflict: :nothing`: the fence then makes it exactly
+  once, a taken-over stream's stale batch is rolled back before it, and a resend is a
+  no-op. `Batch` gains `stream: []` (records newest first; `merge/2`: `b.stream ++
+  a.stream`; part of `empty?/1`), `Writer.Plan.rows/2` a `stream_rows` list (one row per
+  unit, `StreamActions.encode(Enum.reverse(unit.stream))`). No session state is needed:
+  the build start for the hit flag is the normalizer's `inv.started_at`, which a resumed
+  session reads from the row.
+- Where: the `handle(:action, %{payload: {:action, %{success: true}}}, …)` clause of
+  `Normalizer` (today a no-op beside the count).
+- Counts only: derive at roll time (a build whose records are all `not timed?`); no
+  column needed.
+- Classification: `Rbe.Hour.executions/1` is SQL over `spawns`; stream records are not
+  rows, so the stream half is computed in Elixir per hour: decode the hour's chunks,
+  read the `action_keys` rows of their keys by primary key in sorted chunks
+  (`Keys.read_rows` pattern), classify with `ActionKey.classify/4`, fold into the same
+  cells under a `"stream"` sub-map of `invocation_rollups.rbe` (the `source` dimension).
+  Floor and ceiling as two key spaces in the same table: the ceiling key is the stream
+  key; the floor key is `sha256(stream key ‖ commit tag)[0..8]` (no row when the build
+  has no `commit` tag). Both merged by `Keys.merge!/4` per scope (its `out` field wants
+  a 16-hex prefix: pass a constant; `nondet` false). `Keys.holders/3` finds late-arrival
+  victims through `spawns.action_key`, which stream records are not in: the stream path
+  needs its own way to mark hours stale (touch the builds of the scope whose
+  `started_at` falls between the changed keys' new and old first finish, or keep
+  `(scope, hour)` of the changed keys; undecided).
+- A build with `exec_log_status in ("parsed", "expired")` ignores its chunks at roll time.
+
+**Not done (all of the scope's items 1 to 7 beyond the pure module):** the accumulator
+in `Normalizer`/`Batch`, the migration and the chunk row in the fenced transaction,
+version gate in the rollup, commit floor, key upsert and classification, rollup `source`
+dimension, cores, retention, `Report`/JSON fields, the recorded fixtures and accuracy
+tests, the takeover/resend/out-of-order tests, the property test against brute force,
+`ActionKeys.tla`. Recorded pairs are still only in the research scratchpad
+(`bes-only/raw/{bt9,ab9,bt8}-*`), not in `test/fixtures`.
