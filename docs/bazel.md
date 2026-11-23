@@ -110,6 +110,28 @@ tools/bes-upload-profile --server https://conveyor.example.com --key conveyor_..
 Set `--invocation_id=$(uuidgen)` yourself (lowercase) so the job knows the id, or read it
 from the results URL Bazel prints.
 
+Without the tool, with curl (the RBE opportunity page shows this recipe with your
+server's address, and says whether the project has a key that may upload):
+
+```sh
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \
+  -H "x-api-key: $CONVEYOR_UPLOAD_KEY" \
+  -H "content-type: application/octet-stream" \
+  --data-binary @/tmp/exec.log.zst \
+  "https://conveyor.example.com/api/v1/invocations/$ID/artifacts/execution.log.zst")
+echo "execution log upload: HTTP $code"
+```
+
+**The key needs the `upload` scope.** A key with only `ingest` and `read` (what a BES
+key usually has) is answered `403 API key lacks the upload scope`; in a `curl -sf`
+pipeline that is silent, which is why the recipe prints the status. `201` means stored;
+the log is parsed in the background. The `content-type` header is required (curl's
+default form encoding is refused).
+
+The flag does not change cache keys: with Bazel 9.2 (checked 2026-11-22) a build without
+it hit every action cached by a build with it, and toggling it did not discard the
+analysis cache.
+
 ### Declaring cores with `exec_properties`
 
 Core time is wall time × cores, and the only per-action statement of cores the compact

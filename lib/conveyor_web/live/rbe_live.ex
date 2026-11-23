@@ -96,6 +96,7 @@ defmodule ConveyorWeb.RbeLive do
       # Only a project's admin reads which property names its logs carry.
       properties: if(admin?, do: Properties.list(assigns.project.id), else: []),
       reread: if(admin?, do: Reread.count(assigns.project, window_start(assigns.range)), else: 0),
+      upload_key?: admin? and upload_key?(assigns.project),
       form:
         settings &&
           to_form(%{
@@ -107,6 +108,16 @@ defmodule ConveyorWeb.RbeLive do
             "cache_group" => (assigns.group && assigns.group.name) || ""
           })
     )
+  end
+
+  # CI uploads logs with a key of the `upload` scope; one that is revoked or expired
+  # does not count.
+  defp upload_key?(project) do
+    now = DateTime.utc_now()
+
+    project
+    |> Conveyor.Projects.list_api_keys()
+    |> Enum.any?(&("upload" in &1.scopes and Conveyor.Projects.ApiKey.active?(&1, now)))
   end
 
   @impl true
@@ -632,6 +643,7 @@ defmodule ConveyorWeb.RbeLive do
           reread={@reread}
           range={@range}
           origin={@origin}
+          upload_key?={@upload_key?}
         />
       </div>
     </Layouts.app>
@@ -689,6 +701,9 @@ defmodule ConveyorWeb.RbeLive do
 
   attr :id, :string, required: true
   attr :origin, :string, required: true
+  # Whether the project has a live key that may upload; nil where that is not the
+  # viewer's to know (the empty state anyone sees).
+  attr :upload_key?, :boolean, default: nil
 
   # What a CI job adds to upload its execution log. The key is a placeholder: a real one
   # is never rendered.
@@ -715,12 +730,34 @@ defmodule ConveyorWeb.RbeLive do
       <p class="mt-1.5 text-[11px] leading-snug text-base-content/70">
         <code class="font-mono">CONVEYOR_UPLOAD_KEY</code>
         is a placeholder for an API key with the <code class="font-mono">upload</code>
-        scope (Project settings); keep it in the CI's secret store. The
-        <code class="font-mono">content-type</code>
+        scope (Project settings); keep it in the CI's secret store. A key with only
+        <code class="font-mono">ingest</code>
+        or <code class="font-mono">read</code>
+        is answered 403, which <code class="font-mono">curl -sf</code>
+        would hide: the recipe prints the status. The <code class="font-mono">content-type</code>
         header is required: curl's default form encoding is refused. The flag does not
         change cache keys: with Bazel 9.2 (checked 2026-11-22) a build without the flag hit
         every action cached by a build with it, and toggling it did not discard the analysis
         cache.
+      </p>
+      <p
+        :if={@upload_key? == false}
+        id={"#{@id}-no-key"}
+        class="mt-1.5 flex items-start gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/5 px-2 py-1.5 text-[11px] leading-snug"
+      >
+        <.icon name="hero-exclamation-triangle-micro" class="mt-px size-3.5 shrink-0 text-amber-600" />
+        <span>
+          This project has no live API key with the <code class="font-mono">upload</code>
+          scope: create one in Project settings before CI can upload a log.
+        </span>
+      </p>
+      <p
+        :if={@upload_key? == true}
+        id={"#{@id}-has-key"}
+        class="mt-1.5 flex items-center gap-1.5 text-[11px] text-base-content/70"
+      >
+        <.icon name="hero-check-circle-micro" class="size-3.5 text-emerald-600" />
+        This project has a live API key with the upload scope.
       </p>
       <script :type={Phoenix.LiveView.ColocatedHook} name=".CopyText">
         export default {
@@ -749,12 +786,13 @@ defmodule ConveyorWeb.RbeLive do
     ID=$(uuidgen | tr 'A-Z' 'a-z')
     bazel build --config=ci --invocation_id="$ID" //...
 
-    # afterwards, also when the build failed
-    curl -fsS -X PUT \\
+    # afterwards, also when the build failed; the key needs the upload scope
+    code=$(curl -sS -o /dev/null -w '%{http_code}' -X PUT \\
       -H "x-api-key: $CONVEYOR_UPLOAD_KEY" \\
       -H "content-type: application/octet-stream" \\
       --data-binary @/tmp/exec.log.zst \\
-      "#{origin}/api/v1/invocations/$ID/artifacts/execution.log.zst"\
+      "#{origin}/api/v1/invocations/$ID/artifacts/execution.log.zst")
+    echo "execution log upload: HTTP $code (201 stored, 403 key lacks the upload scope)"\
     """
   end
 
@@ -1082,6 +1120,7 @@ defmodule ConveyorWeb.RbeLive do
   attr :reread, :integer, required: true
   attr :range, :string, required: true
   attr :origin, :string, required: true
+  attr :upload_key?, :boolean, required: true
 
   defp settings(assigns) do
     ~H"""
@@ -1216,7 +1255,7 @@ defmodule ConveyorWeb.RbeLive do
       </div>
 
       <div class="mt-4 border-t border-base-300 pt-1">
-        <.ci_snippet id="rbe-ci-snippet" origin={@origin} />
+        <.ci_snippet id="rbe-ci-snippet" origin={@origin} upload_key?={@upload_key?} />
       </div>
     </.panel>
     """

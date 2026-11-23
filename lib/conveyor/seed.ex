@@ -259,9 +259,9 @@ defmodule Conveyor.Seed do
       })
 
     workspace_status =
-      inv.workspace_status
-      |> Map.replace("BUILD_USER", plan.user)
-      |> Map.replace("BUILD_HOST", plan.host)
+      (inv.workspace_status || %{})
+      |> Map.put("BUILD_USER", plan.user)
+      |> Map.put("BUILD_HOST", plan.host)
 
     home =
       cond do

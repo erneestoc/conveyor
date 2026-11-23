@@ -116,6 +116,10 @@ defmodule ConveyorWeb.RbeLiveTest do
     snippet = view |> element("#rbe-ci-snippet-text") |> render()
     assert snippet =~ "http://www.example.com/api/v1/invocations/$ID/artifacts/execution.log.zst"
     assert snippet =~ "$CONVEYOR_UPLOAD_KEY"
+    assert snippet =~ "HTTP $code"
+    # no key that may upload yet: the panel says so; an ingest key does not count
+    {:ok, _, _} = Projects.create_api_key(p, %{name: "bes", scopes: ["ingest", "read"]})
+    assert has_element?(view, "#rbe-ci-snippet-no-key")
     assert snippet =~ "build:ci --execution_log_compact_file"
     refute snippet =~ "conveyor_"
     html = render(view)
@@ -123,9 +127,12 @@ defmodule ConveyorWeb.RbeLiveTest do
     assert view |> element("#gap-total") |> render() =~ "6.0s"
     assert view |> element("#tile-parallelism") |> render() =~ "3.0×"
 
+    {:ok, _, _} = Projects.create_api_key(p, %{name: "ci", scopes: ["upload"]})
     view |> element("#rbe-range-24h") |> render_click()
     assert_patch(view, ~p"/p/#{p.slug}/rbe?range=24h")
     assert has_element?(view, "#rbe-range-24h[aria-pressed=true]")
+    assert has_element?(view, "#rbe-ci-snippet-has-key")
+    refute has_element?(view, "#rbe-ci-snippet-no-key")
 
     view
     |> form("#rbe-settings-form", %{
