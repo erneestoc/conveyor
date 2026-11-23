@@ -5,16 +5,15 @@ defmodule Conveyor.Workers.StreamKeys do
   "pending" until the next run of `Conveyor.Workers.Rollup` (every 5 minutes, which stays
   the backstop: a job lost here is merged there).
 
-  One job per build (unique by its id), on the `parse` queue, so a node merges at most
-  that queue's limit at once. The merge takes an advisory lock per build and merges
-  minima, so a second node doing the same build, or the rollup job at the same moment,
-  changes nothing. The merge makes the build's hour stale; the page's read path rolls
-  stale hours, so nothing is rolled here.
+  One job per finalized stream, on the `parse` queue, so a node merges at most that
+  queue's limit at once. No uniqueness check on insert (measured: the lookup cost more
+  than the merge of a small build, PLAN §28.5): a second job for a build already merged
+  since its last event returns at once, and the merge itself takes an advisory lock per
+  build and merges minima, so a second node doing the same build, or the rollup job at
+  the same moment, changes nothing. The merge makes the build's hour stale; the page's
+  read path rolls stale hours, so nothing is rolled here.
   """
-  use Oban.Worker,
-    queue: :parse,
-    max_attempts: 3,
-    unique: [period: 300, keys: [:invocation_id]]
+  use Oban.Worker, queue: :parse, max_attempts: 3
 
   alias Conveyor.Invocations.Invocation
   alias Conveyor.Repo
@@ -42,11 +41,17 @@ defmodule Conveyor.Workers.StreamKeys do
   def perform(%Oban.Job{args: %{"invocation_id" => id}}) do
     case Repo.get(Invocation, id) do
       %Invocation{status: status, stream_actions: n} = inv when status in @finished and n > 0 ->
-        Conveyor.Rbe.Stream.merge_keys!(inv)
+        if merged?(inv), do: :ok, else: Conveyor.Rbe.Stream.merge_keys!(inv)
 
       # Not final in the row (disconnected, or the row is behind): the rollup job's pass.
       _ ->
         {:cancel, :not_finished}
     end
   end
+
+  defp merged?(%Invocation{stream_keys_at: nil}), do: false
+  defp merged?(%Invocation{last_event_at: nil}), do: true
+
+  defp merged?(%Invocation{stream_keys_at: at, last_event_at: last}),
+    do: DateTime.compare(at, last) != :lt
 end

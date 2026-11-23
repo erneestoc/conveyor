@@ -313,3 +313,8 @@ if mode = System.get_env("RAW_LOG") do
     flush_bytes: String.to_integer(System.get_env("RAW_LOG_FLUSH_BYTES", "4194304")),
     fsync: System.get_env("RAW_LOG_FSYNC", "true") in ~w(true 1)
 end
+
+# Builds that sent per-action events have their keys merged by a job when they end
+# (`Conveyor.Workers.StreamKeys`); "false" leaves it to the rollup job, every 5 minutes.
+config :conveyor,
+  stream_keys_on_finalize: System.get_env("STREAM_KEYS_ON_FINALIZE", "true") != "false"

@@ -21,6 +21,9 @@ defmodule Mix.Tasks.Conveyor.Seed do
 
       mix conveyor.seed --invocations 5000 [--days 30] [--project default]
 
+  `--stream-demo` replays recorded builds with per-action events through the gRPC ingest
+  of a running server that accepts API keys (`Conveyor.Seed.StreamDemo`).
+
   `--rbe-demo` fills the Duplicate work pages (`Conveyor.Seed.RbeDemo`): projects
   `rbe-demo-*` with execution logs that race, repeat, hit the cache, state cores or not,
   miss by one input and are not deterministic, and the cache group `rbe-demo-monorepo`.
@@ -29,6 +32,7 @@ defmodule Mix.Tasks.Conveyor.Seed do
   first.
 
       mix conveyor.seed --rbe-demo [--url http://localhost:4100]
+      mix conveyor.seed --stream-demo [--grpc localhost:1985] [--url http://localhost:4100]
   """
   use Mix.Task
 
@@ -45,6 +49,8 @@ defmodule Mix.Tasks.Conveyor.Seed do
     days: :integer,
     project: :string,
     rbe_demo: :boolean,
+    stream_demo: :boolean,
+    grpc: :string,
     url: :string
   ]
   @users ~w(alice bob carol dave erin frank grace heidi)
@@ -68,18 +74,28 @@ defmodule Mix.Tasks.Conveyor.Seed do
   def run(args) do
     {opts, _, _} = OptionParser.parse(args, switches: @switches)
 
-    if opts[:rbe_demo] do
-      start_repo()
-      counts = Conveyor.Seed.RbeDemo.run(Keyword.take(opts, [:url]) ++ demo_hooks())
+    cond do
+      opts[:stream_demo] ->
+        start_repo()
+        hooks = Application.get_env(:conveyor, :stream_demo_hooks, [])
+        counts = Conveyor.Seed.StreamDemo.run(Keyword.take(opts, [:url, :grpc]) ++ hooks)
+        for {slug, n} <- Enum.sort(counts), do: Mix.shell().info("#{slug}: #{n} builds")
 
-      for {slug, n} <- Enum.sort(counts),
-          do: Mix.shell().info("#{slug}: #{n} builds")
+        Mix.shell().info(
+          "open /p/stream-demo-ios/duplicate-work and /groups/stream-demo-monorepo/duplicate-work"
+        )
 
-      Mix.shell().info(
-        "open /p/rbe-demo-ios/duplicate-work and /groups/rbe-demo-monorepo/duplicate-work"
-      )
-    else
-      seed_builds(opts)
+      opts[:rbe_demo] ->
+        start_repo()
+        counts = Conveyor.Seed.RbeDemo.run(Keyword.take(opts, [:url]) ++ demo_hooks())
+        for {slug, n} <- Enum.sort(counts), do: Mix.shell().info("#{slug}: #{n} builds")
+
+        Mix.shell().info(
+          "open /p/rbe-demo-ios/duplicate-work and /groups/rbe-demo-monorepo/duplicate-work"
+        )
+
+      true ->
+        seed_builds(opts)
     end
   end
 

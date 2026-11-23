@@ -13,7 +13,90 @@ The feature was named "RBE opportunity" until 2026-11-23. Its old addresses stil
 above, and `/p/<slug>/rbe/json`, `/groups/<name>/rbe/json` and `GET /api/v1/rbe` answer
 the same body as the new paths. The JSON keys did not change.
 
-There are two reports on the page, and every number says which one it belongs to.
+## Setup: one line
+
+```
+# .bazelrc
+build --build_event_publish_all_actions
+```
+
+That is the whole setup when the builds already send their events to Conveyor: Bazel
+then sends one event per action, and the page is computed from them. It needs **Bazel
+8.6 or later** (9.x included) for the action times; builds of an older Bazel are counted
+and say so ("counted only"). Optionally name the commit, which makes duplicates between
+builds of one commit exact:
+
+```
+bazel build --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) //...
+```
+
+Conveyor reads the commit from the first of these tags (any letter case): `commit`,
+`commit_sha`, `git_commit`, `build_scm_revision`, `stable_git_commit`; they come from
+`--build_metadata`, a workspace status command (`BUILD_SCM_REVISION`) or an API key's
+default tags. Uploading execution logs is an optional **exact mode**
+([below](#exact-mode-execution-logs)); a build with a parsed log is reported from its
+log.
+
+### What the event stream gives, and how sure each figure is
+
+An action is identified by its label, mnemonic, primary output and command line. At one
+commit that identifies it exactly. Across commits it does not: an input that changed is
+in no command line. So each class of duplicate has three figures:
+
+| Figure | What it is | Standing |
+|---|---|---|
+| **same commit** | duplicates between builds that name the same commit | exact for identical inputs (equal to the execution logs, count for count, on every recorded scenario); misses duplicates across commits |
+| **any commit** | every execution that repeats an action another build finished or was running, whatever the commit | an upper bound: every real duplicate is in it, and so is every action whose inputs changed without changing its command line |
+| **estimate** | same commit, plus the share of the rest that is likely the same work | an estimate, always between the two; absent when the window has no evidence |
+
+**The estimate.** A cache hit is sent with the times of the execution it was served
+from, so Conveyor knows which builds read the results of which. Such a build shows what
+changed between two commits: the actions it got from the cache were unchanged, the ones
+it ran anyway were changed. The estimate counts, of the cross-commit repeats that
+nothing else decides, the unchanged share per kind of action
+(`unchanged ÷ (unchanged + changed)`, by count for counts and by time for times; over
+all kinds where a kind has no observation). Repeats on a machine that had the earlier
+result are counted as changed, not as duplicates. The page's "Across commits" tile shows
+the share and what it rests on. Measured against execution logs of the same builds
+(PLAN §28.4):
+
+| scenario | truth | same commit | estimate | any commit |
+|---|---|---|---|---|
+| Go change, second commit on the machine that built the first | 0 | 0 | 0 | 4.7 s |
+| a commit that changes nothing, then a cold machine | 62.0 s | 0 | 62.0 s | 62.0 s |
+| C++ header change: cold, cold at the new commit, warm at the new commit | 512.3 s | 254.4 s | 509.9 s | 766.7 s |
+| the same with the warm build before the cold one | 512.3 s | 254.4 s | 475.4 s (−7 %) | 766.7 s |
+| C++ header change, two cold machines, no build that read a cache | 257.8 s | 0 | none | 512.3 s |
+
+Limits, stated: without a build that reads another commit's results from a cache there
+is no estimate; a build without a commit is in no same-commit figure; the stream cannot
+tell a spawn that may not be cached from one that may, so such spawns count as
+executions (execution logs leave them out; none in the recorded builds, so the
+over-count is not measured); Bazel sends one event per action, so a retried or flaky
+action is its final attempt only (not recorded, not verified). Cores are estimated: the
+project's cores per mnemonic, else CPU time ÷ wall time of the kind in each build.
+Actions without times (file writes, symlinks: not spawns) are not counted.
+
+**The source line** at the top of the page says where its figures come from (the event
+stream, execution logs, or both), how many finished builds sent per-action events, and
+how many of those are counted only (Bazel before 8.6), name no commit, are pending
+classification (done when a build ends; at the latest by a job that runs every 5
+minutes) or arrived after their hour's figures were final (not counted). The stream
+section then has the two headline classes with their three figures, three hit rates
+(today; with a perfect cache; with in-flight deduplication; a range is same commit to
+any commit), kinds of action and the targets that repeat the most. "Per day" divides by
+the UTC days with at least one build reported from per-action events. JSON: `source`
+and `stream` (`same_commit`, `estimate`, `any_commit`, `hit_rate`, `per_day`,
+`mnemonics`, `targets`, `coverage`, and the build counts).
+
+Records are kept for the project's "days per-spawn rows are kept" (default 3); the
+hourly numbers and the keys stay, as for execution logs. An hour's stream figures are
+final one hour before its records expire.
+
+## Exact mode: execution logs
+
+There are two reports from execution logs and the plain event stream on the page, and
+every number says which one it belongs to.
 
 | Standing | Source | What it can say |
 |---|---|---|
@@ -259,15 +342,36 @@ retention bounds the database size without changing the page.
 
 ## Per-action events in the event stream
 
-`build --build_event_publish_all_actions` makes Bazel send an event for every action.
-The metrics of this page do not read those events yet (they are computed from execution
-logs); what Conveyor does with them today is keep them cheap. A successful action adds
-no row to a build's Actions tab, and its event, with the empty progress event Bazel
-sends behind it, is counted but not stored with the build's raw events: on recorded
-builds these are 77 to 92 % of a stream's events and 84 to 170 stored bytes per action.
-The build's Events tab says how many events were received and not stored. **Keep
-per-action events in the raw event stream** in the settings below stores them for
-builds that start afterwards. Failed actions are always stored and listed.
+`build --build_event_publish_all_actions` makes Bazel send an event for every action
+(about 2 KB each, most of it the command line). Conveyor keeps of each successful one a
+record of about 12 to 24 bytes (key, times, kind, target) and nothing else: no row on a
+build's Actions tab, and the event, with the empty progress event Bazel sends behind it,
+is counted but not stored with the build's raw events (on recorded builds these are 77
+to 92 % of a stream's events and 84 to 170 stored bytes per action). The build's Events
+tab says how many events were received and not stored. **Keep per-action events in the
+raw event stream** in the settings stores them for builds that start afterwards. Failed
+actions are always stored and listed.
+
+Cost, measured on a laptop with the recorded builds replayed at once (PLAN §28.5,
+`bench/run.sh --profile stream`, `bench/stream_scale.sh`): a node takes about 38,000
+actions per second flat out (29,000 with 60 projects, API keys and the key merges
+running beside the ingest). An action, with the progress event behind it, costs about
+80 µs of node CPU, 6 µs of Postgres CPU and about 100 bytes of write-ahead log; its
+record is 15 bytes (29 with the table's overhead). A build of 3,500 actions therefore
+costs about 0.3 s of one core, 0.4 MB of write-ahead log and 50 to 100 KB of records,
+which are deleted after the "days per-spawn rows are kept". Its keys are merged when it
+ends (11 ms at the median, 38 ms at the 99th percentile for the recorded builds of 248
+to 1,357 actions) by a job on the `parse` queue.
+
+Keys are the larger part of what stays: a key row is about 220 bytes with its index.
+There is one row per action and scope that lives as long as keys do (the any-commit
+row, shared by every build that runs the action), and one per action, commit and scope
+(the same-commit row). In the scale run the same-commit rows were 71 % of the key
+table, so they are deleted two days after the records of their builds (5 days by
+default) instead of with the other keys (32 days): a build of that commit that arrives
+later starts over in the same-commit figure. Builds without the flag are not affected:
+they write the same write-ahead log per event as before (617 bytes in the standard
+bench, before and after).
 
 ## Keeping only what the metrics need
 

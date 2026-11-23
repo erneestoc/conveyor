@@ -67,6 +67,9 @@ defmodule Conveyor.Bench do
     {loadgen, output, status} = runner.(opts)
 
     elapsed_ms = System.monotonic_time(:millisecond) - started
+    # Builds with per-action events have their keys merged by a job when they end: its
+    # work belongs to the run (PLAN §28.5).
+    merge_wait_ms = wait_for_stream_merges(Keyword.get(opts, :merge_timeout_ms, 300_000))
     # Let the last commits, acks and worker lingers land before the after-snapshot.
     Process.sleep(Keyword.get(opts, :settle_ms, 1_500))
     after_ = snapshot(opts[:pg_container])
@@ -91,7 +94,72 @@ defmodule Conveyor.Bench do
         status
       )
 
-    write_report(report, Keyword.get(opts, :results_dir, "bench/results"))
+    report
+    |> Map.put(:stream, stream_report(report, merge_wait_ms, elapsed_ms))
+    |> write_report(Keyword.get(opts, :results_dir, "bench/results"))
+  end
+
+  # Waits until no finished build with per-action events is unmerged (when the merge on
+  # finalize is on); returns how long that took after the generator stopped.
+  defp wait_for_stream_merges(timeout_ms) do
+    started = System.monotonic_time(:millisecond)
+
+    if Application.get_env(:conveyor, :stream_keys_on_finalize, true) do
+      Stream.repeatedly(fn ->
+        %{rows: [[n]]} =
+          Repo.query!("""
+          SELECT count(*) FROM invocations
+          WHERE stream_actions > 0 AND stream_keys_at IS NULL
+            AND status IN ('succeeded', 'failed', 'aborted')
+          """)
+
+        if n > 0, do: Process.sleep(250)
+        n
+      end)
+      |> Enum.find(fn n ->
+        n == 0 or System.monotonic_time(:millisecond) - started > timeout_ms
+      end)
+    end
+
+    System.monotonic_time(:millisecond) - started
+  end
+
+  # What a run with per-action events adds to the headline: actions, the CPU of the
+  # node over the whole run (ingest and merges), and where the bytes went.
+  defp stream_report(report, merge_wait_ms, elapsed_ms) do
+    %{rows: [[actions, builds, merged]]} =
+      Repo.query!("""
+      SELECT coalesce(sum(stream_actions), 0)::bigint, count(*) FILTER (WHERE stream_actions > 0),
+             count(*) FILTER (WHERE stream_keys_at IS NOT NULL)
+      FROM invocations
+      """)
+
+    %{rows: [[keys]]} = Repo.query!("SELECT count(*) FROM action_keys")
+    events = report.loadgen["events"] || 0
+    wall_s = (report.app[:wall_s] || 0) + 0.0
+    cpu_s = (report.app[:runtime_vcpu] || 0) * wall_s
+    pg_cpu_s = report.postgres.cpu_s
+    tables = report.postgres.tables
+
+    %{
+      actions: actions,
+      builds: builds,
+      merged_builds: merged,
+      merge_wait_ms: merge_wait_ms,
+      actions_per_s: Float.round(actions * 1000 / max(elapsed_ms, 1), 1),
+      app_cpu_s: Float.round(cpu_s, 2),
+      app_cpu_us_per_event: if(events > 0, do: Float.round(cpu_s * 1_000_000 / events, 1)),
+      pg_cpu_us_per_event:
+        if(events > 0 and pg_cpu_s, do: Float.round(pg_cpu_s * 1_000_000 / events, 1)),
+      action_keys: keys,
+      bytes_per_build:
+        if(builds > 0,
+          do:
+            Map.new(~w(event_segments stream_actions action_keys oban_jobs invocations), fn t ->
+              {t, round((tables[t] || 0) / builds)}
+            end)
+        )
+    }
   end
 
   # --- database reset --------------------------------------------------------------------
@@ -101,6 +169,7 @@ defmodule Conveyor.Bench do
     Repo.query!("TRUNCATE invocations CASCADE")
     Repo.query!("TRUNCATE event_segments, log_segments, tag_keys, blobs CASCADE")
     Repo.query!("TRUNCATE oban_jobs")
+    Repo.query!("TRUNCATE action_keys, stream_actions, invocation_rollups")
     # VACUUM cannot run inside a transaction, and the test sandbox wraps everything in one.
     unless Repo.config()[:pool] == Ecto.Adapters.SQL.Sandbox,
       do: Repo.query!("VACUUM ANALYZE invocations")
@@ -487,7 +556,7 @@ defmodule Conveyor.Bench do
     cols |> Enum.zip(row) |> Map.new(fn {k, v} -> {k, v} end)
   end
 
-  @tables ~w(invocations event_segments log_segments targets test_results actions invocation_metrics tag_keys)
+  @tables ~w(invocations event_segments log_segments targets test_results actions invocation_metrics tag_keys stream_actions action_keys oban_jobs)
 
   defp table_sizes do
     %{rows: rows} =
@@ -882,7 +951,54 @@ defmodule Conveyor.Bench do
     Map.put(report, :path, path)
   end
 
+  @stream_dir "test/fixtures/stream"
+  @stream_builds ~w(abseil_a1 abseil_b1 abseil_b2 buildtools_a1 buildtools_b1 buildtools_a2 buildtools_a1_warm)
+
+  @doc """
+  The recorded builds with `--build_event_publish_all_actions` as generator fixtures
+  (`:on`), or the same builds as Bazel sends them without the flag (`:off`): no
+  successful `ActionExecuted` and not the empty `Progress` behind each. The latter are
+  written to `tmp/stream_off` once.
+  """
+  @spec stream_fixtures(:on | :off) :: String.t()
+  def stream_fixtures(:on),
+    do: Enum.map_join(@stream_builds, ",", &Path.join(@stream_dir, "#{&1}.bep.zst"))
+
+  def stream_fixtures(:off) do
+    File.mkdir_p!("tmp/stream_off")
+
+    Enum.map_join(@stream_builds, ",", fn name ->
+      path = "tmp/stream_off/#{name}.bep"
+
+      unless File.exists?(path) do
+        events = Conveyor.Bep.Fixture.read!(Path.join(@stream_dir, "#{name}.bep.zst"))
+        File.write!(path, Conveyor.Bep.Fixture.encode_all(without_actions(events)))
+      end
+
+      path
+    end)
+  end
+
+  defp without_actions(events) do
+    {kept, _} =
+      Enum.flat_map_reduce(events, false, fn
+        %{payload: {:action, %{success: true}}}, _after -> {[], true}
+        %{payload: {:progress, %{stdout: "", stderr: ""}}}, true -> {[], false}
+        event, _after -> {[event], false}
+      end)
+
+    kept
+  end
+
   @profiles %{
+    # The recorded builds with per-action events (about 2 KB per action), flat out and
+    # paced, and the same builds without the flag (PLAN §28.5).
+    "stream" => [streams: 50, builds: 700, stream: :on],
+    "stream-off" => [streams: 50, builds: 700, stream: :off],
+    # Paced so a build lasts about 37 s either way: 20 ms per event with the flag (1,870
+    # events per build on average), 72 ms without (518).
+    "stream-paced" => [streams: 200, builds: 400, delay_ms: 20, stream: :on],
+    "stream-paced-off" => [streams: 200, builds: 400, delay_ms: 72, stream: :off],
     # 200 builds at once replayed flat out: the Postgres-bound shape.
     "flatout" => [streams: 200, builds: 10_000],
     # 1,000 builds at once paced like real ones: the memory-per-stream shape.
@@ -890,7 +1006,11 @@ defmodule Conveyor.Bench do
   }
 
   @doc "Generator settings of a named profile (`flatout`, `paced`), overridden by `opts`."
-  def profile_opts(name, opts), do: Keyword.merge(Map.get(@profiles, name || "flatout", []), opts)
+  def profile_opts(name, opts) do
+    {stream, profile} = @profiles |> Map.get(name || "flatout", []) |> Keyword.pop(:stream)
+    profile = if stream, do: [fixtures: stream_fixtures(stream)] ++ profile, else: profile
+    Keyword.merge(profile, opts)
+  end
 
   @doc "Medians of the headline numbers across repeated runs (laptop noise is about ±20 %)."
   def summarize_repeats(reports) do
@@ -924,6 +1044,19 @@ defmodule Conveyor.Bench do
       (r.loadgen["builds_failed"] || 0) == 0
   end
 
+  defp stream_line(%{actions: n} = s) when n > 0 do
+    "#{n} actions in #{s.builds} builds, #{s.actions_per_s}/s; node CPU #{s.app_cpu_s} s " <>
+      "(#{s.app_cpu_us_per_event} us/event), pg #{s.pg_cpu_us_per_event} us/event; " <>
+      "#{s.merged_builds} merged, #{s.merge_wait_ms} ms after the last stream; " <>
+      "bytes/build #{inspect(s.bytes_per_build)}; #{s.action_keys} keys"
+  end
+
+  defp stream_line(%{} = s),
+    do:
+      "none (node CPU #{s.app_cpu_s} s, #{s.app_cpu_us_per_event} us/event, pg #{s.pg_cpu_us_per_event} us/event)"
+
+  defp stream_line(_), do: "—"
+
   defp tuple_summary(tuples) do
     tuples
     |> Enum.sort()
@@ -945,6 +1078,7 @@ defmodule Conveyor.Bench do
       WAL bytes/event     #{h.wal_bytes_per_event}   (#{p.wal_bytes} bytes, #{p.wal_fpi} full-page images)
       RSS/stream          #{h.rss_bytes_per_stream}   (peak #{r.app[:rss_peak]} over #{r.app[:peak_streams]} streams, #{r.app[:peak_workers]} workers)
       storage/build       #{h.storage_bytes_per_build}
+      per-action events   #{stream_line(r[:stream])}
       ack ms              p50 #{h.ack_p50_ms}  p99 #{h.ack_p99_ms}
       postgres            #{p.xacts_per_s} xact/s, #{p.round_trips} round trips (#{p.round_trips_per_flush}/flush, #{p.round_trips_per_xact}/xact) + #{p.nested_statements} nested, HOT #{p.invocations_hot_pct} %
       writer              #{w.count} flushes, #{w.batches_per_flush} batches/flush, #{w.events_per_flush} events/flush, flush ms p50 #{w.duration_ms.p50} p99 #{w.duration_ms.p99}, fenced #{w.fenced}, group failures #{w.group_failures}, rollbacks #{p.rollbacks}

@@ -196,5 +196,31 @@ defmodule Conveyor.Rbe.StreamTest do
     r = report(base, p.id, 3 * 24 + 5).stream
     assert r.any_commit.first.n == 199 and r.any_commit.sequential.n == 398
     assert r.same_commit.sequential.n == 398
+
+    # Two days after the records, the same-commit rows go; the any-commit rows stay.
+    # (The last build finished on day 3: its day is kept until day 3 + 3 + 2.)
+    Application.put_env(:conveyor, :retention_clock_offset_s, 9 * 86_400)
+    assert {:ok, _} = Conveyor.Workers.BuildRetention.perform(%Oban.Job{})
+    assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id), :count) == 199
+
+    assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id and k.out == 1), :count) ==
+             0
+
+    # A build of that commit after that starts over at its commit and still repeats the
+    # key at any commit.
+    late = ingest(ctx, base, "buildtools_a1", 9 * 86_400 + 3 * 3600)
+    assert merge(base) == 1
+
+    [any, same] =
+      late
+      |> Stream.records()
+      |> Stream.entries("c1")
+      |> Enum.split_with(&(&1.out == "0000000000000000"))
+      |> Tuple.to_list()
+
+    assert length(any) == 199 and length(same) == 199
+
+    assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id and k.out == 1), :count) ==
+             199
   end
 end

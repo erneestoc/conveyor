@@ -2820,3 +2820,86 @@ spaces. With the touch rule removed the property fails (checked once by hand).
   `pending` in its hour.
 - `invocations_stream_keys_pending` (partial index) no longer matches the pending
   query exactly (it also takes `last_event_at > stream_keys_at`); harmless, could go.
+
+### 28.4 The estimate between the two figures (2026-11-23, built)
+
+**The question.** An execution that repeats its stream key at another commit is a
+duplicate only when the work did not change between the two commits. The key cannot say
+(a changed input is in no command line); the stream can, sometimes, through the cache.
+
+**What the stream offers** (checked on the recordings, not assumed): a cache hit is sent
+with the start and end of the execution that filled the cache, to the microsecond (199 of
+199 hits of the recorded warm buildtools build and 187 of 187 of the warm build at the
+second commit carry exactly the start of the cold build's execution of the same key).
+`ActionExecuted` has no input or output digest (`primary_output.digest` is empty), no
+cacheable flag and one event per action.
+
+**Record.** A cache hit now keeps its key and that start (before: counted only). A warm
+build of 248 actions is 23.6 B per action instead of 13.4 B; a cold one is unchanged.
+Chunk format unchanged (version 1): a hit with a key is flag 3, and its finish times
+have their own chain of distances.
+
+**Evidence, at roll time** (`Stream.build/2`, no new table, no column, no pair scan: the
+key rows read for the classes plus the rows of the hit keys in the widest scope):
+
+- *A build reads another build's cache* when one of its hits names the first execution
+  of a key row held by that build (`first_start` equal to the hit's start). The set of
+  such builds is small (one statement fetches their commits).
+- `xhit`: a hit served from a build at another commit (or with no commit on either
+  side): the action was found unchanged across commits by a build that had the earlier
+  result.
+- `diff`: an execution that is sequential at any commit against a first execution held
+  by a build whose cache this build read, at another commit: it ran although the result
+  was at hand, so the work changed. Such an execution is no duplicate of that first one.
+- `unk` (by any-commit class): every other execution that repeats its key at any commit
+  and is not a duplicate at its own commit. Racing ones are always here.
+
+Stored under `rbe["stream"]["est"]` as `mnemonic → cell` (`unk`: `class → mnemonic →
+cell`), summed like every other cell.
+
+**Estimate** (`Report.estimate/4`, when the report is read):
+`same commit + Σ over mnemonics of unk × share`, where `share = xhit ÷ (xhit + diff)` of
+the mnemonic in the window, by count for counts and by time for times; the share over
+all mnemonics where the mnemonic has no observation; **no estimate (nil)** when
+something is unknown and the window has no observation at all. Clamped class by class
+to `[same commit, max(same commit, any commit)]`, so it never leaves the bracket.
+`estimate.evidence` states `unchanged`, `different`, `unknown` and the overall share.
+
+**What it is and is not.** The share is "of the actions a machine with the earlier
+result ran or skipped at a later commit, how much was unchanged". It is exact per kind
+of action when the builds that give the evidence ran the same actions as the builds it
+is applied to, and an approximation otherwise. Known bias: when a warm build at the new
+commit runs *before* a cold one, the changed actions of the cold build are duplicates
+at the same commit (in the floor), what is left unknown is all unchanged work, and the
+share is still applied to it: the estimate is low (fourth row below). Not handled: a
+key whose work changes more than once (the key row keeps the first execution ever, so
+duplicates among later generations are in the ceiling and, as far as no cache links
+them, only partly in the estimate); a late arrival that moves a first execution makes
+only the builds of the touch rule (§28.3) roll again, so a stored hour's evidence can
+lag for builds outside it (the two bounds are not affected).
+
+**Validation** (`test/conveyor/rbe_stream_estimate_test.exs`; duplicates, racing and
+sequential together, wall seconds and executions; truth from the execution logs):
+
+| scenario | truth | floor | estimate | ceiling |
+|---|---|---|---|---|
+| buildtools, Go change, second commit on the machine that built the first (recorded) | 0 | 0 | **0** (12 proven different) | 4.7 s (12) |
+| buildtools, a commit that changes nothing: cold, warm, cold on a second machine (recorded) | 62.0 s (199) | 0 | **62.0 s (199)** | 62.0 s (199) |
+| abseil, header change: cold, cold at the new commit, warm at the new commit (warm build constructed) | 512.3 s (622) | 254.4 s (235) | **509.9 s (621)** | 766.7 s (857) |
+| abseil, header change: cold, warm (constructed), cold at the new commit | 512.3 s (622) | 254.4 s (235) | **475.4 s (555)**, −7 % | 766.7 s (857) |
+| abseil, header change, two cold machines and nothing else (recorded) | 257.8 s (387) | 0 | **none** (no evidence) | 512.3 s (622) |
+
+"Constructed": no warm abseil build at the second commit was recorded. The warm build
+is the recorded cold build of that commit with the actions whose digest the first
+commit's log also has turned into hits carrying the first build's times, which is what
+Bazel sends (see above). **Recording needed** to replace it: abseil (or any C++ repo)
+at commit A cold, at commit B on the same machine with its disk cache, and at commit B
+on a second machine, all with `--build_event_publish_all_actions` and
+`--execution_log_compact_file`.
+
+**Follow-up design (not built): generations.** The honest fix for the two gaps above is
+a key row per *content generation*: when a build that read the row's first execution
+runs the key anyway, the row moves on to that execution as the first of a new
+generation, and a hit links a commit to the generation it was served from. That makes
+the row order-dependent (not a minimum), so it needs its own merge rule, touch rule and
+model; it would make cross-commit duplicates exact wherever a cache links the commits.

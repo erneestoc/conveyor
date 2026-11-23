@@ -83,7 +83,29 @@ defmodule Conveyor.Workers.BuildRetention do
 
     default = Application.get_env(:conveyor, :retention_spawn_days, 30)
     orphans = Keys.prune_orphans!(Groups.live_scopes(), DateTime.add(now, -default - 2, :day))
-    own + grouped + orphans
+
+    # Same-commit rows of stream keys leave two days after the stream records of their
+    # scope (a group: of its longest-keeping member), PLAN §28.6.
+    alias Conveyor.Rbe.Stream
+    commit_cutoff = fn days -> DateTime.add(now, -(days + 2), :day) end
+
+    commit_rows =
+      projects
+      |> Enum.flat_map(fn project ->
+        days = Stream.days(project)
+
+        case Groups.of(project) do
+          nil -> [{project.id, days}]
+          group -> [{project.id, days}, {Groups.scope(group), days}]
+        end
+      end)
+      |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+      |> Enum.map(fn {scope, days} ->
+        Stream.prune_commit_keys!(scope, commit_cutoff.(Enum.max(days)))
+      end)
+      |> Enum.sum()
+
+    own + grouped + orphans + commit_rows
   end
 
   @doc "Deletes a project's builds that started (or, lacking a start, were inserted) before `cutoff`."

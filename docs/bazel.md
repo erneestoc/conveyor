@@ -45,8 +45,26 @@ actions appear in a build's Actions tab, with or without the flag; the events of
 successful actions are counted and, by default, not stored with the build's raw events
 (its Events tab says how many; the project setting "Keep per-action events in the raw
 event stream" on the Duplicate work page stores them, at 84 to 170 stored bytes per
-action in recorded builds). The duplicate-work metrics do not read these events yet;
-they still come from execution logs (below).
+action in recorded builds). The [Duplicate work](duplicate-work.md) page is computed
+from these events: the flag is its whole setup (Bazel 8.6 or later for action times),
+and a node takes about 38,000 such actions per second.
+
+## Duplicate work: one line
+
+```
+# .bazelrc
+build --build_event_publish_all_actions
+
+# optional, in the CI job: duplicates between builds of one commit become exact
+bazel build --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) //...
+```
+
+Bazel 8.6 and later (9.x) send action times; 8.0 to 8.5 and 7.x send none usable and
+their builds are counted only. The commit is read from the tags `commit`, `commit_sha`,
+`git_commit`, `build_scm_revision` or `stable_git_commit` (build metadata, a workspace
+status command, or an API key's default tags). What is exact, what is a bound and what
+is an estimate: [Duplicate work](duplicate-work.md#setup-one-line). Execution logs
+(next section) are optional and add exactness across commits.
 
 ## Profiles, test logs and artifacts
 
@@ -86,9 +104,11 @@ Any artifact name containing `execution.log`, `exec_log` or `execlog` is parsed.
 only lists spawns that ran or were served from the remote cache; actions skipped by
 Bazel's local action cache do not appear, so a fully incremental build has an empty log.
 
-## Duplicate work: execution logs for whole pipelines
+## Duplicate work, exact mode (optional): execution logs for whole pipelines
 
-The [Duplicate work](duplicate-work.md) report finds duplicate work between builds, so
+With execution logs the [Duplicate work](duplicate-work.md) report is exact across
+commits too (the action digest), reads cores from exec properties and shows which
+inputs changed. It finds duplicate work between builds, so
 it needs the execution log of **every build of a pipeline run** (all shards, all jobs),
 not of a sample of builds. Sample by pipeline: enable it for all jobs of, say, one
 pipeline in ten, or of the main branch.

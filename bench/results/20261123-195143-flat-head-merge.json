@@ -1,0 +1,548 @@
+{
+  "label": "flat-head-merge",
+  "machine": {
+    "os": "aarch64-apple-darwin25.6.0",
+    "otp": "29",
+    "schedulers": 16,
+    "postgres": "17.11 (Homebrew)"
+  },
+  "stream": {
+    "builds": 6804,
+    "actions": 42179,
+    "actions_per_s": 1093.9,
+    "app_cpu_s": 118.81,
+    "app_cpu_us_per_event": 298.0,
+    "pg_cpu_us_per_event": 75.5,
+    "merged_builds": 6804,
+    "merge_wait_ms": 9271,
+    "bytes_per_build": {
+      "action_keys": 2,
+      "event_segments": 10452,
+      "invocations": 15281,
+      "oban_jobs": 1193,
+      "stream_actions": 359
+    },
+    "action_keys": 9
+  },
+  "at": "2026-11-23T19:51:43Z",
+  "verify": {
+    "failed": 0,
+    "checked": 9077,
+    "failures": [],
+    "in_progress_left": 0
+  },
+  "writer": {
+    "count": 13648,
+    "events": 315535,
+    "batches": 18155,
+    "fenced": 0,
+    "duration_ms": {
+      "max": 268.3,
+      "p50": 2.7,
+      "p99": 19.9
+    },
+    "batches_per_flush": 1.3,
+    "events_per_flush": 23.1,
+    "group_failures": 0,
+    "group_failure_reasons": []
+  },
+  "app": {
+    "schedulers_online": 16,
+    "runtime_vcpu": 2.41,
+    "scheduler_vcpu": 5.45,
+    "wall_s": 49.3,
+    "beam_peak": 786107162,
+    "memory_by_kind": [
+      {
+        "bytes": 47709480,
+        "kind": "Conveyor.Ingest.Worker.init/1"
+      },
+      {
+        "bytes": 8283448,
+        "kind": "Conveyor.Ingest.Writer.init/1"
+      },
+      {
+        "bytes": 2921976,
+        "kind": ":code_server"
+      },
+      {
+        "bytes": 2102624,
+        "kind": "Conveyor.Ingest.WorkerSupervisor"
+      },
+      {
+        "bytes": 1934060,
+        "kind": ":erlang.apply/2"
+      },
+      {
+        "bytes": 601920,
+        "kind": ":telemetry_poller_default"
+      },
+      {
+        "bytes": 433888,
+        "kind": ":ranch_acceptor.init/6"
+      },
+      {
+        "bytes": 399600,
+        "kind": "ThousandIsland.Acceptor.run/1"
+      },
+      {
+        "bytes": 397880,
+        "kind": ":ranch_conns_sup.init/7"
+      },
+      {
+        "bytes": 364040,
+        "kind": ":supervisor.\"Elixir.Supervisor.Default\"/1"
+      },
+      {
+        "bytes": 310264,
+        "kind": "Conveyor.Ingest.Registry.PIDPartition0"
+      },
+      {
+        "bytes": 258512,
+        "kind": ":supervisor.\"Elixir.ThousandIsland.AcceptorSupervisor\"/1"
+      }
+    ],
+    "peak_streams": 200,
+    "peak_workers": 6896,
+    "processes_peak_bytes": 128870496,
+    "reductions_by_kind": [
+      {
+        "reductions": 799338225,
+        "kind": "Conveyor.Ingest.Worker.init/1"
+      },
+      {
+        "reductions": 477962425,
+        "kind": "Conveyor.Ingest.Writer.init/1"
+      },
+      {
+        "reductions": 16261527,
+        "kind": "Oban.Queues.Producer.init/1"
+      },
+      {
+        "reductions": 9983030,
+        "kind": ":erts_literal_area_collector.start/0"
+      },
+      {
+        "reductions": 8559300,
+        "kind": ":ranch_acceptor.init/6"
+      },
+      {
+        "reductions": 4741827,
+        "kind": "DBConnection.ConnectionPool.init/1"
+      },
+      {
+        "reductions": 2365979,
+        "kind": ":ranch_conns_sup.init/7"
+      },
+      {
+        "reductions": 1651915,
+        "kind": "Postgrex.SimpleConnection.init/1"
+      },
+      {
+        "reductions": 1244574,
+        "kind": ":erlang.apply/2"
+      },
+      {
+        "reductions": 1136169,
+        "kind": "Conveyor.Ingest.WorkerSupervisor"
+      },
+      {
+        "reductions": 841238,
+        "kind": "Conveyor.Ingest.TagCounter"
+      },
+      {
+        "reductions": 638895,
+        "kind": ":user_drv"
+      },
+      {
+        "reductions": 620226,
+        "kind": ":user"
+      },
+      {
+        "reductions": 589264,
+        "kind": "Conveyor.Limits"
+      },
+      {
+        "reductions": 497022,
+        "kind": ":supervisor.\"Elixir.Task.Supervisor\"/1"
+      }
+    ],
+    "rss_baseline": 370720768,
+    "rss_peak": 1083834368
+  },
+  "postgres": {
+    "tables": {
+      "action_keys": 16384,
+      "actions": 1302528,
+      "event_segments": 71114752,
+      "invocation_metrics": 37535744,
+      "invocations": 103972864,
+      "log_segments": 6725632,
+      "oban_jobs": 8118272,
+      "stream_actions": 2441216,
+      "tag_keys": 24576,
+      "targets": 6987776,
+      "test_results": 17620992
+    },
+    "statements": 305531,
+    "tuples": {
+      "action_keys": {
+        "del": 0,
+        "dead": 44,
+        "ins": 9,
+        "live": 9,
+        "upd": 44,
+        "hot_upd": 44
+      },
+      "actions": {
+        "del": 0,
+        "dead": 0,
+        "ins": 1128,
+        "live": 1128,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "event_segments": {
+        "del": 0,
+        "dead": 0,
+        "ins": 0,
+        "live": 0,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "invocation_metrics": {
+        "del": 0,
+        "dead": 0,
+        "ins": 9077,
+        "live": 9077,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "invocations": {
+        "del": 0,
+        "dead": 99,
+        "ins": 9077,
+        "live": 9077,
+        "upd": 58049,
+        "hot_upd": 30664
+      },
+      "log_segments": {
+        "del": 0,
+        "dead": 0,
+        "ins": 0,
+        "live": 0,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "oban_jobs": {
+        "del": 0,
+        "dead": 23,
+        "ins": 6804,
+        "live": 6804,
+        "upd": 13424,
+        "hot_upd": 0
+      },
+      "stream_actions": {
+        "del": 0,
+        "dead": 0,
+        "ins": 6804,
+        "live": 6804,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "tag_keys": {
+        "del": 0,
+        "dead": 60,
+        "ins": 15,
+        "live": 15,
+        "upd": 435,
+        "hot_upd": 435
+      },
+      "targets": {
+        "del": 0,
+        "dead": 0,
+        "ins": 21575,
+        "live": 21575,
+        "upd": 0,
+        "hot_upd": 0
+      },
+      "test_results": {
+        "del": 0,
+        "dead": 0,
+        "ins": 17022,
+        "live": 17022,
+        "upd": 0,
+        "hot_upd": 0
+      }
+    },
+    "cpu_by_backend": {
+      "autovacuum launcher": 0.0,
+      "autovacuum worker": 0.53,
+      "background writer": 0.01,
+      "checkpointer": 0.23,
+      "client backend": 29.3,
+      "exited": 0.01,
+      "logical replication launcher": 0.0,
+      "walwriter": 0.02
+    },
+    "cpu_s": 30.1,
+    "exec_s": 556.24,
+    "invocations_hot_pct": 52.8,
+    "invocations_upd": 58035,
+    "nested_statements": 64698,
+    "plan_s": 3.54,
+    "rollbacks": 0,
+    "round_trips": 240833,
+    "round_trips_per_flush": 17.6,
+    "round_trips_per_xact": 2.2,
+    "size_delta": 256038052,
+    "top_statements": [
+      {
+        "calls": 18154,
+        "rows": 18154,
+        "query": "WITH ins AS (\n  INSERT INTO \"invocations\" (\"id\", \"project_id\", \"api_key_id\", \"build_id\", \"bes_instance_name\", \"status\", \"exit_code_name\", \"exit_code\", \"abort_re",
+        "ms": 273807.7,
+        "plan_ms": 74.0,
+        "wal": 10297766,
+        "toplevel": true,
+        "dirtied": 3586
+      },
+      {
+        "calls": 15896,
+        "rows": 15896,
+        "query": "SELECT $2 FROM ONLY \"public\".\"projects\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+        "ms": 272357.4,
+        "plan_ms": 2.9,
+        "wal": 1130533,
+        "toplevel": false,
+        "dirtied": 0
+      },
+      {
+        "calls": 6804,
+        "rows": 6804,
+        "query": "SELECT i0.\"id\", i0.\"project_id\", i0.\"api_key_id\", i0.\"build_id\", i0.\"bes_instance_name\", i0.\"status\", i0.\"exit_code_name\", i0.\"exit_code\", i0.\"abort_reason\", i0",
+        "ms": 985.3,
+        "plan_ms": 18.6,
+        "wal": 330893,
+        "toplevel": true,
+        "dirtied": 0
+      },
+      {
+        "calls": 7273,
+        "rows": 9077,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"lifecycle_finished\" = u.\"lifecycle_finished\"\n",
+        "ms": 857.1,
+        "plan_ms": 529.9,
+        "wal": 17826357,
+        "toplevel": true,
+        "dirtied": 533
+      },
+      {
+        "calls": 6804,
+        "rows": 6804,
+        "query": "UPDATE \"invocations\" AS i0 SET \"stream_keys_at\" = $1 WHERE (i0.\"id\" = $2)",
+        "ms": 779.3,
+        "plan_ms": 16.7,
+        "wal": 10450205,
+        "toplevel": true,
+        "dirtied": 375
+      },
+      {
+        "calls": 6804,
+        "rows": 32133,
+        "query": "UPDATE \"invocations\" AS i0 SET \"updated_at\" = $1 WHERE (i0.\"id\" IN (SELECT si0.\"id\" FROM \"invocations\" AS si0 WHERE (si0.\"id\" = ANY($2)) ORDER BY si0.\"id\" FOR U",
+        "ms": 657.5,
+        "plan_ms": 533.4,
+        "wal": 13155009,
+        "toplevel": true,
+        "dirtied": 1113
+      },
+      {
+        "calls": 9077,
+        "rows": 9077,
+        "query": "INSERT INTO \"event_segments\" (\"count\",\"byte_size\",\"day\",\"invocation_id\",\"skipped_total\",\"first_seq\",\"last_seq\",\"payload\") VALUES ($1,$2,$3,$4,$5,$6,$7,$8) ON CO",
+        "ms": 590.6,
+        "plan_ms": 1.6,
+        "wal": 65507388,
+        "toplevel": true,
+        "dirtied": 8682
+      },
+      {
+        "calls": 9077,
+        "rows": 9077,
+        "query": "INSERT INTO \"invocation_metrics\" (\"inserted_at\",\"updated_at\",\"invocation_id\",\"build_metrics\",\"tool_logs\") VALUES ($1,$2,$3,$4,$5) ON CONFLICT (\"invocation_id\") ",
+        "ms": 564.9,
+        "plan_ms": 2.5,
+        "wal": 36299716,
+        "toplevel": true,
+        "dirtied": 4584
+      },
+      {
+        "calls": 3501,
+        "rows": 6804,
+        "query": "WITH \"subset\" AS (SELECT so0.\"id\" AS \"id\" FROM \"public\".\"oban_jobs\" AS so0 WHERE (so0.\"state\" = $7) AND (so0.\"queue\" = $1) ORDER BY so0.\"priority\", so0.\"schedul",
+        "ms": 549.4,
+        "plan_ms": 466.3,
+        "wal": 8646132,
+        "toplevel": true,
+        "dirtied": 261
+      },
+      {
+        "calls": 2276,
+        "rows": 2276,
+        "query": "UPDATE \"invocations\" AS i SET \"last_event_seq\" = u.\"last_seq\", \"last_event_at\" = u.\"now\", \"updated_at\" = u.\"now\", \"action_cache_hits\" = u.\"action_cache_hits\", \"",
+        "ms": 507.2,
+        "plan_ms": 271.7,
+        "wal": 19851716,
+        "toplevel": true,
+        "dirtied": 1829
+      },
+      {
+        "calls": 6804,
+        "rows": 6804,
+        "query": "UPDATE \"public\".\"oban_jobs\" AS o0 SET \"state\" = $1, \"completed_at\" = $2 WHERE (o0.\"id\" = $3) AND (o0.\"state\" = ANY($4)) AND (o0.\"attempted_at\" = $5)",
+        "ms": 483.7,
+        "plan_ms": 10.4,
+        "wal": 7177178,
+        "toplevel": true,
+        "dirtied": 269
+      },
+      {
+        "calls": 6804,
+        "rows": 6804,
+        "query": "INSERT INTO \"public\".\"oban_jobs\" (\"args\",\"meta\",\"state\",\"max_attempts\",\"queue\",\"worker\",\"errors\",\"tags\",\"attempt\") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING",
+        "ms": 401.0,
+        "plan_ms": 2.2,
+        "wal": 6602352,
+        "toplevel": true,
+        "dirtied": 399
+      }
+    ],
+    "vcpu": 0.78,
+    "wal_bytes": 299327277,
+    "wal_fpi": 843,
+    "wal_records": 1139969,
+    "xacts": 107427,
+    "xacts_per_s": 2786.0
+  },
+  "git": "d0f2f4c",
+  "notes": null,
+  "settings": {
+    "streams": 200,
+    "builds": 10000,
+    "delay_ms": 0,
+    "duration_s": null,
+    "pool_size": 40,
+    "ingest": {
+      "auth": "none",
+      "idle_timeout_ms": 600000,
+      "linger_ms": 30000,
+      "batch_max_events": 500,
+      "batch_max_bytes": 262144,
+      "batch_flush_ms": 2000,
+      "writer_shards": 16,
+      "writer_flush_ms": 20,
+      "writer_max_pending": 256,
+      "writer_retry_delays": [
+        50,
+        200,
+        800
+      ],
+      "writer_deadline_ms": 20000,
+      "tag_flush_ms": 1000,
+      "broadcast_interval_ms": 250
+    }
+  },
+  "headline": {
+    "ack_p50_ms": 11.44,
+    "ack_p99_ms": 214.68,
+    "events_per_pg_exec_s": 716.8,
+    "events_per_s": 10340.2,
+    "events_per_s_per_app_vcpu": 4290.5,
+    "events_per_s_per_pg_vcpu": 13246.4,
+    "rss_bytes_per_stream": 3565568.0,
+    "storage_bytes_per_build": 28207.3,
+    "wal_bytes_per_event": 750.7
+  },
+  "loadgen": {
+    "ack_latency_ms": {
+      "count": 398717,
+      "max": 6561.13,
+      "p50": 11.44,
+      "p90": 94.27,
+      "p99": 214.68
+    },
+    "build_duration_ms": {
+      "count": 9077,
+      "max": 7700,
+      "p50": 454,
+      "p90": 1070,
+      "p99": 7330
+    },
+    "builds_failed": 923,
+    "builds_ok": 9077,
+    "builds_per_minute": 14884.0,
+    "builds_total": 10000,
+    "elapsed_ms": 36591,
+    "events": 398717,
+    "events_per_second": 10896.6,
+    "failure_kinds": {
+      "lifecycle grpc 14: this node is overloaded": 923
+    },
+    "failures": [
+      {
+        "file": "test_failure.bep",
+        "reason": "{:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}"
+      },
+      {
+        "file": "analysis_failure.bep",
+        "reason": "{:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}"
+      },
+      {
+        "file": "build_failure.bep",
+        "reason": "{:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}"
+      },
+      {
+        "file": "flaky_test.bep",
+        "reason": "{:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}"
+      },
+      {
+        "file": "analysis_failure.bep",
+        "reason": "{:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}"
+      }
+    ],
+    "missing_acks": 0,
+    "resends": 0,
+    "retried_builds": 0,
+    "started_at_unix_ms": 1795461355966,
+    "streams": 200,
+    "timeline": [
+      {
+        "ack_max_ms": 314.26,
+        "failed": 0,
+        "ok": 3730,
+        "t_s": 0
+      },
+      {
+        "ack_max_ms": 319.14,
+        "failed": 0,
+        "ok": 1802,
+        "t_s": 10
+      },
+      {
+        "ack_max_ms": 6561.13,
+        "failed": 431,
+        "ok": 1206,
+        "t_s": 20
+      },
+      {
+        "ack_max_ms": 309.0,
+        "failed": 492,
+        "ok": 2339,
+        "t_s": 30
+      }
+    ]
+  },
+  "loadgen_exit": 1,
+  "loadgen_output_tail": "\n12:37:48.573 [debug] GRPC.Client.Connection stopping as requested\n\n12:37:48.579 [debug] GRPC.Client.Connection stopping as requested\nbuilds     9077/10000 ok (923 failed), 14884.0 builds/min over 200 streams\nevents     398717 sent, 0 missing acks, 10896.6 events/s, 36591 ms wall, 0 builds retried\nack ms     p50 11.44  p90 94.27  p99 214.68  max 6561.13  (client-observed, n=398717)\nbuild ms   p50 454  p90 1070  p99 7330  max 7700\n  923 × lifecycle grpc 14: this node is overloaded\n  FAILED test_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED analysis_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED flaky_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED analysis_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED flaky_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_only_verbose.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED analysis_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED clean_build_and_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_only_verbose.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED test_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED test_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED flaky_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED analysis_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED remote_cache_upload.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED clean_build_and_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED build_failure.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\\n  FAILED cached_build_and_test.bep: {:lifecycle, %GRPC.RPCError{status: 14, message: \"this node is overloaded (commits are behind); retry\", details: nil}}\n\n"
+}

@@ -9,7 +9,7 @@ defmodule Mix.Tasks.Conveyor.Bench do
       mix conveyor.bench --label baseline --profile paced      # 1000 paced streams
       mix conveyor.bench --label x --repeat 3                  # median of three runs
 
-  Options: `--label`, `--profile flatout|paced`, `--streams`, `--builds`, `--delay-ms`,
+  Options: `--label`, `--profile flatout|paced|stream|stream-off|stream-paced|stream-paced-off`, `--streams`, `--builds`, `--delay-ms`,
   `--jitter-ms`, `--duration-s`, `--fixtures`, `--repeat`, `--no-reset`, `--no-verify`,
   `--pg-container NAME`, `--notes TEXT`.
   """

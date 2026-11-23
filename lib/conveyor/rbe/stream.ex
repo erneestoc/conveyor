@@ -35,6 +35,8 @@ defmodule Conveyor.Rbe.Stream do
   @timeout :timer.minutes(5)
   @chunk 5_000
   @top 50
+  @any_commit "0000000000000000"
+  @at_commit "0000000000000001"
   @finished ["succeeded", "failed", "aborted"]
   # How far a build's actions may lie outside `[started_at, finished_at]` (clock
   # readings of one machine, rounded differently).
@@ -85,12 +87,16 @@ defmodule Conveyor.Rbe.Stream do
   """
   @spec merge_pending!(DateTime.t()) :: non_neg_integer()
   def merge_pending!(since) do
-    from(i in Invocation,
-      where: i.stream_actions > 0 and i.started_at >= ^since and i.status in @finished,
-      where: is_nil(i.stream_keys_at) or i.last_event_at > i.stream_keys_at,
-      order_by: [i.started_at, i.id]
-    )
-    |> Repo.all(timeout: @timeout)
+    # Two statements, each the predicate of a partial index that holds only waiting
+    # builds (`invocations_stream_keys_pending`, `invocations_stream_keys_stale`).
+    waiting = from(i in Invocation, where: i.stream_actions > 0 and i.started_at >= ^since)
+
+    [
+      where(waiting, [i], is_nil(i.stream_keys_at)),
+      where(waiting, [i], i.last_event_at > i.stream_keys_at)
+    ]
+    |> Enum.flat_map(&Repo.all(where(&1, [i], i.status in @finished), timeout: @timeout))
+    |> Enum.sort_by(&{DateTime.to_unix(&1.started_at, :microsecond), &1.id})
     |> Enum.map(&merge_keys!/1)
     |> length()
   end
@@ -196,13 +202,13 @@ defmodule Conveyor.Rbe.Stream do
 
     by_commit =
       if commit,
-        do: Enum.group_by(executions, &commit_key(elem(&1, 0), commit)),
+        do: Enum.group_by(executions, &{commit_key(elem(&1, 0), commit), @at_commit}),
         else: %{}
 
     executions
-    |> Enum.group_by(&elem(&1, 0))
+    |> Enum.group_by(&{elem(&1, 0), @any_commit})
     |> Map.merge(by_commit)
-    |> Enum.map(fn {key, execs} ->
+    |> Enum.map(fn {{key, out}, execs} ->
       {_, start, duration, _, _, _, seq} = Enum.min_by(execs, &rank/1)
 
       %{
@@ -211,8 +217,10 @@ defmodule Conveyor.Rbe.Stream do
         start: datetime(start),
         ordinal: seq,
         last_finish: execs |> Enum.map(&(elem(&1, 1) + elem(&1, 2))) |> Enum.max() |> datetime(),
-        # The stream says nothing about outputs: one constant, never "non-deterministic".
-        out: "0000000000000000",
+        # The stream says nothing about outputs, so the column marks the key space
+        # instead (one constant per row, never "non-deterministic"): same-commit rows
+        # are deleted days after their builds, any-commit rows live as long as keys do.
+        out: out,
         nondet: false
       }
     end)
@@ -566,6 +574,29 @@ defmodule Conveyor.Rbe.Stream do
 
     {n, _} =
       Repo.delete_all(from(c in StreamChunk, where: c.invocation_id in subquery(builds)),
+        timeout: @timeout
+      )
+
+    n
+  end
+
+  @doc """
+  Deletes a scope's same-commit rows whose last execution finished before `cutoff`.
+  Builds of one commit run within hours or days of each other, and an hour's stream
+  figures are final when its records expire (`days/1`), so these rows are needed for
+  days, not for the weeks an any-commit row lives: per execution they are most of the
+  key table (PLAN §28.6). A build of that commit that arrives later starts over in the
+  same-commit figure (a lower floor, never a wrong duplicate). A stream key is the only
+  key of 8 bytes; `out = 1` marks the same-commit space (`entries/2`).
+  """
+  @spec prune_commit_keys!(integer(), DateTime.t()) :: non_neg_integer()
+  def prune_commit_keys!(scope, cutoff) do
+    {n, _} =
+      Repo.delete_all(
+        from(k in ActionKey,
+          where: k.scope == ^scope and k.out == 1 and k.last_finish < ^cutoff,
+          where: fragment("octet_length(?) = 8", k.key)
+        ),
         timeout: @timeout
       )
 

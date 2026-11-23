@@ -94,6 +94,20 @@ but whose row has not changed for two idle windows (`INGEST_IDLE_TIMEOUT_MS`, 10
 by default): a node died under them and Bazel gave up. A client that comes back later
 resumes the build as after an idle timeout.
 
+### Duplicate work from the event stream
+
+Builds run with `--build_event_publish_all_actions` leave a compact record per action
+in `stream_actions` (one row per build after its merge), kept for the project's "days
+per-spawn rows are kept" (default 3) and deleted by the retention job; `action_keys` and
+the hourly rows stay as for execution logs. When such a build ends, a `StreamKeys` job
+on the `parse` queue merges its keys (unique per build; a few milliseconds to a few
+tens of milliseconds); `STREAM_KEYS_ON_FINALIZE=false` turns that off and leaves the
+merge to the rollup job, which runs every 5 minutes and is the backstop in either case
+(a build shows as "pending classification" on the page until one of them has run).
+`StreamKeys` jobs that pile up in `available` mean the `parse` queue is busy with
+execution logs; nothing is lost, the rollup job merges what is waiting. A build merged
+after its hour's figures were final is counted on the page as arrived late.
+
 ### Splitting a project
 
 Builds land in the project of the API key that sent them. To split an existing project

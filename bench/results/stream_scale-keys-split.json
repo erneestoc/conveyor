@@ -1,0 +1,82 @@
+{
+  "label": "keys-split",
+  "pending": 0,
+  "events": 387876,
+  "projects": 60,
+  "builds": 300,
+  "executions": 72805,
+  "samples": 25,
+  "merge_ms": {
+    "max": 40.188,
+    "n": 300,
+    "p50": 11.048,
+    "p99": 38.349
+  },
+  "actions": 150921,
+  "sizes": {
+    "action_keys": {
+      "bytes": 27099136,
+      "rows": 123425
+    },
+    "invocations": {
+      "bytes": 3227648,
+      "rows": 300
+    },
+    "stream_actions": {
+      "bytes": 4415488,
+      "rows": 300
+    }
+  },
+  "mismatches": [],
+  "any_commit": {
+    "cross": [
+      34666,
+      23477844
+    ],
+    "first": [
+      821,
+      574288
+    ],
+    "nocommit": [
+      0,
+      0
+    ],
+    "racing+sequential": [
+      71984,
+      44110246
+    ]
+  },
+  "same_commit": {
+    "cross": [
+      39105,
+      22760067
+    ],
+    "first": [
+      24008,
+      16612644
+    ],
+    "nocommit": [
+      8055,
+      4523127
+    ],
+    "racing+sequential": [
+      40742,
+      23548763
+    ]
+  },
+  "failed_streams": 0,
+  "builds_with_events": 300,
+  "ingest_s": 5.125,
+  "all_merged_s": 5.127,
+  "actions_per_s": 29448.0,
+  "deadlocks": 0,
+  "lock_wait_samples": 1,
+  "longest_lock_wait_s": 0.0,
+  "wal_bytes": 84245461,
+  "action_keys_same_commit_rows": 87117,
+  "action_keys_group_scope_rows": 24829,
+  "report_cold_ms": 409,
+  "report_warm_ms": 351,
+  "reported_builds": 300,
+  "estimate": null
+}
