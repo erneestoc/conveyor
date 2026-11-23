@@ -1,7 +1,8 @@
 defmodule Conveyor.Rbe do
   @moduledoc """
-  The RBE opportunity analysis (PLAN §27, docs/rbe-opportunity.md): would a shared cache
-  or remote build execution save work, and how much.
+  The duplicate-work analysis (PLAN §27, docs/duplicate-work.md): how much of what a
+  fleet executed repeated an action that another execution had finished or was running.
+  The feature was named "RBE opportunity"; the modules keep `Rbe` in their names.
 
   Two reports, both kept per project and hour by `Conveyor.Metrics.Rollup`:
 

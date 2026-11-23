@@ -80,9 +80,9 @@ Any artifact name containing `execution.log`, `exec_log` or `execlog` is parsed.
 only lists spawns that ran or were served from the remote cache; actions skipped by
 Bazel's local action cache do not appear, so a fully incremental build has an empty log.
 
-## RBE opportunity: execution logs for whole pipelines
+## Duplicate work: execution logs for whole pipelines
 
-The [RBE opportunity](rbe-opportunity.md) report finds duplicate work between builds, so
+The [Duplicate work](duplicate-work.md) report finds duplicate work between builds, so
 it needs the execution log of **every build of a pipeline run** (all shards, all jobs),
 not of a sample of builds. Sample by pipeline: enable it for all jobs of, say, one
 pipeline in ten, or of the main branch.
@@ -110,7 +110,7 @@ tools/bes-upload-profile --server https://conveyor.example.com --key conveyor_..
 Set `--invocation_id=$(uuidgen)` yourself (lowercase) so the job knows the id, or read it
 from the results URL Bazel prints.
 
-Without the tool, with curl (the RBE opportunity page shows this recipe with your
+Without the tool, with curl (the Duplicate work page shows this recipe with your
 server's address, and says whether the project has a key that may upload):
 
 ```sh
@@ -161,8 +161,8 @@ platform(
 # build --extra_execution_platforms=//platforms:rbe_linux
 ```
 
-Then tell Conveyor the name and its unit in the project's RBE settings
-([Declaring cores per action](rbe-opportunity.md#declaring-cores-per-action)): names in
+Then tell Conveyor the name and its unit in the settings panel of the project's Duplicate work page
+([Declaring cores per action](duplicate-work.md#declaring-cores-per-action)): names in
 order, first present wins, any case; unit `cores`, `millicores` or `auto`. If you do not
 know which name your builds send, upload one log and read the list of property names on
 the settings panel. A changed setting applies to logs parsed afterwards; the "Re-read

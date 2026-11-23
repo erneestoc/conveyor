@@ -1,6 +1,6 @@
 defmodule Conveyor.Rbe.Settings do
   @moduledoc """
-  A project's settings for the RBE opportunity report (`projects.settings["rbe"]`):
+  A project's settings for the duplicate-work report (`projects.settings["rbe"]`):
 
     * `cores`: `mnemonic → cores`, the owner's statement of what an action occupies
       (`{"TestRunner": 4}`); applied when a report is read, over whatever the parse

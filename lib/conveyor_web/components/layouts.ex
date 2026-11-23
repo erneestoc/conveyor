@@ -67,7 +67,12 @@ defmodule ConveyorWeb.Layouts do
               navigate={builds_path(@project)}
               active={
                 (String.starts_with?(@current_path, "/p/") and
-                   not String.ends_with?(@current_path, ["/dashboard", "/tests", "/settings", "/rbe"])) or
+                   not String.ends_with?(@current_path, [
+                     "/dashboard",
+                     "/tests",
+                     "/settings",
+                     "/duplicate-work"
+                   ])) or
                   @current_path == "/builds" or String.starts_with?(@current_path, "/invocation/")
               }
             >
@@ -83,9 +88,9 @@ defmodule ConveyorWeb.Layouts do
             >Tests</.nav_link>
             <.nav_link
               :if={@project}
-              navigate={sub_path(@project, "rbe")}
-              active={String.ends_with?(@current_path, "/rbe")}
-            >RBE opportunity</.nav_link>
+              navigate={sub_path(@project, "duplicate-work")}
+              active={String.ends_with?(@current_path, "/duplicate-work")}
+            >Duplicate work</.nav_link>
             <.nav_link
               :if={@project && project_admin?(@current_scope, @project)}
               navigate={sub_path(@project, "settings")}

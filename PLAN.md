@@ -2061,13 +2061,24 @@ HEAD per pin (one per archived blob); unchanged here. (9) An S3 lifecycle rule o
 days) is safe only when `R` and the longest partition hold stay far below it, and was
 not added. (10) The trial demo's archived builds need an image with the codec fix.
 
-## 27. RBE opportunity (2026-11-21)
+## 27. Duplicate work (2026-11-21; named "RBE opportunity" until 2026-11-23)
+
+**Renamed 2026-11-23.** The owner: the feature offers metrics, not advice. It is
+"Duplicate work" everywhere a user reads it (navigation, page, docs, routes
+`/p/:slug/duplicate-work`, `/groups/:name/duplicate-work`, `…/duplicate-work/json`,
+`GET /api/v1/duplicate-work`; the `/rbe` paths redirect or answer as aliases). The two
+headline tiles are "Sequential duplicates" (was "Cache opportunity") and "Racing
+duplicates", each with a statement of what the number is and a help line that states
+which mechanism addresses the class. Internal names did not change (`Conveyor.Rbe.*`,
+`ConveyorWeb.Rbe*`, `invocation_rollups.rbe`, `settings["rbe"]`, the audit actions, the
+JSON keys). The subsections below are the record of the design as it was written and
+keep the old name where they use it.
 
 The owner's question: would a shared cache, or remote build execution, save work, in
 core-seconds and by kind of action. Two fleets: iOS shards that race to build identical
 actions against one central cache, and a Go monorepo of about 360 apps, a Conveyor
 project each, on autoscaled machines with a cache per machine. Reader documentation is
-`docs/rbe-opportunity.md`; this section is the design and its measurements.
+`docs/duplicate-work.md`; this section is the design and its measurements.
 
 ### 27.1 What the data sources provide (checked, not assumed)
 

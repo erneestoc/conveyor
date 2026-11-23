@@ -21,7 +21,7 @@ defmodule Mix.Tasks.Conveyor.Seed do
 
       mix conveyor.seed --invocations 5000 [--days 30] [--project default]
 
-  `--rbe-demo` fills the RBE opportunity pages (`Conveyor.Seed.RbeDemo`): projects
+  `--rbe-demo` fills the Duplicate work pages (`Conveyor.Seed.RbeDemo`): projects
   `rbe-demo-*` with execution logs that race, repeat, hit the cache, state cores or not,
   miss by one input and are not deterministic, and the cache group `rbe-demo-monorepo`.
   It uploads through the HTTP API of a **running** server (`--url`, default
@@ -75,7 +75,9 @@ defmodule Mix.Tasks.Conveyor.Seed do
       for {slug, n} <- Enum.sort(counts),
           do: Mix.shell().info("#{slug}: #{n} builds")
 
-      Mix.shell().info("open /p/rbe-demo-ios/rbe and /groups/rbe-demo-monorepo/rbe")
+      Mix.shell().info(
+        "open /p/rbe-demo-ios/duplicate-work and /groups/rbe-demo-monorepo/duplicate-work"
+      )
     else
       seed_builds(opts)
     end

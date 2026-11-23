@@ -1,6 +1,6 @@
 defmodule ConveyorWeb.RbeCoresLiveTest do
   @moduledoc """
-  The cores declaration on the RBE page (PLAN §27.7): the form, the property names seen
+  The cores declaration on the Duplicate work page (PLAN §27.7): the form, the property names seen
   in logs, reading stored logs again, the coverage line, and who may read any of it.
   """
   use ConveyorWeb.ConnCase, async: false
@@ -87,7 +87,7 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
   test "the declaration: saved, validated, audited, and said to apply to logs parsed afterwards",
        %{conn: conn, project: p, t0: t0} do
     build_with_log!(p, t0, %{"runner-cores" => "3000", "OSFamily" => "macos"})
-    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
 
     for id <-
           ~w(rbe-cores-property rbe-cores-property-note rbe-properties rbe-property-0 rbe-reread rbe-reread-button rbe-cores-coverage rbe-cores-names rbe-cores-coverage-count) do
@@ -157,7 +157,7 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
     {:ok, _} =
       Settings.put(p, %{"cores_properties" => "runner-cores", "cores_unit" => "millicores"})
 
-    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
     button = element(view, "#rbe-reread-button")
     assert render(button) =~ "Re-read cores from stored logs (2 builds)"
     assert render(button) =~ "data-confirm"
@@ -182,13 +182,13 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
            ] = Conveyor.Audit.recent(1)
 
     assert %{success: 2} = Oban.drain_queue(queue: :parse)
-    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
     assert view |> element("#rbe-cores-coverage") |> render() =~ "100.0% of executed wall time"
     assert view |> element("#rbe-cores-coverage") |> render() =~ "24 of 24 executions"
   end
 
   test "no stored logs: the button is disabled and no names are listed", %{conn: conn, project: p} do
-    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
     assert has_element?(view, "#rbe-properties-empty")
     assert has_element?(view, "#rbe-reread-button[disabled]")
     assert view |> element("#rbe-reread-button") |> render() =~ "(0 builds)"
@@ -214,36 +214,39 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
       assert [_ | _] = Properties.list(alpha.id)
       conn = sign_in(%{"sub" => "b", "email" => "b@example.com", "groups" => ["beta"]})
 
-      assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/p/alpha/rbe") end
-      assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/p/alpha/rbe/json") end
+      assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/p/alpha/duplicate-work") end
+
+      assert_raise ConveyorWeb.NotFoundError, fn ->
+        get(conn, ~p"/p/alpha/duplicate-work/json")
+      end
 
       # the group both projects share, and the viewer's own project: no name of alpha's
-      {:ok, view, _} = live(conn, ~p"/groups/mono/rbe")
+      {:ok, view, _} = live(conn, ~p"/groups/mono/duplicate-work")
       refute render(view) =~ "alpha-only-pool"
       refute has_element?(view, "#rbe-properties")
       refute has_element?(view, "#rbe-cores-names")
       assert has_element?(view, "#rbe-cores-coverage")
 
-      for path <- [~p"/groups/mono/rbe/json", ~p"/p/beta/rbe/json"] do
+      for path <- [~p"/groups/mono/duplicate-work/json", ~p"/p/beta/duplicate-work/json"] do
         body = conn |> get(path) |> json_response(200)
         refute inspect(body) =~ "alpha-only-pool"
         assert %{"exact" => _, "executed" => _} = body["report"]["cores_coverage"]
       end
 
-      {:ok, view, _} = live(conn, ~p"/p/beta/rbe")
+      {:ok, view, _} = live(conn, ~p"/p/beta/duplicate-work")
       refute render(view) =~ "alpha-only-pool"
     end
 
     test "a project's viewer sees the coverage, not the names seen nor the controls; its admin sees all",
          %{alpha: alpha} do
       conn = sign_in(%{"sub" => "a", "email" => "a@example.com", "groups" => ["alpha"]})
-      {:ok, view, _} = live(conn, ~p"/p/alpha/rbe")
+      {:ok, view, _} = live(conn, ~p"/p/alpha/duplicate-work")
       assert has_element?(view, "#rbe-cores-coverage")
       refute has_element?(view, "#rbe-settings")
       refute has_element?(view, "#rbe-properties")
       refute has_element?(view, "#rbe-reread-button")
       refute render(view) =~ "alpha-only-pool"
-      refute conn |> get(~p"/p/alpha/rbe/json") |> response(200) =~ "alpha-only-pool"
+      refute conn |> get(~p"/p/alpha/duplicate-work/json") |> response(200) =~ "alpha-only-pool"
 
       # the events are refused too, not only hidden
       render_click(view, "reread", %{})
@@ -254,7 +257,7 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
       lead =
         sign_in(%{"sub" => "l", "email" => "l@example.com", "groups" => ["alpha", "alpha-leads"]})
 
-      {:ok, view, _} = live(lead, ~p"/p/alpha/rbe")
+      {:ok, view, _} = live(lead, ~p"/p/alpha/duplicate-work")
       assert view |> element("#rbe-properties") |> render() =~ "alpha-only-pool"
       refute render(view) =~ "beta-pool"
       assert view |> element("#rbe-reread-button") |> render() =~ "(1 builds)"

@@ -1,6 +1,6 @@
 defmodule Conveyor.Rbe.Report do
   @moduledoc """
-  The RBE opportunity report of a window, read from the hourly rollups
+  The duplicate-work report of a window, read from the hourly rollups
   (`Conveyor.Metrics.Rollup.rows/1`: stored hours plus the two partial edges).
 
   Times are milliseconds of wall time (`ms`) and of core time (`core_ms` = wall × cores).

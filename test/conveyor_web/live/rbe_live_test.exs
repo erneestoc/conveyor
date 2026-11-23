@@ -72,7 +72,7 @@ defmodule ConveyorWeb.RbeLiveTest do
       }
     })
 
-    {:ok, view, _html} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _html} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
 
     for id <-
           ~w(rbe-coverage rbe-enable panel-rbe-fleet rbe-fleet-share rbe-fleet-runners rbe-fleet-hosts rbe-fleet-mnemonics rbe-settings rbe-settings-form) do
@@ -97,7 +97,7 @@ defmodule ConveyorWeb.RbeLiveTest do
 
     store!(build!(p, DateTime.add(t0, 60, :second), %{host: "ci-2"}))
 
-    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/rbe")
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
 
     for id <-
           ~w(rbe-headline tile-cache-gap tile-racing tile-cold tile-hit-rate tile-not-remotable tile-parallelism panel-cache-gap gap-same gap-cold gap-total rbe-ci-snippet rbe-ci-snippet-copy rbe-reread-button panel-rbe-mnemonics mnemonic-TestRunner panel-rbe-targets rbe-target-0 panel-rbe-pipelines panel-rbe-near rbe-near-0 rbe-fallback-keys panel-rbe-fleet) do
@@ -110,7 +110,27 @@ defmodule ConveyorWeb.RbeLiveTest do
     # the two answers of the page lead it, per day, with the window's total under them
     assert view |> element("#tile-cache-gap-value") |> render() =~ ~r/>\s*1\s*</
     assert view |> element("#tile-cache-gap") |> render() =~ "core-s / day"
-    assert view |> element("#tile-racing") |> render() =~ "Only RBE recovers this"
+    # metrics, not advice: each tile says what its number is, and a help line which
+    # mechanism addresses the class
+    cache_tile = view |> element("#tile-cache-gap") |> render()
+    assert cache_tile =~ "Sequential duplicates"
+    assert cache_tile =~ "Executed although the same action had already finished elsewhere."
+    racing_tile = view |> element("#tile-racing") |> render()
+    assert racing_tile =~ "Racing duplicates"
+    assert racing_tile =~ "Executed while the same action was still running elsewhere."
+    assert has_element?(view, "#tile-cache-gap-help")
+    assert has_element?(view, "#tile-racing-help")
+    assert has_element?(view, "h1", "Duplicate work")
+    assert page_title(view) =~ "Duplicate work"
+
+    assert has_element?(
+             view,
+             ~s|#main-nav a[href="/p/#{p.slug}/duplicate-work"]|,
+             "Duplicate work"
+           )
+
+    refute render(view) =~ "opportunity"
+    refute render(view) =~ "recovers"
 
     # the CI recipe names the address the page was reached at and never a real key
     snippet = view |> element("#rbe-ci-snippet-text") |> render()
@@ -129,7 +149,7 @@ defmodule ConveyorWeb.RbeLiveTest do
 
     {:ok, _, _} = Projects.create_api_key(p, %{name: "ci", scopes: ["upload"]})
     view |> element("#rbe-range-24h") |> render_click()
-    assert_patch(view, ~p"/p/#{p.slug}/rbe?range=24h")
+    assert_patch(view, ~p"/p/#{p.slug}/duplicate-work?range=24h")
     assert has_element?(view, "#rbe-range-24h[aria-pressed=true]")
     assert has_element?(view, "#rbe-ci-snippet-has-key")
     refute has_element?(view, "#rbe-ci-snippet-no-key")
@@ -163,7 +183,7 @@ defmodule ConveyorWeb.RbeLiveTest do
     store!(build!(p, t0))
     store!(build!(other, DateTime.add(t0, 60, :second)))
 
-    {:ok, view, _} = live(conn, ~p"/groups/mono/rbe")
+    {:ok, view, _} = live(conn, ~p"/groups/mono/duplicate-work")
     assert has_element?(view, "#panel-rbe-projects")
     assert has_element?(view, "#rbe-project-#{other.id}")
     assert has_element?(view, "#rbe-from-#{other.id}")
@@ -197,18 +217,22 @@ defmodule ConveyorWeb.RbeLiveTest do
     render_click(view, "projects_page", %{"page" => "x"})
     assert has_element?(view, "#rbe-project-#{other.id}")
 
-    assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/groups/nope/rbe") end
-    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/groups/nope/rbe/json") end
-    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/p/nope/rbe/json") end
+    assert_raise ConveyorWeb.NotFoundError, fn -> live(conn, ~p"/groups/nope/duplicate-work") end
+
+    assert_raise ConveyorWeb.NotFoundError, fn ->
+      get(conn, ~p"/groups/nope/duplicate-work/json")
+    end
+
+    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/p/nope/duplicate-work/json") end
 
     assert %{
              "range" => "7d",
              "report" => %{"cache" => %{"cross_project" => %{"n" => 12}}, "members" => 2}
            } =
-             conn |> get(~p"/groups/mono/rbe/json") |> json_response(200)
+             conn |> get(~p"/groups/mono/duplicate-work/json") |> json_response(200)
 
     assert %{"range" => "24h", "report" => %{"cache" => %{"gap" => %{"ms" => 6000}}}} =
-             conn |> get(~p"/p/#{other.slug}/rbe/json?range=24h") |> json_response(200)
+             conn |> get(~p"/p/#{other.slug}/duplicate-work/json?range=24h") |> json_response(200)
 
     # an API key reads its own project; the other project of the group has no name there
     {:ok, _, key} = Projects.create_api_key(other, %{name: "reader", scopes: ["read"]})
@@ -216,13 +240,61 @@ defmodule ConveyorWeb.RbeLiveTest do
     body =
       build_conn()
       |> put_req_header("x-api-key", key)
-      |> get(~p"/api/v1/rbe")
+      |> get(~p"/api/v1/duplicate-work")
       |> json_response(200)
 
     assert [%{"name" => "Other app", "from" => [%{"name" => "other projects", "id" => nil}]}] =
              body["report"]["projects"]["rows"]
 
     refute inspect(body) =~ "Default"
+    assert build_conn() |> get(~p"/api/v1/duplicate-work") |> json_response(401)
+
+    # The addresses from before the rename: the JSON paths and the API path answer the
+    # same body as the new ones.
+    for {old, new} <- [
+          {~p"/groups/mono/rbe/json", ~p"/groups/mono/duplicate-work/json"},
+          {~p"/groups/mono/rbe/json?range=24h", ~p"/groups/mono/duplicate-work/json?range=24h"},
+          {~p"/p/#{other.slug}/rbe/json?range=24h",
+           ~p"/p/#{other.slug}/duplicate-work/json?range=24h"}
+        ] do
+      assert conn |> get(old) |> json_response(200) == conn |> get(new) |> json_response(200)
+    end
+
+    with_key = fn path ->
+      build_conn() |> put_req_header("x-api-key", key) |> get(path) |> json_response(200)
+    end
+
+    assert with_key.(~p"/api/v1/rbe?range=24h") == with_key.(~p"/api/v1/duplicate-work?range=24h")
+    assert with_key.(~p"/api/v1/rbe")["range"] == "7d"
     assert build_conn() |> get(~p"/api/v1/rbe") |> json_response(401)
+    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/groups/nope/rbe/json") end
+    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/p/nope/rbe/json") end
+  end
+
+  test "the page addresses from before the rename redirect, keeping the query string", ctx do
+    %{conn: conn, project: p} = ctx
+    {:ok, p} = Groups.put(p, "mono")
+
+    assert conn |> get(~p"/p/#{p.slug}/rbe") |> redirected_to(301) ==
+             ~p"/p/#{p.slug}/duplicate-work"
+
+    assert conn |> get(~p"/p/#{p.slug}/rbe?range=24h") |> redirected_to(301) ==
+             ~p"/p/#{p.slug}/duplicate-work?range=24h"
+
+    assert conn |> get(~p"/groups/mono/rbe") |> redirected_to(301) ==
+             ~p"/groups/mono/duplicate-work"
+
+    assert conn |> get(~p"/groups/mono/rbe?range=30d") |> redirected_to(301) ==
+             ~p"/groups/mono/duplicate-work?range=30d"
+
+    # the redirect lands on the page, in the window asked for
+    to = conn |> get(~p"/p/#{p.slug}/rbe?range=24h") |> redirected_to(301)
+    {:ok, view, _} = live(conn, to)
+    assert has_element?(view, "#rbe-range-24h[aria-pressed=true]")
+    {:ok, view, _} = live(conn, conn |> get(~p"/groups/mono/rbe") |> redirected_to(301))
+    assert has_element?(view, "#rbe-subtitle", "cache group mono")
+
+    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/p/nope/rbe") end
+    assert_raise ConveyorWeb.NotFoundError, fn -> get(conn, ~p"/groups/nope/rbe") end
   end
 end

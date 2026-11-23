@@ -304,7 +304,7 @@ changed within two idle windows (`BuildRetention.delete_before/3`, `Retention_fi
 
 ## Action keys under any arrival order (`ActionKeys.tla`)
 
-The RBE opportunity analysis (PLAN §27) keeps, per action key, the execution that finished
+The duplicate-work analysis (PLAN §27) keeps, per action key, the execution that finished
 first, and classes every other execution as racing or sequential against it. Logs are
 parsed after builds finish, in any order, by several parsers. The model has three
 executions with every start and finish in 1..4 and two parsers. `ActionKeys_fixed.cfg`

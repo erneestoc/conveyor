@@ -1,6 +1,6 @@
 defmodule Conveyor.Rbe.Hour do
   @moduledoc """
-  The execution-log half of the RBE opportunity report for one interval of builds: what
+  The execution-log half of the duplicate-work report for one interval of builds: what
   `Conveyor.Metrics.Rollup` stores per project and hour in `invocation_rollups.rbe`.
 
   Every spawn of the interval's builds gets its class here, from its own row and the row

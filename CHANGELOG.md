@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **"RBE opportunity" is now "Duplicate work".** The feature reports metrics and their
+  definitions, not advice. Renamed in the navigation, the page, the docs
+  (`docs/duplicate-work.md`) and the routes: `/p/<slug>/duplicate-work`,
+  `/groups/<name>/duplicate-work`, `…/duplicate-work/json` and
+  `GET /api/v1/duplicate-work`. **The old addresses keep working:** `/p/<slug>/rbe` and
+  `/groups/<name>/rbe` redirect (301) to the new pages with their query string;
+  `/p/<slug>/rbe/json`, `/groups/<name>/rbe/json` and `GET /api/v1/rbe` answer the same
+  body as the new paths. The headline tile "Cache opportunity" is "Sequential
+  duplicates" ("Executed although the same action had already finished elsewhere."),
+  "Racing duplicates" keeps its name ("Executed while the same action was still running
+  elsewhere."); each has a help line stating which mechanism addresses the class. The
+  panel "Cache opportunity" is "Sequential duplicates"; the docs' "Wasted time" is
+  "Duplicate time". Not changed: every JSON key (including `cache.gap` and
+  `cache.rbe_rate`), the settings stored under `settings["rbe"]`, the audit actions
+  `project.rbe_settings` and `project.rbe_reread`, the seed flag `--rbe-demo`. Entries
+  below this one were written before the rename and use the old name and paths.
 - **Fix: wrong RBE classes on a PostgreSQL whose `TimeZone` is not UTC.** The first
   execution of every action key was stored shifted by the server's UTC offset, so with
   a zone west of UTC no execution was ever classed as racing (all became sequential).

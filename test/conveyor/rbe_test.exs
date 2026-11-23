@@ -1,6 +1,6 @@
 defmodule Conveyor.RbeTest do
   @moduledoc """
-  The RBE opportunity analysis end to end: logs built from the recorded fixture with
+  The duplicate-work analysis end to end: logs built from the recorded fixture with
   chosen times (`Conveyor.ExecLogBuilder`: 12 spawns, one a second, 500 ms each), stored
   through `ExecLog.store!/2`, read back through the rollup and the report. Golden numbers
   are exact.
@@ -70,7 +70,7 @@ defmodule Conveyor.RbeTest do
   defp keys(scope), do: Repo.all(from k in ActionKey, where: k.scope == ^scope, order_by: k.key)
 
   describe "classification" do
-    test "two shards racing: the later starter's executions are what only RBE saves", %{
+    test "two shards racing: the later starter's executions are the racing duplicates", %{
       project: p
     } do
       a = build!(p, 0)
@@ -171,7 +171,7 @@ defmodule Conveyor.RbeTest do
       assert r.not_dedupable.uncacheable.n == 4
       assert r.not_dedupable.unkeyed.n == 2
       assert r.not_dedupable.nonremote == %{n: 2, ms: 1000, core_ms: 1000}
-      # 8 keyed actions raced; the one that may not run remotely is not RBE's to save
+      # 8 keyed actions raced; the one that may not run remotely is counted apart
       assert r.racing.total.n == 8 and r.racing.local.n == 1 and r.racing.remotable.n == 7
       assert length(keys(p.id)) == 8
       assert Repo.aggregate(from(s in Spawn, where: is_nil(s.action_key)), :count) == 8

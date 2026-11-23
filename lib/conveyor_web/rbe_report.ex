@@ -1,6 +1,6 @@
 defmodule ConveyorWeb.RbeReport do
   @moduledoc """
-  Loads the RBE opportunity report for a viewer: a project's, or a cache group's (the sum
+  Loads the duplicate-work report for a viewer: a project's, or a cache group's (the sum
   over its projects). The page and the JSON endpoints share it, so both apply the same
   visibility: a group is visible to whoever may see one of its projects, and the names
   and targets of the others never leave `Conveyor.Rbe.Report`.

@@ -1,4 +1,4 @@
-// Full-page screenshots of the RBE opportunity pages for a layout review.
+// Full-page screenshots of the Duplicate work pages for a layout review.
 //   cd e2e && OUT=/some/dir [TAG=after] [BASE=http://localhost:4100] [ADMIN_TOKEN=…] node rbe-shots.mjs
 // Needs the demo data (`mix conveyor.seed --rbe-demo`). With ADMIN_TOKEN (the server's)
 // the pages are also captured signed in as admin; without a session the viewer is not one.
@@ -11,10 +11,10 @@ const token = process.env.ADMIN_TOKEN;
 const only = process.env.ONLY;
 
 const pages = [
-  ["project-ios", "/p/rbe-demo-ios/rbe?range=7d"],
-  ["project-go-worker", "/p/rbe-demo-go-worker/rbe?range=7d"],
-  ["project-empty", "/p/rbe-demo-empty/rbe?range=7d"],
-  ["group", "/groups/rbe-demo-monorepo/rbe?range=7d"],
+  ["project-ios", "/p/rbe-demo-ios/duplicate-work?range=7d"],
+  ["project-go-worker", "/p/rbe-demo-go-worker/duplicate-work?range=7d"],
+  ["project-empty", "/p/rbe-demo-empty/duplicate-work?range=7d"],
+  ["group", "/groups/rbe-demo-monorepo/duplicate-work?range=7d"],
   ["dashboard-reference", "/p/rbe-demo-ios/dashboard"],
 ];
 const viewports = [["desktop", 1440, 1000], ["mobile", 390, 844]];

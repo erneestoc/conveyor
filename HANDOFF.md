@@ -72,14 +72,14 @@ PORT=4100 mix phx.server                            # web :4100 (port 4000 is ta
   page (crash report: `SIGKILL (Code Signature Invalid)`, `CODESIGNING / Invalid Page`).
   Fix, again after every reinstall: `codesign --force --sign - _build/tailwind-macos-arm64-4.3.0`,
   then `mix assets.build`. The Docker image builds with the Linux binary and is not affected.
-- **RBE opportunity demo data:** with the dev server running,
+- **Duplicate work demo data:** with the dev server running,
   `mix conveyor.seed --rbe-demo [--url http://localhost:4100]` (projects `rbe-demo-*`,
   cache group `rbe-demo-monorepo`; a second run replaces the first; builds are stamped
   relative to now, so nothing is moved with SQL). Screenshots of those pages:
   `cd e2e && OUT=/some/dir ADMIN_TOKEN=<the server's> node rbe-shots.mjs` (start the
   server with `ADMIN_TOKEN=x PORT=4100 mix phx.server` to get both an admin and a
   non-admin view; Playwright connects the LiveView, unlike headless Chrome's `--screenshot`).
-- **RBE at scale:** `bench/rbe_scale.sh --label x [--nodes 2] [--projects 360] [--builds 2000]`
+- **Duplicate work at scale:** `bench/rbe_scale.sh --label x [--nodes 2] [--projects 360] [--builds 2000]`
   (bench Postgres on 5441, database `conveyor_rbe_scale` dropped and created per run,
   prod-mode nodes on 4199/4198; about 6 minutes and 8 GB of disk per run at the defaults;
   drop the database afterwards). It prints throughput, lock waits, sizes, page times and
@@ -126,7 +126,7 @@ lib/conveyor/
   projects.ex           projects + api keys (create/verify/rotate/revoke/touch/expiring); ApiKeyCache (ETS + PubSub invalidation); Segments defaults
   query.ex, query/parser.ex, query/values.ex   search language
   metrics/{scope,dashboard,tests}.ex           dashboard queries
-  exec_log/{action_key,keys,cores}.ex, rbe.ex, rbe/   the RBE opportunity analysis (PLAN §27)
+  exec_log/{action_key,keys,cores}.ex, rbe.ex, rbe/   the duplicate-work analysis (PLAN §27; modules keep the old name `Rbe`)
   exec_log/properties.ex, rbe/reread.ex               exec property names seen per project (discovery); parse stored logs again after the cores declaration changes (PLAN §27.7)
   storage.ex, storage/partitions.ex            boot-time partition creation; drop_before/2 and oldest_day/0 are mechanisms, the rules are RawStore.Expiry
   workers/partition_maintenance.ex, raw_log_sweep.ex, archive_raw.ex   hourly / hourly at :30 / every 15 min: they run RawStore.expire_partitions/1, expire_objects/2 (continuation job when objects remain), compact_due/2 (snoozes when builds remain)
@@ -160,14 +160,38 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
-### RBE opportunity — 2026-11-21 (PLAN §27, docs/rbe-opportunity.md), unreleased
+### Duplicate work (was "RBE opportunity") — 2026-11-21 (PLAN §27, docs/duplicate-work.md), unreleased
 
+- **Renamed 2026-11-23 (owner: metrics, not advice).** User-facing it is "Duplicate
+  work": navigation, page title and heading, docs (`docs/duplicate-work.md`, mkdocs nav),
+  routes `/p/:slug/duplicate-work`, `/groups/:name/duplicate-work`, `…/duplicate-work/json`,
+  `GET /api/v1/duplicate-work`. The old page paths (`/p/:slug/rbe`, `/groups/:name/rbe`)
+  redirect with 301 and keep the query string (`RbeController.moved_project/2`,
+  `moved_group/2`; they check visibility first, so they are 404 across the project
+  boundary); the old JSON paths and `GET /api/v1/rbe` are routed to the same actions as
+  the new ones. Headline tiles: "Sequential duplicates" (was "Cache opportunity") and
+  "Racing duplicates", each with a statement of what the number is and a help line on the
+  mechanism, phrased as fact. **Copy rule: the page and its docs state what a number is
+  and which mechanism addresses a class; they do not say what to do.** "RBE" appears only
+  where it names remote build execution as a mechanism.
+  **Deliberately not renamed:** modules `Conveyor.Rbe.*`, `ConveyorWeb.{RbeLive,
+  RbeController,RbeReport}`, `Conveyor.Seed.RbeDemo` and their file and test names; the
+  column `invocation_rollups.rbe` and the migration `…_rbe_opportunity`; the settings key
+  `projects.settings["rbe"]`; the audit action identifiers `project.rbe_settings` and
+  `project.rbe_reread` (shown as they are in the audit log); the config key
+  `:rbe_demo_hooks`; the seed flag `--rbe-demo` and its `rbe-demo-*` slugs;
+  `bench/rbe_scale.{sh,exs}` (database `conveyor_rbe_scale`, results `rbe_scale-*.json`);
+  `e2e/rbe-shots.mjs`; the DOM ids of the page (`rbe-*`, `tile-cache-gap`,
+  `panel-cache-gap`); every JSON key (`cache.gap`, `cache.rbe_rate`, …). There is no
+  telemetry event with the name. The bullets below were written before the rename and
+  keep the old words where they quote history.
 - **What exists.** `Conveyor.ExecLog.{ActionKey,Keys,Cores}` (key per executed spawn,
   the first execution per `(scope, key)` in `action_keys`, cores per action),
   `Conveyor.Rbe.{Fleet,Hour,Report,Settings,Groups,Host}` (the two hourly reports inside
   `invocation_rollups.fleet`/`.rbe`, the reader, project settings, cache groups),
-  `ConveyorWeb.{RbeLive,RbeController,RbeReport}` (`/p/:slug/rbe`, `/groups/:name/rbe`,
-  `…/rbe/json`, `GET /api/v1/rbe`). Tests: `test/conveyor/rbe_test.exs` (golden numbers
+  `ConveyorWeb.{RbeLive,RbeController,RbeReport}` (`/p/:slug/duplicate-work`,
+  `/groups/:name/duplicate-work`, `…/duplicate-work/json`, `GET /api/v1/duplicate-work`;
+  the `/rbe` paths redirect or alias). Tests: `test/conveyor/rbe_test.exs` (golden numbers
   from logs built by `Conveyor.ExecLogBuilder` out of the recorded fixture),
   `rbe_property_test.exs`, `rbe_live_test.exs`; model `docs/spec/ActionKeys.tla`.
 - **Rules to keep.** (1) Nothing stores a class: it is computed from the spawn and its
@@ -207,9 +231,8 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
   now by SQL). Bazel's merging of `exec_properties` into the log's platform is still
   unverified (docs/bazel.md lists what).
 - **Decided with the owner (2026-11-21):** an app of the Go monorepo is a project, so
-  cross-app is cross-project inside a cache group; the cache opportunity (sequential
-  duplicates, within and across projects, cold machines) is its own headline apart from
-  racing; shards need no pipeline grouping (a pipeline tag key is optional, for the
+  cross-app is cross-project inside a cache group; sequential duplicates (within and
+  across projects, cold machines) are their own headline apart from racing; shards need no pipeline grouping (a pipeline tag key is optional, for the
   racing-by-pipeline panel); cores per action come first from the action itself.
 - **Found while building.** The compact log has no CPU time and no execution
   requirements; cores can only arrive as a platform (exec) property. The fixtures have

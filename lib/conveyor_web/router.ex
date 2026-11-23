@@ -39,8 +39,8 @@ defmodule ConveyorWeb.Router do
       live "/p/:slug", BuildsLive, :project
       live "/p/:slug/dashboard", DashboardLive, :project
       live "/p/:slug/tests", TestsLive, :project
-      live "/p/:slug/rbe", RbeLive, :project
-      live "/groups/:name/rbe", RbeLive, :group
+      live "/p/:slug/duplicate-work", RbeLive, :project
+      live "/groups/:name/duplicate-work", RbeLive, :group
       live "/p/:slug/settings", ProjectLive, :settings
       live "/invocation/:id", InvocationLive, :overview
       live "/invocation/:id/:tab", InvocationLive, :tab
@@ -51,6 +51,12 @@ defmodule ConveyorWeb.Router do
     end
 
     get "/invocation/:id/download/:kind", DownloadController, :show
+    get "/p/:slug/duplicate-work/json", RbeController, :project
+    get "/groups/:name/duplicate-work/json", RbeController, :group
+    # The feature's addresses before it was renamed (it was "RBE opportunity"): the pages
+    # redirect, the JSON answers as the new paths do.
+    get "/p/:slug/rbe", RbeController, :moved_project
+    get "/groups/:name/rbe", RbeController, :moved_group
     get "/p/:slug/rbe/json", RbeController, :project
     get "/groups/:name/rbe/json", RbeController, :group
     get "/invocation/:id/artifact/:name", DownloadController, :artifact
@@ -84,6 +90,8 @@ defmodule ConveyorWeb.Router do
   scope "/api/v1", ConveyorWeb do
     pipe_through [:api, :api_read]
 
+    get "/duplicate-work", RbeController, :api
+    # the address before the rename
     get "/rbe", RbeController, :api
   end
 

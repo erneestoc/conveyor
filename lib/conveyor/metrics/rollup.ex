@@ -45,7 +45,7 @@ defmodule Conveyor.Metrics.Rollup do
       field :spawn_misses, :map, default: %{}
       field :remote_sent, :integer
       field :remote_fetched, :integer
-      # the RBE opportunity reports (Conveyor.Rbe.Fleet, Conveyor.Rbe.Hour)
+      # the duplicate-work reports (Conveyor.Rbe.Fleet, Conveyor.Rbe.Hour)
       field :fleet, :map
       field :rbe, :map
       field :updated_at, :utc_datetime_usec
@@ -322,7 +322,7 @@ defmodule Conveyor.Metrics.Rollup do
       fragment("date_trunc('hour', ?)", i.started_at),
       r.updated_at
     ])
-    # A row from before the RBE reports existed has no `fleet`: it is rolled again, which
+    # A row from before the duplicate-work reports existed has no `fleet`: it is rolled again, which
     # is how the reports reach the hours already stored when a node is upgraded.
     |> having(
       [i, r],

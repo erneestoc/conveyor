@@ -1,6 +1,6 @@
 defmodule Conveyor.Rbe.Fleet do
   @moduledoc """
-  The event-stream half of the RBE opportunity report: what can be said about a fleet
+  The event-stream half of the duplicate-work report: what can be said about a fleet
   whose CI uploads only build events, stored per project and hour in
   `invocation_rollups.fleet`.
 

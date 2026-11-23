@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The 360-project case of the RBE opportunity analysis (PLAN §27.9): one cache group, a
+# The 360-project case of the duplicate-work analysis (PLAN §27.9): one cache group, a
 # project per app, every build uploading an execution log, parsed by the real `parse`
 # queue of one or two prod-mode nodes against the native bench Postgres (bench/pg.sh).
 #

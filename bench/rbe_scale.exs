@@ -1,4 +1,4 @@
-# The 360-project case of the RBE opportunity analysis, measured (PLAN §27.9).
+# The 360-project case of the duplicate-work analysis, measured (PLAN §27.9).
 #
 # Run through bench/rbe_scale.sh, which starts the bench Postgres and one or two prod-mode
 # nodes and then this driver:
@@ -236,7 +236,7 @@ defmodule RbeScale do
   # --- brute force -----------------------------------------------------------------------------
 
   @doc """
-  Every keyed execution of the builds, classed the way docs/rbe-opportunity.md defines:
+  Every keyed execution of the builds, classed the way docs/duplicate-work.md defines:
   `%{project_id => %{class => {n, wall ms, core ms}}}` plus hits and executed counts.
   """
   def expected(builds) do
@@ -571,7 +571,7 @@ clear = fn ids -> RbeScale.q("DELETE FROM invocation_rollups WHERE project_id = 
 sample = Enum.take_random(projects, 5)
 clear.(member_ids)
 RbeScale.q("SELECT pg_stat_statements_reset()")
-{group_cold, group} = RbeScale.get_json("#{node}/groups/rbe-scale/rbe/json?range=24h")
+{group_cold, group} = RbeScale.get_json("#{node}/groups/rbe-scale/duplicate-work/json?range=24h")
 
 cold_top =
   RbeScale.q("""
@@ -580,13 +580,13 @@ cold_top =
   ORDER BY total_exec_time DESC LIMIT 6
   """)
 
-group_warm = for _ <- 1..5, do: elem(RbeScale.get_json("#{node}/groups/rbe-scale/rbe/json?range=24h"), 0)
+group_warm = for _ <- 1..5, do: elem(RbeScale.get_json("#{node}/groups/rbe-scale/duplicate-work/json?range=24h"), 0)
 
 project_times =
   for p <- sample do
     clear.([p.id])
-    {cold, report} = RbeScale.get_json("#{node}/p/#{p.slug}/rbe/json?range=24h")
-    warm = for _ <- 1..3, do: elem(RbeScale.get_json("#{node}/p/#{p.slug}/rbe/json?range=24h"), 0)
+    {cold, report} = RbeScale.get_json("#{node}/p/#{p.slug}/duplicate-work/json?range=24h")
+    warm = for _ <- 1..3, do: elem(RbeScale.get_json("#{node}/p/#{p.slug}/duplicate-work/json?range=24h"), 0)
     {p, cold, Enum.min(warm), report}
   end
 

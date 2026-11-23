@@ -1,10 +1,17 @@
-# RBE opportunity
+# Duplicate work
 
-Would a shared cache, or remote build execution (RBE), save work for this fleet, and how
-much? The **RBE opportunity** page of a project (`/p/<slug>/rbe`) and of a cache group
-(`/groups/<name>/rbe`) answers in core time, by kind of action. The same numbers are JSON
-at `/p/<slug>/rbe/json`, `/groups/<name>/rbe/json` (browser session) and
-`GET /api/v1/rbe?range=7d` (an API key with the `read` scope; its own project).
+How much of what a fleet executed was a repeat of an action that another execution had
+already finished, or was still running? The **Duplicate work** page of a project
+(`/p/<slug>/duplicate-work`) and of a cache group (`/groups/<name>/duplicate-work`)
+measures it in core time, by kind of action. The same numbers are JSON at
+`/p/<slug>/duplicate-work/json`, `/groups/<name>/duplicate-work/json` (browser session)
+and `GET /api/v1/duplicate-work?range=7d` (an API key with the `read` scope; its own
+project). The page reports metrics and their definitions; it does not recommend a setup.
+
+The feature was named "RBE opportunity" until 2026-11-23. Its old addresses still work:
+`/p/<slug>/rbe` and `/groups/<name>/rbe` redirect (301, query string kept) to the pages
+above, and `/p/<slug>/rbe/json`, `/groups/<name>/rbe/json` and `GET /api/v1/rbe` answer
+the same body as the new paths. The JSON keys did not change.
 
 There are two reports on the page, and every number says which one it belongs to.
 
@@ -14,8 +21,9 @@ There are two reports on the page, and every number says which one it belongs to
 | **bound** | the build event stream every build already sends | How much executed and how much was served from a cache. It cannot tell a duplicate from necessary work: it is an upper bound. |
 
 The coverage line at the top says how many finished builds of the window uploaded a log.
-A duplicate can only be found between two builds that both did, so enable logs for whole
-pipelines, not for a sample of builds ([how](bazel.md#rbe-opportunity-execution-logs-for-whole-pipelines)).
+A duplicate can only be found between two builds that both did: logs from every build of
+a pipeline show all of its duplicates, logs from a sample of builds only those among the
+sample ([setup](bazel.md#duplicate-work-execution-logs-for-whole-pipelines)).
 
 ## Definitions
 
@@ -25,32 +33,32 @@ or a remote executor. Without any of those the field is empty and Conveyor compu
 own key from the command line, the environment, the platform properties, the declared
 outputs and every input path with its content digest. Two executions with one key are one
 cache entry. The fallback key is as fine as Bazel's as long as the fleet runs one Bazel
-configuration; logs with a digest and logs without never match each other, so keep a
-project uniform. The coverage line says how many executions used the fallback.
+configuration. A log with a digest and a log without never match each other, so a project
+whose builds mix the two has duplicates the page does not find. The coverage line says how
+many executions used the fallback.
 
 **Scope.** Keys are compared inside a project, and inside its *cache group* when it has
-one: projects that build one codebase and should share one cache (a monorepo with a
-project per app). A global admin sets the group in the page's settings. A project that
+one: a set of projects whose executions are compared with each other, such as the
+projects of one codebase (a monorepo with a project per app). A global admin sets the group in the page's settings. A project that
 joins a group contributes the logs parsed from then on.
 
 **Classes.** For each key in a scope, the execution that *finished first* is `first`.
 Every other execution is a duplicate:
 
-- **sequential**: it started after the first one had finished. The result existed; a
-  shared cache would have served it. *RBE is not required for this.*
+- **sequential**: it started after the first one had finished. The result existed when
+  it started. A cache shared by the machines involved serves such a result.
     - *within the project*: an execution of its own project had finished it;
-    - *across projects*: only another project of the group had. This is the per-machine
-      or per-app cache case: work somebody else already did.
-- **racing**: it started while the first one was still running. No cache has the result
-  yet; only an executor that deduplicates actions in flight saves it. *Only RBE recovers
-  this.* Racing executions that may not run remotely (`no-remote`) are shown apart and
-  left out of the headline.
+    - *across projects*: only an execution of another project of the group had.
+- **racing**: it started while the first one was still running. No result existed yet,
+  so a cache has nothing to serve. An executor that merges identical actions in flight
+  (remote build execution, RBE) runs such an action once. Racing executions that may not
+  run remotely (`no-remote`) are shown apart and left out of the headline.
 
 Cache hits are not executions. Failed executions, and executions that may not be cached
 (`no-cache`, `no-remote-cache`), take part in nothing: they are listed as outside any
 cache.
 
-**Wasted time** is the execution wall time of every duplicate: total executed time minus
+**Duplicate time** is the execution wall time of every duplicate: total executed time minus
 the time of each key's first finisher.
 
 **Core time** is wall time × cores of the action. Wall time is measured by Bazel. The
@@ -61,8 +69,8 @@ cores come from, best first:
    `cores`, `num-cpus`, `num_cpus`, `EstimatedCPU`, `resources:cpu`. Per action, exact,
    never overridden. This is the only place the compact execution log states cores: it
    has no field for execution requirements, so a `cpu:4` tag or a test size does not
-   reach it. Set `exec_properties = {"cores": "4"}` on the target (or on the execution
-   platform) to make core time exact;
+   reach it. With `exec_properties = {"cores": "4"}` on the target (or on the execution
+   platform) the core time of its actions is exact;
 2. **project setting**: `Mnemonic=cores` in the page's settings (`TestRunner=4`);
 3. **target tag**: the `cpu:N` tag of a test target, from the event stream
    (test runner spawns);
@@ -121,16 +129,18 @@ How to set the property in Bazel: [Bazel setup](bazel.md#declaring-cores-with-ex
 
 ## The headline numbers
 
-| Tile | Formula | Read it as |
+| Tile | Formula | What it measures |
 |---|---|---|
-| **Cache opportunity** | core time of sequential duplicates ÷ days of the window | What a cache shared by every machine recovers. Split into within the project, across projects, and the part on a host's first three builds (cold machines). |
+| **Sequential duplicates** | core time of sequential duplicates ÷ days of the window | "Executed although the same action had already finished elsewhere." Split into within the project, across projects, and the part on a host's first three builds (cold machines). |
 | **Hit rate, actual → ideal** | actual = hits ÷ spawns; ideal = (hits + sequential) ÷ spawns; with RBE also + racing. By time: sequential wall time ÷ executed wall time | The log has no time for a hit (nothing ran), so the time rate is the share of *executed* time that should have been a hit. |
-| **Racing duplicates** | core time of racing duplicates that may run remotely ÷ days | The increment RBE adds over a perfect shared cache. |
-| **Cold machines** | sequential duplicates of builds that are among the first three of their host | The cost of machines that start with an empty cache. |
-| **Outside any cache** | core time of executions that are not cacheable or failed; time that may not run remotely | What neither a cache nor RBE touches. |
+| **Racing duplicates** | core time of racing duplicates that may run remotely ÷ days | "Executed while the same action was still running elsewhere." |
+| **Cold machines** | sequential duplicates of builds that are among the first three of their host | The part of the sequential duplicates executed on machines that had run at most two builds before. |
+| **Outside any cache** | core time of executions that are not cacheable or failed; time that may not run remotely | Executions that take part in no class: no cache stores their result. |
 | **Parallelism headroom** | Σ action wall time ÷ Σ critical path (bound), ÷ Σ execution phase (achieved) | The most cores a build could keep busy against what it used. A bound: the critical path assumes unlimited cores. The host's core count is not in either data source. |
 
-The two first tiles are the page's answers and are shown large, per day (the window's
+The two first tiles are the page's headline metrics and are shown large, each with a
+help line that states which mechanism addresses its class (the sentences under
+[Classes](#definitions)). They are per day (the window's
 core time ÷ the window's days, whether or not a day had logs), with the window's total
 under them. Tables show totals of the window.
 
@@ -159,34 +169,44 @@ Starts and finishes are taken by the machines that ran the actions. With clocks 
 seconds apart, an execution that started close to the first one's finish could belong to
 either class. The racing tile reports how many racing and how many sequential executions
 lie within the project's tolerance (1 to 60 s, default 2): racing is between
-*racing − uncertain racing* and *racing + uncertain sequential*. Keep CI hosts on NTP.
+*racing − uncertain racing* and *racing + uncertain sequential*. The band is as wide as
+the hosts' clocks disagree; hosts synchronized by NTP agree within milliseconds.
 
-## Reading the two common cases
+## Two fleet shapes and what the numbers show
 
-**Shards with one central cache (iOS).** Sequential duplicates should be near zero: the
-cache works. The question is racing: shards of one pipeline start together and build the
-same actions before any of them has uploaded a result. *Racing duplicates* is the core
-time RBE would save; *Racing by pipeline* shows whether it is every run or a few. If
-sequential duplicates are high instead, fix the cache first (near misses and
-non-deterministic actions say why keys differ).
+**Shards with one central cache (for example iOS shards of one pipeline).** Every shard
+reads and writes the same cache, so an action that has finished anywhere is a cache hit
+for the others and sequential duplicates are few. Shards of one pipeline start together
+and execute the same actions before any of them has uploaded a result: those executions
+are racing duplicates. *Racing by pipeline* shows how the racing core time is spread
+over pipeline runs. Where sequential duplicates do appear with a shared cache, the
+executions ran under different action keys or the result was not in the cache; near
+misses and actions that are not deterministic are the two causes of differing keys the
+page counts.
 
-**A cache per machine (a Go monorepo, an app per project).** Put the projects into one
-cache group. Read the cache opportunity first: *across projects* is the work another app
-had already finished, *cold machines* the part paid by fresh hosts. That is what a shared
-cache recovers without RBE. Racing is the increment on top; decide on RBE from that
-number and from the parallelism headroom, not from the total.
+**A cache per machine (for example a Go monorepo with a project per app, in one cache
+group).** A machine's cache holds only what that machine built, so an action another app
+or another machine has finished executes again: a sequential duplicate. *Across
+projects* is the part first finished by another project of the group, *cold machines*
+the part executed in a host's first three builds. Racing duplicates are the executions
+that overlapped in time with the first one; a cache shared by the machines would not
+have held their result when they started.
 
-## What this is not
+## What the numbers do not measure
 
-- Not build minutes. Core time saved shortens builds only where those actions were on the
-  critical path and cores were the constraint.
-- Not a statement about builds without a log.
-- Not a bound on RBE's other effects (more parallelism than a CI machine has, queueing,
-  network transfer of inputs and outputs).
+- Build minutes. Duplicate core time is time of actions; a build is shorter without
+  them only where those actions were on its critical path and cores were the constraint.
+- Builds without a log. The numbers describe the builds that uploaded one.
+- Other effects of remote execution: more parallelism than a CI machine has, queueing,
+  network transfer of inputs and outputs. The parallelism tile is a bound from the
+  critical path, not a measurement of any executor.
+- A recommendation. Which class a duplicate is in, and which mechanism addresses that
+  class, are stated as definitions; whether to adopt a shared cache or remote execution
+  depends on costs this page does not have.
 
 ## Exactness
 
-Under these conditions wasted wall time is exact: the builds compared uploaded complete
+Under these conditions duplicate wall time is exact: the builds compared uploaded complete
 logs; their action keys come from one source; machine clocks agree within the tolerance.
 Logs may arrive in any order and be parsed at the same time: the first execution of a key
 is decided by the actions' own timestamps, never by arrival, and hours already summarized
@@ -205,8 +225,8 @@ group) and 3.2 KB of write-ahead log. A node parses about 12,700 spawns per seco
 its two parse jobs (460 logs of that size per minute), two nodes 1.74 times that, without
 lock waits. A 3,500-spawn log therefore costs about 4.8 MB of database until its spawns
 expire (`RETENTION_SPAWN_DAYS`, 30) and 0.5 s of one parse worker; 360 apps at 50 builds
-a day are 87 GB a day. The hourly numbers of the page survive the expiry, so a short
-spawn retention is the first thing to set for a fleet of that size.
+a day are 87 GB a day. The hourly numbers of the page survive the expiry, so the spawn
+retention bounds the database size without changing the page.
 
 A cache group's page reads stored hours only: its window starts at the top of the hour
 (a "24h" view covers up to 24 h 59 min) and hours whose builds changed are summarized

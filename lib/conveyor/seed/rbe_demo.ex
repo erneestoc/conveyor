@@ -1,6 +1,6 @@
 defmodule Conveyor.Seed.RbeDemo do
   @moduledoc """
-  Demo data for the RBE opportunity pages (`mix conveyor.seed --rbe-demo`), uploaded
+  Demo data for the Duplicate work pages (`mix conveyor.seed --rbe-demo`), uploaded
   through the HTTP API of a running server so the real pipeline runs: every build is a
   recorded event stream (`PUT /api/v1/invocations/:id/bep`) with its start moved to the
   last day and a half, followed by an execution log written by `Conveyor.ExecLog.Synth`

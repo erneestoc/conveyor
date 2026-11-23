@@ -126,9 +126,18 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
     "/metrics",
     "/health/live",
     "/health/ready",
-    # bound to the project of the API key that calls it (rbe_live_test.exs)
+    # bound to the project of the API key that calls it (rbe_live_test.exs); `/rbe` is
+    # its address from before the rename
+    "/api/v1/duplicate-work",
     "/api/v1/rbe"
   ]
+
+  # The pages' addresses from before the rename: inside the boundary they redirect to
+  # these, outside they are 404 like the pages themselves.
+  @moved %{
+    "/p/:slug/rbe" => "/p/:slug/duplicate-work",
+    "/groups/:name/rbe" => "/groups/:name/duplicate-work"
+  }
 
   test "every project-bound route is 404 across the boundary and 200 inside it", ctx do
     %{conn: conn, a: a, b: b, ids: ids, keys: keys} = ctx
@@ -146,7 +155,18 @@ defmodule ConveyorWeb.ProjectBoundaryTest do
       assert String.contains?(route.path, ":"), "unclassified route #{route.verb} #{route.path}"
       inside = path_for(route, fill(a, ids["alpha"]))
       outside = path_for(route, fill(b, ids["beta"]))
-      check(route, conn, inside, outside, keys["alpha"])
+
+      case @moved[route.path] do
+        nil ->
+          check(route, conn, inside, outside, keys["alpha"])
+
+        to ->
+          assert conn |> get(inside) |> redirected_to(301) ==
+                   path_for(%{route | path: to}, fill(a, ids["alpha"]))
+
+          error = assert_raise(ConveyorWeb.NotFoundError, fn -> get(conn, outside) end)
+          assert Plug.Exception.status(error) == 404, "#{route.path} outside"
+      end
     end
   end
 

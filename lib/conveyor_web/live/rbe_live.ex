@@ -1,9 +1,14 @@
 defmodule ConveyorWeb.RbeLive do
   @moduledoc """
-  "RBE opportunity": would a shared cache or remote build execution save work, for a
-  project (`/p/:slug/rbe`) or a cache group (`/groups/:name/rbe`). Every number carries
-  its standing: exact (from execution logs, for the builds that uploaded one), estimated
-  (wall time exact, cores assumed) or a bound (from the event stream alone).
+  "Duplicate work": executions that repeated an action another execution had finished
+  (sequential) or was still running (racing), for a project (`/p/:slug/duplicate-work`)
+  or a cache group (`/groups/:name/duplicate-work`). The page shows metrics and their
+  definitions, not advice. Every number carries its standing: exact (from execution
+  logs, for the builds that uploaded one), estimated (wall time exact, cores assumed) or
+  a bound (from the event stream alone).
+
+  The feature was named "RBE opportunity"; the module, the DOM ids (`rbe-*`) and the
+  audit actions (`project.rbe_settings`, `project.rbe_reread`) keep that name.
   """
   use ConveyorWeb, :live_view
 
@@ -52,7 +57,7 @@ defmodule ConveyorWeb.RbeLive do
        projects: projects,
        project: project,
        group: group,
-       page_title: "RBE opportunity",
+       page_title: "Duplicate work",
        admin?: project != nil and Viewer.can_admin_project?(viewer, project),
        global_admin?: viewer.admin?,
        projects_q: "",
@@ -281,13 +286,13 @@ defmodule ConveyorWeb.RbeLive do
     >
       <div class="flex flex-wrap items-center justify-between gap-3 pb-3">
         <div class="min-w-0">
-          <h1 class="text-lg font-semibold tracking-tight">RBE opportunity</h1>
+          <h1 class="text-lg font-semibold tracking-tight">Duplicate work</h1>
           <p class="text-xs text-base-content/70" id="rbe-subtitle">
             {page_title_for(assigns)} · last {@range}
             <span :if={@project && @group}>
               · in cache group
               <.link
-                navigate={~p"/groups/#{@group.name}/rbe"}
+                navigate={~p"/groups/#{@group.name}/duplicate-work"}
                 class="underline underline-offset-2 hover:text-base-content"
                 id="rbe-group-link"
               >
@@ -335,22 +340,23 @@ defmodule ConveyorWeb.RbeLive do
             <.hero
               id="tile-cache-gap"
               tone={:good}
-              label="Cache opportunity"
-              claim="A shared cache recovers this. RBE is not required."
+              label="Sequential duplicates"
+              claim="Executed although the same action had already finished elsewhere."
+              help="The result existed when the execution started. A cache shared by the machines involved serves such a result."
               ms={@report.cache.gap.core_ms}
               days={@report.days}
               range={@range}
               coverage={@report.cores_coverage}
             >
-              <:row label="Sequential duplicates">
+              <:row label="Executions">
                 {Format.number(@report.cache.gap.n)} executions · {Format.duration(
                   @report.cache.gap.ms
                 )} wall
               </:row>
-              <:row label="Redone inside a project">
+              <:row label="After an execution of the same project">
                 {core(@report.cache.same_project.core_ms)}
               </:row>
-              <:row :if={@group} label="Already finished by another project of the group">
+              <:row :if={@group} label="After an execution of another project of the group only">
                 {core(@report.cache.cross_project.core_ms)}
               </:row>
               <:row label="Of it, on a host's first three builds">
@@ -361,13 +367,14 @@ defmodule ConveyorWeb.RbeLive do
               id="tile-racing"
               tone={:warn}
               label="Racing duplicates"
-              claim="Only RBE recovers this: the same action was still running elsewhere."
+              claim="Executed while the same action was still running elsewhere."
+              help="No result existed yet when the execution started, so a cache has nothing to serve. An executor that merges identical actions in flight (remote build execution, RBE) runs such an action once."
               ms={@report.racing.remotable.core_ms}
               days={@report.days}
               range={@range}
               coverage={@report.cores_coverage}
             >
-              <:row label="Racing duplicates">
+              <:row label="Executions">
                 {Format.number(@report.racing.remotable.n)} executions · {pct(
                   @report.racing.time_share
                 )} of executed wall time
@@ -393,8 +400,8 @@ defmodule ConveyorWeb.RbeLive do
             </.tile>
             <.tile id="tile-cold" label="Cold machines" standing={:exact}>
               <:value>{per_day(@report.cache.cold.core_ms, @report.days)}</:value>
-              Part of the cache opportunity: {Format.number(@report.cache.cold.n)} duplicates
-              executed in the first three builds of a host.
+              Part of the sequential duplicates: {Format.number(@report.cache.cold.n)} executed
+              in the first three builds of a host.
             </.tile>
             <.tile id="tile-not-remotable" label="Outside any cache" standing={:exact}>
               <:value>
@@ -416,7 +423,7 @@ defmodule ConveyorWeb.RbeLive do
           </div>
         </div>
 
-        <.panel :if={@report.coverage.logs > 0} id="panel-cache-gap" title="Cache opportunity">
+        <.panel :if={@report.coverage.logs > 0} id="panel-cache-gap" title="Sequential duplicates">
           <:note>
             Executions whose result another execution of the same action key had already
             finished, in the whole window. Wall time is exact; core time is wall × cores per
@@ -426,7 +433,7 @@ defmodule ConveyorWeb.RbeLive do
             <table class="w-full min-w-[30rem] text-sm">
               <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/60">
                 <tr>
-                  <th scope="col" class="py-1 font-medium">Sequential duplicates</th>
+                  <th scope="col" class="py-1 font-medium">First execution finished</th>
                   <th scope="col" class="py-1 text-right font-medium">Executions</th>
                   <th scope="col" class="py-1 text-right font-medium">Wall</th>
                   <th scope="col" class="py-1 text-right font-medium">Core time</th>
@@ -463,7 +470,7 @@ defmodule ConveyorWeb.RbeLive do
 
         <.panel :if={@report.mnemonics != []} id="panel-rbe-mnemonics" title="By kind of action">
           <:note>
-            Sorted by core time lost to duplicates. Cores is the average used for the
+            Sorted by core time of duplicate executions. Cores is the average used for the
             mnemonic; the last column says where it comes from.
           </:note>
           <.cores_coverage coverage={@report.cores_coverage} settings={@settings} />
@@ -522,7 +529,7 @@ defmodule ConveyorWeb.RbeLive do
             </table>
           </div>
           <p :if={length(@report.mnemonics) > 30} class="mt-2 text-xs text-base-content/60">
-            The 30 mnemonics that lose the most; {length(@report.mnemonics) - 30} more are in the JSON.
+            The 30 mnemonics with the most duplicate core time; {length(@report.mnemonics) - 30} more are in the JSON.
           </p>
         </.panel>
 
@@ -668,8 +675,8 @@ defmodule ConveyorWeb.RbeLive do
         Numbers marked <.standing kind={:exact} />
         are exact in wall time for those builds (core time is wall × the cores each action
         states or is estimated to use) and say nothing about the others; numbers marked
-        <.standing kind={:bound} /> are an upper bound from the event stream. Savings are core
-        time of actions, not build minutes.
+        <.standing kind={:bound} /> are an upper bound from the event stream. All figures are
+        core time of actions, not build minutes.
         <span :if={@report.keys["fallback"]} id="rbe-fallback-keys">
           {Format.number(@report.keys["fallback"])} executions had no action digest from Bazel
           (no cache configured) and are matched by Conveyor's own key.
@@ -690,8 +697,9 @@ defmodule ConveyorWeb.RbeLive do
           <h2 class="text-sm font-semibold">No execution logs in this window</h2>
         </div>
         <p class="mt-1 text-sm text-base-content/70" id="rbe-enable">
-          Duplicates can only be found between builds that both uploaded a log: enable it for
-          every build of a pipeline, not for a sample of builds.
+          A duplicate is found only between two builds that both uploaded a log. Logs from
+          every build of a pipeline show all of its duplicates; logs from a sample of builds
+          show the duplicates among the sampled builds only.
         </p>
         <.ci_snippet id="rbe-ci-snippet-empty" origin={@origin} />
       </div>
@@ -1018,7 +1026,7 @@ defmodule ConveyorWeb.RbeLive do
     <.panel id="panel-rbe-fleet" title="From the event stream alone">
       <:note>
         <.standing kind={:bound} /> Every build reports this without any change to CI. It counts
-        what executed, not what was a duplicate: an upper bound of what a cache or RBE could save.
+        what executed, not what was a duplicate: an upper bound on duplicate work.
       </:note>
       <div class="grid gap-x-6 gap-y-5 lg:grid-cols-3">
         <div id="rbe-fleet-share" class="min-w-0">
@@ -1152,7 +1160,7 @@ defmodule ConveyorWeb.RbeLive do
             :if={@global_admin?}
             field={@form[:cache_group]}
             type="text"
-            label="Cache group (projects that should share one cache)"
+            label="Cache group (projects whose executions are compared with each other)"
             placeholder="monorepo"
           />
         </div>
@@ -1281,6 +1289,7 @@ defmodule ConveyorWeb.RbeLive do
   attr :id, :string, required: true
   attr :label, :string, required: true
   attr :claim, :string, required: true
+  attr :help, :string, required: true
   attr :tone, :atom, required: true
   attr :ms, :integer, required: true
   attr :days, :float, required: true
@@ -1291,7 +1300,8 @@ defmodule ConveyorWeb.RbeLive do
     attr :label, :string, required: true
   end
 
-  # One of the two answers of the page: core time per day, large, with what it is made of.
+  # One of the two headline metrics: core time per day, large, with what it is made of,
+  # what the number is (claim) and which mechanism addresses the class (help), as facts.
   defp hero(assigns) do
     {number, unit} = core_parts(round(assigns.ms / assigns.days))
     assigns = assign(assigns, number: number, unit: unit)
@@ -1327,6 +1337,7 @@ defmodule ConveyorWeb.RbeLive do
         <span class="text-base">{@unit} / day</span>
       </p>
       <p class="mt-2 text-sm font-medium">{@claim}</p>
+      <p class="mt-1 text-xs leading-snug text-base-content/70" id={"#{@id}-help"}>{@help}</p>
       <dl class="mt-3 grid grid-cols-1 gap-x-4 border-t border-base-content/10 pt-3 text-xs sm:grid-cols-[minmax(0,1fr)_auto] sm:gap-y-1">
         <dt class="text-base-content/70">In the window (last {@range})</dt>
         <dd class="mb-1.5 font-mono tabular-nums sm:mb-0 sm:text-right">{core(@ms)}</dd>

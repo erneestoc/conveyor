@@ -33,7 +33,7 @@ defmodule Conveyor.ExecLog.Spawn do
     field :inputs_digest, :string
     field :outputs_digest, :string
     field :outputs, :map, default: %{}
-    # The RBE opportunity analysis (PLAN §27); null on cache hits, and the key also on
+    # The duplicate-work analysis (PLAN §27); null on cache hits, and the key also on
     # executions no cache could have served (`Conveyor.ExecLog.ActionKey.execution?/1`).
     field :action_key, :binary
     field :key_source, :integer
