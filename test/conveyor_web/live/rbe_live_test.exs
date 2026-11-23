@@ -121,8 +121,9 @@ defmodule ConveyorWeb.RbeLiveTest do
 
     assert Stream.merge_pending!(DateTime.add(t0, -60, :second)) == 3
     {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
-    line = view |> element("#rbe-stream-source") |> render()
-    assert line =~ "the event stream" and line =~ "3 of 3"
+    assert view |> element("#rbe-source") |> render() =~ "the event stream"
+    assert view |> element("#rbe-stream-source") |> render() =~ "3 of 3"
+    refute has_element?(view, "#rbe-empty")
     assert has_element?(view, "#rbe-stream-counts-only")
 
     assert %{"report" => %{"source" => "stream", "stream" => stream}} =

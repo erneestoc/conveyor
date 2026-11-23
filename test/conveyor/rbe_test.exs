@@ -581,7 +581,8 @@ defmodule Conveyor.RbeTest do
                analysis_only: false,
                row_days: 3,
                keep_action_events: false,
-               late_logs: 0
+               late_logs: 0,
+               late_stream_builds: 0
              }
 
       store!(build!(p, 0, %{tags: %{"pipeline" => "run-1"}}))

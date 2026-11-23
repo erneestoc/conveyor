@@ -60,7 +60,14 @@ defmodule ConveyorWeb.RbeReport do
         report =
           Report.build(
             scope,
-            [settings: %{Settings.get(first) | cores: cores}] ++ visibility(viewer, members)
+            [
+              settings: %{
+                Settings.get(first)
+                | cores: cores,
+                  late_stream_builds:
+                    seen |> Enum.map(&Settings.get(&1).late_stream_builds) |> Enum.sum()
+              }
+            ] ++ visibility(viewer, members)
           )
 
         Map.put(report, :members, length(members))

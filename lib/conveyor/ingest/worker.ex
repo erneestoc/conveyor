@@ -273,6 +273,11 @@ defmodule Conveyor.Ingest.Worker do
     w
   end
 
+  defp effect({:stream_finalized, id}, w) do
+    Conveyor.Workers.StreamKeys.enqueue(id)
+    w
+  end
+
   defp effect(:hibernate, %{next: :noreply} = w), do: %{w | next: :hibernate}
   defp effect(:hibernate, w), do: w
   defp effect({:stop, reason}, w), do: %{w | next: {:stop, reason}}

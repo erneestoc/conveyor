@@ -5,6 +5,7 @@ defmodule Conveyor.Rbe.StreamIngestTest do
   acknowledged the event, whatever happens to the stream (PLAN §28).
   """
   use Conveyor.IngestCase, async: false
+  use Oban.Testing, repo: Conveyor.Repo
 
   import Ecto.Query
 
@@ -70,6 +71,8 @@ defmodule Conveyor.Rbe.StreamIngestTest do
 
       inv = reload(id)
       assert inv.stream_actions == length(records)
+      # The end of the build schedules its key merge (once per build).
+      assert [_] = all_enqueued(worker: Conveyor.Workers.StreamKeys, args: %{invocation_id: id})
       assert :ok = Ingest.Verify.check(id, length(events))
 
       chunks = chunks(id)

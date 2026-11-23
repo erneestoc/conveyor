@@ -28,7 +28,9 @@ defmodule Conveyor.Rbe.Settings do
       not kept in a build's raw events unless this is on (PLAN §28.1). Read when a
       stream starts;
     * `late_logs`: a counter, not a setting: logs parsed while the mode was on whose
-      build's hour was already frozen (`count_late!/1`).
+      build's hour was already frozen (`count_late!/1`);
+    * `late_stream_builds`: a counter too: builds with per-action events whose keys were
+      merged after their hour's stream figures were final (`count_late_stream!/1`).
   """
   alias Conveyor.Projects
   alias Conveyor.Projects.Project
@@ -50,7 +52,8 @@ defmodule Conveyor.Rbe.Settings do
           analysis_only: boolean(),
           row_days: pos_integer(),
           keep_action_events: boolean(),
-          late_logs: non_neg_integer()
+          late_logs: non_neg_integer(),
+          late_stream_builds: non_neg_integer()
         }
 
   @doc "The units a cores property can be read in."
@@ -73,7 +76,8 @@ defmodule Conveyor.Rbe.Settings do
       analysis_only: Map.get(rbe, "analysis_only", false) == true,
       row_days: Map.get(rbe, "row_days", @default_row_days),
       keep_action_events: Map.get(rbe, "keep_action_events", false) == true,
-      late_logs: Map.get(rbe, "late_logs", 0)
+      late_logs: Map.get(rbe, "late_logs", 0),
+      late_stream_builds: Map.get(rbe, "late_stream_builds", 0)
     }
   end
 
@@ -91,6 +95,28 @@ defmodule Conveyor.Rbe.Settings do
       )
 
     rows == [["true"]]
+  end
+
+  @doc """
+  Counts a build with per-action events whose keys were merged after its hour's stream
+  figures were final (its records were about to expire, PLAN §28.3): later builds are
+  matched against it, and it is in no hour's numbers. One atomic statement; creates the
+  `rbe` settings of a project that has none.
+  """
+  @spec count_late_stream!(integer()) :: :ok
+  def count_late_stream!(project_id) when is_integer(project_id) do
+    Conveyor.Repo.query!(
+      """
+      UPDATE projects
+      SET settings = jsonb_set(coalesce(settings, '{}'::jsonb), '{rbe}',
+            coalesce(settings -> 'rbe', '{}'::jsonb) || jsonb_build_object('late_stream_builds',
+              coalesce((settings #>> '{rbe,late_stream_builds}')::int, 0) + 1))
+      WHERE id = $1
+      """,
+      [project_id]
+    )
+
+    :ok
   end
 
   @doc """
@@ -155,6 +181,12 @@ defmodule Conveyor.Rbe.Settings do
           case get(project).late_logs do
             0 -> rbe
             n -> Map.put(rbe, "late_logs", n)
+          end
+        end)
+        |> then(fn rbe ->
+          case get(project).late_stream_builds do
+            0 -> rbe
+            n -> Map.put(rbe, "late_stream_builds", n)
           end
         end)
         |> then(&if(pipeline_key, do: Map.put(&1, "pipeline_key", pipeline_key), else: &1))

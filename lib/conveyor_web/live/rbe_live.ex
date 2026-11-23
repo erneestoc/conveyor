@@ -342,6 +342,15 @@ defmodule ConveyorWeb.RbeLive do
       <div :if={@report} id="rbe-report" class="space-y-4">
         <.coverage report={@report} origin={@origin} />
 
+        <.stream_report
+          :if={stream?(@report)}
+          stream={@report.stream}
+          both?={@report.coverage.logs > 0}
+          window_days={@report.window_days}
+          range={@range}
+          grouped?={is_nil(@project)}
+        />
+
         <div :if={@report.coverage.logs > 0} id="rbe-headline" class="space-y-3">
           <div class="grid gap-3 lg:grid-cols-2">
             <.hero
@@ -703,60 +712,115 @@ defmodule ConveyorWeb.RbeLive do
     ~H"""
     <div
       id="rbe-coverage"
-      class="rounded-md border border-base-300 bg-base-200/40 px-3 py-2 text-xs leading-relaxed"
+      class="space-y-1 rounded-md border border-base-300 bg-base-200/40 px-3 py-2 text-xs leading-relaxed"
     >
-      <span class="font-medium">
-        {Format.number(@report.coverage.logs)} of {Format.number(@report.coverage.builds)} finished builds
-      </span>
-      in this window uploaded an execution log{if @report.coverage.builds > 0,
-        do: " (#{Format.percent(@report.coverage.logs, @report.coverage.builds)})"}.
-      <span :if={@report.coverage.logs > 0}>
-        Numbers marked <.standing kind={:exact} />
-        are exact in wall time for those builds (core time is wall × the cores each action
-        states or is estimated to use) and say nothing about the others; numbers marked
-        <.standing kind={:bound} /> are an upper bound from the event stream. All figures are
-        core time of actions, not build minutes.
-        <span :if={@report.keys["fallback"]} id="rbe-fallback-keys">
-          {Format.number(@report.keys["fallback"])} executions had no action digest from Bazel
-          (no cache configured) and are matched by Conveyor's own key.
+      <p id="rbe-source">
+        <span class="font-medium">Source: {source_name(@report.source)}.</span>
+        All figures are core time of actions, not build minutes.
+      </p>
+      <p :if={@report.stream} id="rbe-stream-source">
+        <span class="font-medium">
+          {Format.number(@report.stream.coverage.with_events)} of {Format.number(
+            @report.stream.coverage.builds
+          )} finished builds
         </span>
-      </span>
-      <span :if={@report.coverage.logs == 0}>
-        Without logs only the bound below is known.
-      </span>
-      <span :if={@report.stream} id="rbe-stream-source">
-        Source: {stream_source(@report.source)}. {Format.number(@report.stream.coverage.with_events)} of {Format.number(
+        sent per-action events (<code class="font-mono">--build_event_publish_all_actions</code>){share_text(
+          @report.stream.coverage.with_events,
           @report.stream.coverage.builds
-        )} finished builds sent per-action events (<code>--build_event_publish_all_actions</code>).
-        From the event stream alone, for the {Format.number(@report.stream.builds)} of them
-        without a parsed log: duplicates took at least {Format.duration(
-          @report.stream.same_commit.duplicate.ms
-        )} (same commit) and at most {Format.duration(@report.stream.any_commit.duplicate.ms)} (any commit) of {Format.duration(
-          @report.stream.executed.ms
-        )} executed wall time.
-        <span :if={@report.stream.counts_only_builds > 0} id="rbe-stream-counts-only">
-          {Format.number(@report.stream.counts_only_builds)} builds had no usable action times
-          (Bazel before 8.6) and are counted only.
+        )}; {Format.number(@report.stream.builds)} are reported from them.
+        <span :if={@report.stream.logged_builds > 0} id="rbe-stream-logged">
+          {Format.number(@report.stream.logged_builds)} also uploaded an execution log and
+          are reported from the log.
         </span>
-      </span>
+        <span :if={@report.stream.counts_only_builds > 0} id="rbe-stream-counts-only">
+          {Format.number(@report.stream.counts_only_builds)} are counted only: their events
+          carry no usable action times (Bazel before 8.6).
+        </span>
+        <span :if={@report.stream.no_commit_builds > 0} id="rbe-stream-no-commit">
+          {Format.number(@report.stream.no_commit_builds)} name no commit and are in no
+          same-commit figure.
+        </span>
+        <span :if={@report.stream.pending_builds > 0} id="rbe-stream-pending">
+          {Format.number(@report.stream.pending_builds)} are pending classification (done
+          when a build ends, at the latest by the 5-minute job).
+        </span>
+        <span :if={@report.stream.late_builds > 0} id="rbe-stream-late">
+          {Format.number(@report.stream.late_builds)} arrived after their hour's figures
+          were final and are not counted.
+        </span>
+      </p>
+      <p id="rbe-log-coverage">
+        <span class="font-medium">
+          {Format.number(@report.coverage.logs)} of {Format.number(@report.coverage.builds)} finished builds
+        </span>
+        uploaded an execution log{share_text(@report.coverage.logs, @report.coverage.builds)}.
+        <span :if={@report.coverage.logs > 0}>
+          Numbers marked <.standing kind={:exact} />
+          are exact in wall time for those builds (core time is wall × the cores each action
+          states or is estimated to use) and say nothing about the others; numbers marked
+          <.standing kind={:bound} /> are an upper bound from the event stream.
+          <span :if={@report.keys["fallback"]} id="rbe-fallback-keys">
+            {Format.number(@report.keys["fallback"])} executions had no action digest from Bazel
+            (no cache configured) and are matched by Conveyor's own key.
+          </span>
+        </span>
+      </p>
     </div>
     <div
-      :if={@report.coverage.logs == 0}
+      :if={@report.coverage.logs == 0 and not stream?(@report)}
       id="rbe-empty"
       class="rounded-md border border-dashed border-base-300 px-4 py-8"
     >
       <div class="mx-auto max-w-2xl">
         <div class="flex items-center gap-2">
           <.icon name="hero-document-magnifying-glass" class="size-5 text-base-content/50" />
-          <h2 class="text-sm font-semibold">No execution logs in this window</h2>
+          <h2 class="text-sm font-semibold">No per-action data in this window</h2>
         </div>
         <p class="mt-1 text-sm text-base-content/70" id="rbe-enable">
-          A duplicate is found only between two builds that both uploaded a log. Logs from
-          every build of a pipeline show all of its duplicates; logs from a sample of builds
-          show the duplicates among the sampled builds only.
+          A duplicate is found only between two builds that both report their actions. One
+          line in <code class="font-mono">.bazelrc</code> is enough; builds without it show
+          only the bound below.
         </p>
-        <.ci_snippet id="rbe-ci-snippet-empty" origin={@origin} />
+        <.stream_setup id="rbe-stream-setup-empty" />
+        <details id="rbe-exact-mode-empty" class="group mt-4 border-t border-base-300 pt-3">
+          <summary class="cursor-pointer text-xs font-medium transition-colors hover:text-primary">
+            Exact mode (optional): upload the execution log
+          </summary>
+          <.ci_snippet id="rbe-ci-snippet-empty" origin={@origin} />
+        </details>
       </div>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+
+  # The whole setup of the event-stream mode: one line, and optionally the commit.
+  defp stream_setup(assigns) do
+    ~H"""
+    <div id={@id} class="mt-3">
+      <h3 class="text-xs font-medium">Report every action in the event stream</h3>
+      <pre
+        id={"#{@id}-text"}
+        class="mt-1 overflow-x-auto rounded-md border border-base-300 bg-base-200/60 p-3 font-mono text-[11px] leading-relaxed"
+      ># .bazelrc
+    build --build_event_publish_all_actions</pre>
+      <p class="mt-1.5 text-[11px] leading-snug text-base-content/70" id={"#{@id}-version"}>
+        Needs <span class="font-medium text-base-content">Bazel 8.6 or later</span>
+        (9.x included) for action times; older versions are counted only. Nothing else to
+        configure: the builds already send their events here.
+      </p>
+      <h3 class="mt-3 text-xs font-medium">Optional: name the commit</h3>
+      <pre
+        id={"#{@id}-commit"}
+        class="mt-1 overflow-x-auto rounded-md border border-base-300 bg-base-200/60 p-3 font-mono text-[11px] leading-relaxed"
+      ># CI job
+    bazel build --build_metadata=COMMIT_SHA=$(git rev-parse HEAD) //...</pre>
+      <p class="mt-1.5 text-[11px] leading-snug text-base-content/70" id={"#{@id}-tags"}>
+        With a commit, duplicates between builds of the same commit are exact. Read from the
+        first of these tags, in any letter case: {Enum.join(Conveyor.Rbe.Stream.commit_tags(), ", ")} (build
+        metadata, a workspace status command or an API key's default tags).
+      </p>
     </div>
     """
   end
@@ -1189,9 +1253,12 @@ defmodule ConveyorWeb.RbeLive do
   defp settings(assigns) do
     ~H"""
     <.panel id="rbe-settings" title="Settings">
-      <:note>
+      <div class="mb-4 max-w-3xl border-b border-base-300 pb-4">
+        <.stream_setup id="rbe-stream-setup" />
+      </div>
+      <p class="mb-3 max-w-prose text-xs text-base-content/70">
         Cores per mnemonic replace the estimate wherever an action does not state its own cores.
-      </:note>
+      </p>
       <.form for={@form} id="rbe-settings-form" phx-submit="save" class="grid gap-3 sm:grid-cols-2">
         <.input
           field={@form[:cores]}
@@ -1382,12 +1449,332 @@ defmodule ConveyorWeb.RbeLive do
         </div>
       </div>
 
-      <div class="mt-4 border-t border-base-300 pt-1">
+      <details id="rbe-exact-mode" class="group mt-4 border-t border-base-300 pt-3">
+        <summary class="cursor-pointer text-xs font-medium transition-colors hover:text-primary">
+          Exact mode (optional): upload the execution log
+        </summary>
+        <p class="mt-1.5 max-w-3xl text-[11px] leading-snug text-base-content/70">
+          An execution log adds what the event stream cannot say: the action digest (exact
+          duplicates across commits), cores from exec properties, which inputs changed,
+          non-determinism, and Bazel 7. A build with a parsed log is reported from the log.
+        </p>
         <.ci_snippet id="rbe-ci-snippet" origin={@origin} upload_key?={@upload_key?} />
-      </div>
+      </details>
     </.panel>
     """
   end
+
+  attr :stream, :map, required: true
+  attr :both?, :boolean, required: true
+  attr :window_days, :integer, required: true
+  attr :range, :string, required: true
+  attr :grouped?, :boolean, required: true
+
+  # The builds reported from their per-action events: the two headline classes with
+  # their three figures, hit rates, kinds of action and targets.
+  defp stream_report(assigns) do
+    ~H"""
+    <div id="rbe-stream" class="space-y-3">
+      <h2 :if={@both?} class="text-xs font-semibold uppercase tracking-wide text-base-content/70">
+        From the event stream · builds without an execution log
+      </h2>
+      <div class="grid gap-3 lg:grid-cols-2">
+        <.stream_hero
+          id="tile-stream-sequential"
+          tone={:good}
+          label="Sequential duplicates"
+          claim="Executed although the same action had already finished elsewhere."
+          help="The result existed when the execution started. A cache shared by the machines involved serves such a result."
+          same={@stream.same_commit.sequential}
+          estimate={@stream.estimate && @stream.estimate.sequential}
+          any={@stream.any_commit.sequential}
+          days={@stream.days}
+          window_days={@window_days}
+          range={@range}
+        />
+        <.stream_hero
+          id="tile-stream-racing"
+          tone={:warn}
+          label="Racing duplicates"
+          claim="Executed while the same action was still running elsewhere."
+          help="No result existed yet when the execution started, so a cache has nothing to serve. An executor that merges identical actions in flight (remote build execution, RBE) runs such an action once."
+          same={@stream.same_commit.racing}
+          estimate={@stream.estimate && @stream.estimate.racing}
+          any={@stream.any_commit.racing}
+          days={@stream.days}
+          window_days={@window_days}
+          range={@range}
+        />
+      </div>
+      <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <.tile id="tile-stream-hit-rate" label="Cache hit rate" standing={:stream}>
+          <:value>
+            <dl class="mt-1 grid grid-cols-[minmax(0,1fr)_auto] items-baseline gap-x-3 gap-y-0.5 text-xs font-normal">
+              <dt>today</dt>
+              <dd id="stream-hit-rate-today" class="text-right text-base font-semibold">
+                {pct(@stream.hit_rate.today)}
+              </dd>
+              <dt>perfect cache</dt>
+              <dd id="stream-hit-rate-perfect-cache" class="text-right text-base font-semibold">
+                {pct_range(@stream.hit_rate.perfect_cache)}
+              </dd>
+              <dt>with in-flight deduplication</dt>
+              <dd id="stream-hit-rate-in-flight" class="text-right text-base font-semibold">
+                {pct_range(@stream.hit_rate.with_in_flight_deduplication)}
+              </dd>
+            </dl>
+          </:value>
+          Share of {Format.number(@stream.hits.n + @stream.executed.n)} timed actions, by
+          count. Today: served from a cache. Perfect cache: if every finished result were
+          shared. A range is same commit to any commit.
+        </.tile>
+        <.tile id="tile-stream-executed" label="Executed" standing={:stream}>
+          <:value>{core(@stream.executed.core_ms)}</:value>
+          {Format.number(@stream.executed.n)} executions, {Format.duration(@stream.executed.ms)} wall; {Format.number(
+            @stream.hits.n
+          )} cache hits saved {Format.duration(@stream.hits.ms)}. {Format.number(@stream.untimed)} actions without times (not spawns) are not counted.
+        </.tile>
+        <.tile id="tile-stream-evidence" label="Across commits" standing={:stream}>
+          <:value>
+            <span :if={@stream.estimate && @stream.estimate.evidence.share}>
+              {pct(@stream.estimate.evidence.share.ms)} unchanged
+            </span>
+            <span :if={!(@stream.estimate && @stream.estimate.evidence.share)}>—</span>
+          </:value>
+          <span :if={@stream.estimate}>
+            Builds that read an earlier build's cache found {Format.number(
+              @stream.estimate.evidence.unchanged.n
+            )} actions unchanged across commits and re-ran {Format.number(
+              @stream.estimate.evidence.different.n
+            )} whose inputs had changed. The estimate applies that share, per kind of action,
+            to {Format.number(@stream.estimate.evidence.unknown.n)} repeats nothing else decides.
+          </span>
+          <span :if={!@stream.estimate} id="rbe-stream-no-estimate">
+            No build in this window read another commit's results from a cache, so nothing
+            says how much work changes between commits: no estimate, only the two bounds.
+          </span>
+        </.tile>
+      </div>
+
+      <.panel :if={@stream.mnemonics != []} id="panel-stream-mnemonics" title="By kind of action">
+        <:note>
+          Sorted by core time of duplicates at any commit. Where two values are shown they
+          are same commit – any commit. Cores are estimated: the project's cores per
+          mnemonic, else CPU time ÷ wall time of the kind in each build.
+        </:note>
+        <div class="overflow-x-auto">
+          <table class="w-full min-w-[44rem] text-sm">
+            <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/60">
+              <tr>
+                <th scope="col" class="py-1 font-medium">Mnemonic</th>
+                <th scope="col" class="py-1 pl-3 text-right font-medium">Executed</th>
+                <th scope="col" class="py-1 pl-3 text-right font-medium">Hits</th>
+                <th scope="col" class="py-1 pl-3 text-right font-medium">Wall</th>
+                <th scope="col" class="py-1 pl-3 text-right font-medium">Core time</th>
+                <th scope="col" class="py-1 pl-3 text-right font-medium">Cores</th>
+                <th
+                  scope="col"
+                  class="py-1 pl-3 text-right font-medium text-amber-700 dark:text-amber-400"
+                >
+                  Racing
+                </th>
+                <th
+                  scope="col"
+                  class="py-1 pl-3 text-right font-medium text-emerald-700 dark:text-emerald-400"
+                >
+                  Sequential
+                </th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-base-300/70 font-mono text-xs tabular-nums">
+              <tr
+                :for={m <- Enum.take(@stream.mnemonics, 25)}
+                id={"stream-mnemonic-#{slug(m.mnemonic)}"}
+                class="transition-colors hover:bg-base-200/50"
+              >
+                <td class="py-1.5 pr-2 break-all">{m.mnemonic}</td>
+                <td class="py-1.5 pl-3 text-right">{Format.number(m.executed.n)}</td>
+                <td class="py-1.5 pl-3 text-right">{Format.number(m.hits)}</td>
+                <td class="py-1.5 pl-3 text-right whitespace-nowrap">
+                  {Format.duration(m.executed.ms)}
+                </td>
+                <td class="py-1.5 pl-3 text-right whitespace-nowrap">
+                  {core_cell(m.executed.core_ms)}
+                </td>
+                <td class="py-1.5 pl-3 text-right" title={m.cores_source}>{cores(m.cores)}</td>
+                <td class="py-1.5 pl-3 text-right whitespace-nowrap">
+                  {core_range(m.same_commit.racing.core_ms, m.any_commit.racing.core_ms)}
+                </td>
+                <td class="py-1.5 pl-3 text-right whitespace-nowrap">
+                  {core_range(m.same_commit.sequential.core_ms, m.any_commit.sequential.core_ms)}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </.panel>
+
+      <.panel
+        :if={@stream.targets != []}
+        id="panel-stream-targets"
+        title="Targets that repeat the most work"
+      >
+        <:note>
+          Core time of duplicate executions, same commit – any commit (the top targets of
+          each hour, summed).
+        </:note>
+        <table class="w-full table-fixed text-sm">
+          <thead class="text-left text-[11px] uppercase tracking-wide text-base-content/60">
+            <tr>
+              <th scope="col" class="py-1 font-medium">Target</th>
+              <th
+                scope="col"
+                class="w-28 py-1 text-right font-medium text-amber-700 sm:w-40 dark:text-amber-400"
+              >
+                Racing
+              </th>
+              <th
+                scope="col"
+                class="w-28 py-1 text-right font-medium text-emerald-700 sm:w-40 dark:text-emerald-400"
+              >
+                Sequential
+              </th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-base-300/70 font-mono text-xs tabular-nums">
+            <tr
+              :for={{t, i} <- Enum.with_index(@stream.targets)}
+              id={"stream-target-#{i}"}
+              class="transition-colors hover:bg-base-200/50"
+            >
+              <td class="py-1.5 pr-2 break-all">
+                {t.target}
+                <span :if={@grouped?} class="font-sans text-base-content/60">{t.project}</span>
+              </td>
+              <td class="py-1.5 text-right align-top">
+                {core_range(t.same_commit.racing.core_ms, t.any_commit.racing.core_ms)}
+              </td>
+              <td class="py-1.5 text-right align-top">
+                {core_range(t.same_commit.sequential.core_ms, t.any_commit.sequential.core_ms)}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </.panel>
+    </div>
+    """
+  end
+
+  attr :id, :string, required: true
+  attr :label, :string, required: true
+  attr :claim, :string, required: true
+  attr :help, :string, required: true
+  attr :tone, :atom, required: true
+  attr :same, :map, required: true
+  attr :estimate, :map, default: nil
+  attr :any, :map, required: true
+  attr :days, :integer, required: true
+  attr :window_days, :integer, required: true
+  attr :range, :string, required: true
+
+  # A headline class from the event stream: the estimate when there is one (else the
+  # same-commit figure), large and per day, with the three figures it lies between.
+  defp stream_hero(assigns) do
+    settled? = assigns.same.core_ms == assigns.any.core_ms
+    shown = if assigns.estimate && not settled?, do: assigns.estimate, else: assigns.same
+    {number, unit} = core_parts(round(shown.core_ms / max(assigns.days, 1)))
+
+    kind =
+      cond do
+        settled? -> :settled
+        assigns.estimate -> :estimate
+        true -> :floor
+      end
+
+    assigns = assign(assigns, number: number, unit: unit, kind: kind, shown: shown)
+
+    ~H"""
+    <section
+      id={@id}
+      class={[
+        "rounded-lg border p-4 transition-shadow hover:shadow-sm sm:p-5",
+        @tone == :good && "border-emerald-500/40 bg-emerald-500/5",
+        @tone == :warn && "border-amber-500/40 bg-amber-500/5"
+      ]}
+    >
+      <div class="flex items-start justify-between gap-2">
+        <h2 class={[
+          "text-xs font-semibold uppercase tracking-wide",
+          @tone == :good && "text-emerald-700 dark:text-emerald-300",
+          @tone == :warn && "text-amber-700 dark:text-amber-300"
+        ]}>
+          {@label}
+        </h2>
+        <span
+          id={"#{@id}-kind"}
+          class="whitespace-nowrap rounded bg-base-300 px-1 py-px text-[10px] font-medium text-base-content/80"
+        >
+          {case @kind do
+            :settled -> "same at any commit"
+            :estimate -> "estimate"
+            :floor -> "at least"
+          end}
+        </span>
+      </div>
+      <p
+        class={[
+          "mt-2 flex flex-wrap items-baseline gap-x-2 font-semibold tabular-nums tracking-tight",
+          @tone == :good && "text-emerald-700 dark:text-emerald-400",
+          @tone == :warn && "text-amber-700 dark:text-amber-400"
+        ]}
+        title={"#{core_exact(@shown.core_ms)} in the window ÷ #{@days} days with per-action events"}
+      >
+        <span class="text-4xl leading-none sm:text-5xl" id={"#{@id}-value"}>{@number}</span>
+        <span class="text-base">{@unit} per day, estimated cores</span>
+      </p>
+      <p class="mt-1 text-xs text-base-content/70" id={"#{@id}-days"}>
+        {@days} of {@window_days} days have per-action events (UTC days the window touches)
+      </p>
+      <p class="mt-2 text-sm font-medium">{@claim}</p>
+      <p class="mt-1 text-xs leading-snug text-base-content/70">{@help}</p>
+      <dl class="mt-3 grid grid-cols-[minmax(0,1fr)_auto] gap-x-4 gap-y-1 border-t border-base-content/10 pt-3 text-xs">
+        <dt class="text-base-content/70">
+          Same commit <span class="text-base-content/50">· exact for identical inputs</span>
+        </dt>
+        <dd class="text-right font-mono tabular-nums" id={"#{@id}-same"}>
+          {core(@same.core_ms)}
+        </dd>
+        <dt class="text-base-content/70">
+          Estimate <span class="text-base-content/50">· across commits too</span>
+        </dt>
+        <dd class="text-right font-mono tabular-nums" id={"#{@id}-estimate"}>
+          {if @estimate, do: core(@estimate.core_ms), else: "—"}
+        </dd>
+        <dt class="text-base-content/70">
+          Any commit <span class="text-base-content/50">· upper bound</span>
+        </dt>
+        <dd class="text-right font-mono tabular-nums" id={"#{@id}-any"}>
+          {core(@any.core_ms)}
+        </dd>
+        <dt class="text-base-content/70">Executions, in the window (last {@range})</dt>
+        <dd class="text-right font-mono tabular-nums">
+          {count_range(@same.n, @any.n)} · {Format.duration(@same.ms)}{if @any.ms != @same.ms,
+            do: " – #{Format.duration(@any.ms)}"} wall
+        </dd>
+      </dl>
+    </section>
+    """
+  end
+
+  defp core_range(0, 0), do: "—"
+  defp core_range(same, same), do: core(same)
+  defp core_range(same, any), do: "#{core(same)} – #{core(any)}"
+
+  defp count_range(same, same), do: Format.number(same)
+  defp count_range(same, any), do: "#{Format.number(same)} – #{Format.number(any)}"
+
+  defp pct_range([same, same]), do: pct(same)
+  defp pct_range([same, any]), do: "#{pct(same)} – #{pct(any)}"
 
   attr :id, :string, required: true
   attr :title, :string, required: true
@@ -1512,15 +1899,17 @@ defmodule ConveyorWeb.RbeLive do
       class={[
         "whitespace-nowrap rounded px-1 py-px text-[10px] font-medium normal-case tracking-normal",
         @kind == :exact && "bg-emerald-500/10 text-emerald-800 dark:text-emerald-300",
-        @kind == :bound && "bg-base-300 text-base-content/80"
+        @kind in [:bound, :stream] && "bg-base-300 text-base-content/80"
       ]}
       title={
-        if(@kind == :exact,
-          do: "wall time and counts exact for builds with a log; core time is wall × cores",
-          else: "an upper bound, not a measurement of duplicates"
-        )
+        case @kind do
+          :exact -> "wall time and counts exact for builds with a log; core time is wall × cores"
+          :stream -> "from per-action events: wall time as sent, cores estimated"
+          :bound -> "an upper bound, not a measurement of duplicates"
+        end
       }
     >{cond do
+      @kind == :stream -> "event stream"
       @kind == :bound -> "bound"
       @short -> "exact"
       true -> "exact wall · cores as stated"
@@ -1528,7 +1917,17 @@ defmodule ConveyorWeb.RbeLive do
     """
   end
 
-  defp stream_source("both"), do: "execution logs, and the event stream for builds without one"
-  defp stream_source("execution_log"), do: "execution logs"
-  defp stream_source(_), do: "the event stream"
+  defp source_name("both"),
+    do: "execution logs, and the event stream for builds without a log"
+
+  defp source_name("execution_log"), do: "execution logs"
+  defp source_name("stream"), do: "the event stream"
+  defp source_name(_), do: "none yet"
+
+  defp share_text(_n, 0), do: ""
+  defp share_text(n, of), do: " (#{Format.percent(n, of)})"
+
+  # Whether the window has builds reported from their per-action events.
+  defp stream?(%{stream: %{builds: n}}) when n > 0, do: true
+  defp stream?(_report), do: false
 end

@@ -65,6 +65,7 @@ defmodule Conveyor.Ingest.Session do
       {:telemetry, event, measurements, metadata}
       {:log, level, message}
       {:finalized, invocation}        the build is final and references a fetchable profile
+      {:stream_finalized, id}         the build is final and sent per-action events
       :hibernate                      a quiet moment: compact the process
       {:stop, :normal}                the session is over
   """
@@ -131,6 +132,7 @@ defmodule Conveyor.Ingest.Session do
           | {:telemetry, [atom()], map(), map()}
           | {:log, Logger.level(), String.t()}
           | {:finalized, map()}
+          | {:stream_finalized, String.t()}
           | :hibernate
           | {:stop, :normal}
   @type result :: {t(), [effect()]}
@@ -604,6 +606,13 @@ defmodule Conveyor.Ingest.Session do
     fx =
       if s.norm.inv[:profile_status] == "referenced",
         do: [{:finalized, s.norm.inv} | fx],
+        else: fx
+
+    # A build that sent per-action events has its keys merged now, not at the next run of
+    # the rollup job (`Conveyor.Workers.StreamKeys`).
+    fx =
+      if (s.norm.inv[:stream_actions] || 0) > 0,
+        do: [{:stream_finalized, s.norm.inv[:id]} | fx],
         else: fx
 
     {%{s | finalized: true}, fx} |> mark_summary() |> arm_linger()

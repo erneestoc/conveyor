@@ -64,6 +64,10 @@ defmodule Conveyor.Rbe.Stream do
   def commit(tags) when is_map(tags), do: Enum.find_value(@commit_tags, &tags[&1])
   def commit(_), do: nil
 
+  @doc "The tag keys `commit/1` reads, in order."
+  @spec commit_tags() :: [String.t()]
+  def commit_tags, do: @commit_tags
+
   # --- keys ----------------------------------------------------------------------------------
 
   @doc "The same-commit key of a stream key: 8 bytes, never equal to a stream key by chance."
@@ -107,7 +111,8 @@ defmodule Conveyor.Rbe.Stream do
   """
   @spec merge_keys!(Invocation.t()) :: :ok
   def merge_keys!(%Invocation{id: id, project_id: project_id} = inv) do
-    scopes = project_id |> Projects.get_project!() |> Groups.scopes()
+    project = Projects.get_project!(project_id)
+    scopes = Groups.scopes(project)
 
     {:ok, :ok} =
       Conveyor.Ingest.Retry.with_backoff(
@@ -139,6 +144,11 @@ defmodule Conveyor.Rbe.Stream do
         end,
         label: "stream keys #{id}"
       )
+
+    # Merged for the first time after its hour's figures were final: later builds are
+    # matched against it, and it is in no hour's numbers. Counted, shown on the page.
+    if is_nil(inv.stream_keys_at) and inv.started_at != nil and frozen?(project, inv.started_at),
+      do: Settings.count_late_stream!(project_id)
 
     :ok
   end

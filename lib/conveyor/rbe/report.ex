@@ -72,6 +72,7 @@ defmodule Conveyor.Rbe.Report do
         stream(
           rbe["stream"],
           cores,
+          Map.get(settings, :late_stream_builds, 0),
           row.succeeded + row.failed + row.aborted,
           rows,
           visible,
@@ -135,9 +136,9 @@ defmodule Conveyor.Rbe.Report do
   # Two figures per class: against the key at the build's commit (a floor: duplicates at
   # one commit, exact) and against the key at any commit (a ceiling: every duplicate,
   # and actions whose inputs changed without changing their command line).
-  defp stream(nil, _cores, _builds, _rows, _visible, _names), do: nil
+  defp stream(nil, _cores, _late, _builds, _rows, _visible, _names), do: nil
 
-  defp stream(s, cores, builds, rows, visible, names) do
+  defp stream(s, cores, late, builds, rows, visible, names) do
     figure = fn space ->
       classes = s[space] || %{}
       cell = fn names -> names |> Enum.map(&total(classes[&1], cores)) |> add() end
@@ -170,7 +171,7 @@ defmodule Conveyor.Rbe.Report do
       pending_builds: s["pending"] || 0,
       logged_builds: s["logged"] || 0,
       # builds merged after their hour's figures were final (not in them)
-      late_builds: s["late"] || 0,
+      late_builds: late,
       # builds that sent per-action events, of the finished builds of the window
       coverage: %{builds: builds, with_events: s["events"] || 0},
       executed: any.executed,
