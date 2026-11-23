@@ -119,8 +119,15 @@ resource "aws_security_group" "nl_control" {
   }
 }
 
+# Builders reach NativeLink through the private zone below; the public address only serves
+# laptops in allow_cidrs. With nl_eip = false (the account's Elastic IP quota is shared with
+# another product and was full on 2026-11-22) the instance's own public address is used.
+locals {
+  nl_public_ip = !var.rbe_enabled ? null : (var.nl_eip ? aws_eip.nl[0].public_ip : aws_instance.nl_control[0].public_ip)
+}
+
 resource "aws_eip" "nl" {
-  count  = var.rbe_enabled ? 1 : 0
+  count  = var.rbe_enabled && var.nl_eip ? 1 : 0
   domain = "vpc"
 }
 
@@ -153,7 +160,7 @@ resource "aws_instance" "nl_control" {
   tags = { Name = "${var.name}-nl-control" }
 }
 resource "aws_eip_association" "nl" {
-  count         = var.rbe_enabled ? 1 : 0
+  count         = var.rbe_enabled && var.nl_eip ? 1 : 0
   instance_id   = aws_instance.nl_control[0].id
   allocation_id = aws_eip.nl[0].id
 }
@@ -163,7 +170,7 @@ resource "aws_route53_record" "rbe" {
   name    = var.rbe_host
   type    = "A"
   ttl     = 60
-  records = [aws_eip.nl[0].public_ip]
+  records = [local.nl_public_ip]
 }
 resource "aws_route53_record" "cache" {
   count   = var.rbe_enabled ? 1 : 0
@@ -171,7 +178,7 @@ resource "aws_route53_record" "cache" {
   name    = var.cache_host
   type    = "A"
   ttl     = 60
-  records = [aws_eip.nl[0].public_ip]
+  records = [local.nl_public_ip]
 }
 
 resource "aws_launch_template" "nl_worker" {

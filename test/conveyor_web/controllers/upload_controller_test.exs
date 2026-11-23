@@ -29,6 +29,23 @@ defmodule ConveyorWeb.UploadControllerTest do
     Enum.reduce(headers, conn, fn {k, v}, c -> put_req_header(c, k, v) end) |> put(path, body)
   end
 
+  test "the response is sent on the conn that read the body", %{
+    conn: conn,
+    id: id,
+    upload_key: key
+  } do
+    # A server that is answered on the conn from before the body was read takes the body
+    # for unread and reads the connection again after the response: the next request on a
+    # kept-alive connection (a reverse proxy's upstream) is corrupted or times out.
+    body = :crypto.strong_rand_bytes(300_000)
+
+    conn =
+      put_raw(conn, ~p"/api/v1/invocations/#{id}/artifacts/big.bin", body, [{"x-api-key", key}])
+
+    assert json_response(conn, 201)["size"] == 300_000
+    assert {:ok, "", _} = Plug.Conn.read_body(conn)
+  end
+
   test "authentication and scopes", %{conn: conn, id: id, upload_key: key, ingest_key: ingest_key} do
     path = ~p"/api/v1/invocations/#{id}/artifacts/notes.txt"
 

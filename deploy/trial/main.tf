@@ -53,6 +53,10 @@ variable "rbe_enabled" { default = false }
 variable "nl_control_type" { default = "c6i.xlarge" }
 variable "nl_worker_type" { default = "c6i.2xlarge" }
 variable "nl_workers" { default = 0 }
+variable "nl_eip" {
+  description = "Give the NativeLink control instance an Elastic IP (false: its own public address; builders use the private zone either way)."
+  default     = true
+}
 variable "nl_cas_gb" { default = 200 }
 variable "allow_cidrs" {
   description = "Extra CIDRs allowed to reach NativeLink's ports (a laptop, for example)."

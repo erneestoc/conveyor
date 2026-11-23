@@ -25,6 +25,7 @@ defmodule ConveyorWeb.UploadController do
     with {:ok, inv} <- owned_invocation(id, key),
          :ok <- valid_name(name),
          {:ok, blob} <- store_body(conn, name),
+         conn = body_read(conn),
          {:ok, artifact} <- Artifacts.attach(inv, name, blob, "upload") do
       if Artifacts.profile_name?(name), do: Artifacts.profile_available(inv, blob, name)
       if Conveyor.ExecLog.name?(name), do: Conveyor.ExecLog.available(inv, blob)
@@ -60,6 +61,7 @@ defmodule ConveyorWeb.UploadController do
     with {:ok, uuid} <- cast_uuid(id),
          :ok <- not_already_finished(uuid, key),
          {:ok, body} <- read_all(conn),
+         conn = body_read(conn),
          {:ok, events} <- decode_events(body),
          :ok <- ids_match(uuid, events),
          {:ok, count} <- ingest(key, uuid, events) do
@@ -114,8 +116,19 @@ defmodule ConveyorWeb.UploadController do
   end
 
   # Streams the request body in chunks, enforcing the configured size limit.
+  #
+  # Every `read_body/2` returns a new conn whose adapter state says how much of the body
+  # has been read. The response must be sent on the last one (`body_read/1`): answering on
+  # the conn from before the reads makes the server believe the body is still unread, so
+  # after the response it reads the connection again to discard it and swallows the start
+  # of the next request, or waits for its read timeout. Behind a proxy that keeps upstream
+  # connections alive every second upload then failed (400 or a 15 s timeout and a 502;
+  # found by the RBE pilot's execution-log uploads through Caddy on 2026-11-23).
+  @body_conn {__MODULE__, :body_conn}
+
   defp body_stream(conn) do
     max = Artifacts.config(:max_bytes, 512 * 1024 * 1024)
+    Process.put(@body_conn, conn)
 
     Stream.resource(
       fn -> {conn, 0} end,
@@ -125,14 +138,24 @@ defmodule ConveyorWeb.UploadController do
 
         {conn, total} ->
           case read_body(conn, length: 1_000_000, read_length: 256 * 1024) do
-            {:ok, data, _conn} -> check_size(data, total, max, :done)
-            {:more, data, conn} -> check_size(data, total, max, conn)
-            {:error, reason} -> throw({:body_error, reason})
+            {:ok, data, conn} ->
+              Process.put(@body_conn, conn)
+              check_size(data, total, max, :done)
+
+            {:more, data, conn} ->
+              Process.put(@body_conn, conn)
+              check_size(data, total, max, conn)
+
+            {:error, reason} ->
+              throw({:body_error, reason})
           end
       end,
       fn _ -> :ok end
     )
   end
+
+  # The conn after the body stream was consumed (the given one when nothing was read).
+  defp body_read(conn), do: Process.delete(@body_conn) || conn
 
   defp check_size(data, total, max, next) do
     if total + byte_size(data) > max,
