@@ -1165,6 +1165,15 @@ defmodule ConveyorWeb.InvocationLive do
         The uploaded execution log could not be parsed (is it a <code class="font-mono">--execution_log_compact_file</code>?).
       </p>
       <div :if={@exec_log}>
+        <p
+          :if={not @exec_log.inputs_kept?}
+          id="exec-log-inputs-not-kept"
+          class="mb-2 text-xs text-base-content/70"
+        >
+          Input lists are not kept for this project (its duplicate-work settings keep only
+          what the metrics need): an action whose inputs changed is marked, which inputs
+          changed is not available.
+        </p>
         <p id="exec-log-summary" class="mb-2 text-xs text-base-content/70">
           {length(@exec_log.rows)} spawns:
           <span
@@ -1266,6 +1275,8 @@ defmodule ConveyorWeb.InvocationLive do
   defp reason_summary(:no_previous), do: "ran (nothing to compare with)"
 
   defp reason_label(%{reason: :cache_hit}), do: "cache hit"
+
+  defp reason_label(%{reason: :inputs_changed, inputs_kept?: false}), do: "inputs changed"
 
   defp reason_label(%{reason: :inputs_changed} = r),
     do: "#{length(r.changed) + length(r.added) + length(r.removed)} inputs changed"

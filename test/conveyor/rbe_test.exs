@@ -577,7 +577,10 @@ defmodule Conveyor.RbeTest do
                cores: %{},
                pipeline_key: "pipeline",
                tolerance_s: 5,
-               cores_property: Cores.default_property()
+               cores_property: Cores.default_property(),
+               analysis_only: false,
+               row_days: 3,
+               late_logs: 0
              }
 
       store!(build!(p, 0, %{tags: %{"pipeline" => "run-1"}}))

@@ -2460,3 +2460,98 @@ figure. Cores were all "measured" (no exec properties in these builds).
 
 Lessons: API keys need the `upload` scope; coverage (logs / builds) must be read with
 the numbers.
+
+### 27.11 Addendum (2026-11-23): keep only what the metrics need
+
+The owner wants the analysis cheap to store. A project setting
+(`settings["rbe"]["analysis_only"]`, `row_days` 1..30, default 3; the page's settings,
+audited as `project.rbe_settings`; off by default), read when a log is parsed and by
+retention:
+
+- **Not stored:** input lists (`spawn_inputs`; `ExecLog.parse(analysis_only: true)`
+  returns no `inputs_list`, `store!` inserts no list) and `spawns.outputs`. Still
+  computed and stored: `inputs_digest` (fallback key), `outputs_digest` (non-determinism),
+  `primary_output` (near misses). Dropping `outputs` is the only narrowing of the row
+  that needs no schema change; the other columns the page does not read (`runner`,
+  `status`, the six phase times, `input_files`, `input_bytes`, `output_bytes`) are
+  fixed-width or short and stay.
+- **Deleted once parsed:** the uploaded log, by `Artifacts.delete/2`: the artifact row,
+  then `Blobs.discard/2` (the checked delete of `docs/spec/Blobs.tla`: under the blob's
+  row lock, only when nothing pins or references it). A crash in between leaves an
+  unreferenced blob for orphan pruning; a failed parse retries with the log still there.
+  `Reread` finds no log; the button is disabled with the reason.
+- **Rows for `row_days`:** `ExecLog.retention_days/1` is `min(row_days, the
+  execution-log retention)` for such a project. **Keys keep the execution-log
+  retention** (`ExecLog.key_retention_cutoff/2`, + 2 days as before; a group: its
+  longest-keeping member), so a build is matched against a first execution whose rows
+  are gone.
+
+**The freeze rule, for every project.** `Rollup.freeze_spawn_sums` kept an hour's stored
+spawn sums once the whole hour was older than the cutoff. An hour that straddled the
+cutoff could be rolled again from the builds that still had rows; with 30 days nobody
+noticed, with 3 it matters. Now (`ExecLog.frozen?/2`): an hour is frozen from
+`hour + days − 1 h`, one hour before retention can delete its first build's rows (a roll
+takes seconds; retention deletes builds that started before `now − days`), **or** when
+one of its builds is `expired` (the days were shortened and lengthened again: rows do
+not come back). `Workers.Rollup` (every 5 minutes) checks the whole row window of
+analysis-only projects, not only two days, so what an hour holds when it freezes
+includes every log parsed up to one run before.
+
+**Inexactness, stated.** Exact for logs parsed before their hour froze. A late log is
+merged into the keys (so unfrozen hours are classed against it), is in no number itself,
+and cannot move the class of an execution in a frozen hour. Duplicate time is
+under-counted by at most the executed time of late logs plus one execution's time per
+key whose first execution a late log takes over. `settings["rbe"]["late_logs"]` counts
+them (one atomic `jsonb_set`; shown in the settings panel). An hour never rolled before
+it froze has no stored sums to keep and is computed once from what is there.
+
+**Checked.** `test/conveyor/rbe_analysis_only_test.exs`: the golden numbers are those of
+a project that keeps everything; retention with the clock moved
+(`:retention_clock_offset_s`, `ExecLog.now/0`) leaves numbers and keys, a later build
+is sequential after first executions whose rows are gone; and a property over random
+orders of {parse a build's log, read, hours pass, retention} for four builds over three
+hours with one day of rows: an unfrozen hour holds exactly the logs parsed for it while
+unfrozen, a frozen hour holds its last summary before the freeze whatever happens
+after, and without a late log the window has one first execution per action.
+
+**Mixed groups.** The mode is per project. Group keys follow the longest execution-log
+retention among members; each member's hours freeze by its own days; a late log of any
+member is matched by all members' later builds; an execution in a frozen hour of an
+analysis-only member keeps its class where a full member's would be classed again.
+
+**Measured** (`bench/rbe_scale.sh --projects 60 --builds 600`, with and without
+`ANALYSIS_ONLY=1`; 909,008 spawns; one node; laptop, load average 5; disk did not allow
+360 × 2,000; `bench/results/rbe_scale-dw-{full,lean}-60.json`). The bench gained an
+"after retention" phase: the rollup job's refresh, the retention job with the clock
+moved four days, `VACUUM FULL`, and the group's figures compared again.
+
+| per build (1,515 spawns) | default | analysis only | |
+|---|---|---|---|
+| `spawns` (heap + indexes) | 1,243 KB (820 B per spawn) | 921 KB (608 B per spawn) | 1.35× |
+| `spawn_inputs` | 1,061 KB as written (196 KB after `VACUUM FULL`) | 0 | |
+| `action_keys` | 82 KB | 83 KB | 1× |
+| uploaded log (blob store) | 1,312 KB, kept with the build | 0 once parsed | |
+| write-ahead log | 3.50 MB | 1.61 MB | 2.2× |
+| stored while the rows live (tables + log) | 3.70 MB | 1.00 MB | 3.7× |
+| parse job, p50 / p99 | 159 / 699 ms | 141 / 616 ms | |
+| logs per minute, one node | 527 | 606 | |
+| after the row retention has passed | rows stay 30 days | `spawns` 0, `spawn_inputs` 0; 71 KB of keys and 10 KB of hourly rows remain | |
+| exactness, before and after retention | 30 of 30 figures, group 5 of 5 | 30 of 30, group 5 of 5 | |
+
+Steady state per build a day, from these figures (computed, not run for 30 days; rows
+of the default for 30 days, of the mode for up to 4 because retention runs daily, keys
+32 days, hourly rows and the default's uploaded logs for the 90 days of build
+retention): database 44 MB against 6.8 MB, **6.5 times** less with compacted tables
+(72 MB against 6.8 MB, 10.6 times, with `spawn_inputs` as written); database and
+uploaded logs together 162 MB against 6.8 MB, **24 times** less. The whole bench
+database after the retention job with the clock moved four days and `VACUUM FULL`:
+884 MB (nothing expired) against 62 MB.
+
+The `spawns` row is 26 % smaller only through `outputs`; the rest of the reduction is
+the lists, the log and the days. A first after-retention run did **not** match: the
+bench's read phase deletes stored hours to time cold pages and a project's page computes
+its last two hours without storing them, so ten project-hours had no stored row when
+their rows expired and were then computed from nothing. That is the stated limit (an
+hour never summarized before it froze); the 5-minute rollup job closes it in
+production and the bench now runs the same refresh before retention. Not measured: a
+real 30 days; `spawns` after `VACUUM FULL` in the mode; a networked database.

@@ -259,10 +259,17 @@ defmodule Conveyor.Metrics.Rollup do
   # the spawns existed) instead of recomputing them as zero.
   @spawn_fields [:spawns, :spawn_mnemonics, :spawn_misses, :remote_sent, :remote_fetched, :rbe]
 
+  #
+  # An hour is never computed from part of its rows. It is frozen (1) from one hour
+  # before its first build can expire: retention deletes builds that started before
+  # `now - days`, so every build of an hour that is still computed has at least an hour
+  # left, more than a roll takes; and (2) whenever one of its builds is marked `expired`,
+  # which covers a retention that was shortened and lengthened again (rows that are gone
+  # do not come back with the setting).
   defp freeze_spawn_sums(%Row{} = row, project_id, hour) do
-    cutoff = Conveyor.ExecLog.retention_cutoff(project_id)
+    hour = to_utc(hour)
 
-    if DateTime.compare(DateTime.add(hour, 3600, :second), cutoff) == :lt do
+    if Conveyor.ExecLog.frozen?(project_id, hour) or expired_build?(project_id, hour) do
       case Repo.get_by(Row, project_id: project_id, hour: hour) do
         nil -> row
         existing -> Map.merge(row, Map.take(existing, @spawn_fields))
@@ -272,12 +279,25 @@ defmodule Conveyor.Metrics.Rollup do
     end
   end
 
+  defp expired_build?(project_id, hour) do
+    Repo.exists?(
+      from i in Invocation,
+        where: i.project_id == ^project_id and i.exec_log_status == "expired",
+        where: i.started_at >= ^hour and i.started_at < ^DateTime.add(hour, 3600, :second)
+    )
+  end
+
   @doc """
   Rolls every (project, hour) with a build started since `since` whose row is missing or
-  older than the build's last change. Returns the number of rows written.
+  older than the build's last change (of the given projects only, when given). Returns
+  the number of rows written.
   """
-  @spec refresh!(DateTime.t()) :: non_neg_integer()
-  def refresh!(since), do: repair!(& &1, since, nil)
+  @spec refresh!(DateTime.t(), [integer()] | nil) :: non_neg_integer()
+  def refresh!(since, project_ids \\ nil)
+  def refresh!(since, nil), do: repair!(& &1, since, nil)
+
+  def refresh!(since, project_ids) when is_list(project_ids),
+    do: repair!(&where(&1, [i], i.project_id in ^project_ids), since, nil)
 
   # Rolls the stale hours among the invocations `filter` selects in `[from, to)`; the read
   # path calls this so a window is exact even before the job has seen its hours.

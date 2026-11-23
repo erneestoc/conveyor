@@ -22,7 +22,7 @@ defmodule Conveyor.Workers.BuildRetention do
   @impl Oban.Worker
   def perform(%Oban.Job{}) do
     default_days = Application.get_env(:conveyor, :retention_days, 90)
-    now = DateTime.utc_now()
+    now = ExecLog.now()
 
     per_project =
       for project <- Projects.list_projects(include_archived: true) do
@@ -60,7 +60,9 @@ defmodule Conveyor.Workers.BuildRetention do
     alias Conveyor.Rbe.Groups
 
     projects = Projects.list_projects(include_archived: true)
-    cutoff = fn project -> DateTime.add(ExecLog.retention_cutoff(project, now), -2, :day) end
+    # By the execution-log retention, not by how long the spawn rows are kept: an
+    # analysis-only project drops rows after days and keeps its keys (PLAN §27.11).
+    cutoff = fn project -> DateTime.add(ExecLog.key_retention_cutoff(project, now), -2, :day) end
     own = projects |> Enum.map(&Keys.prune!(&1.id, cutoff.(&1))) |> Enum.sum()
 
     grouped =

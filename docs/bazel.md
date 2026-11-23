@@ -87,6 +87,12 @@ it needs the execution log of **every build of a pipeline run** (all shards, all
 not of a sample of builds. Sample by pipeline: enable it for all jobs of, say, one
 pipeline in ten, or of the main branch.
 
+Projects that upload logs only for this report can keep less of each one: the page's
+setting "Keep only what the duplicate-work metrics need" stores no input lists, deletes
+the uploaded log once it is parsed and keeps per-spawn rows for a few days
+([what it gives up](duplicate-work.md#keeping-only-what-the-metrics-need)). Upload each
+log within those days of its build's start: a log parsed later is not counted.
+
 ```
 # .bazelrc of the CI jobs
 build --execution_log_compact_file=/tmp/exec.log.zst

@@ -54,6 +54,13 @@ defmodule RbeScale do
           elem(Projects.create_project(%{slug: slug, name: "App #{i}"}), 1)
 
       {:ok, project} = Groups.put(project, @group)
+
+      # ANALYSIS_ONLY=1: "Keep only what the duplicate-work metrics need" (PLAN §27.11).
+      {:ok, project} =
+        if System.get_env("ANALYSIS_ONLY") == "1",
+          do: Conveyor.Rbe.Settings.put(project, %{"analysis_only" => "true"}),
+          else: {:ok, project}
+
       {:ok, _key, plaintext} = Projects.create_api_key(project, %{name: "bench", scopes: ["upload"]})
       %{id: project.id, slug: slug, key: plaintext, index: i}
     end
@@ -547,7 +554,11 @@ load = %{
   bytes_per_build: Map.new(~w(spawns spawn_inputs action_keys exec_properties), &{&1, per_build.(&1)}),
   rows: Map.new(sizes1, fn {t, s} -> {t, s.rows} end),
   spawns_per_build: div(spawn_count, length(builds)),
-  log_bytes_per_build: div(Enum.sum(log_bytes), length(builds))
+  log_bytes_per_build: div(Enum.sum(log_bytes), length(builds)),
+  # what is still stored of the uploaded logs once every one is parsed
+  blob_bytes_per_build: div(hd(hd(RbeScale.q("SELECT coalesce(sum(size), 0)::bigint FROM blobs"))), length(builds)),
+  database_bytes: hd(hd(RbeScale.q("SELECT pg_database_size(current_database())"))),
+  analysis_only: System.get_env("ANALYSIS_ONLY") == "1"
 }
 
 IO.inspect(load, label: "load", limit: :infinity)
@@ -619,6 +630,44 @@ end
 exact? = Enum.all?(checks, fn {_, rows} -> Enum.all?(rows, & &1.ok) end)
 IO.puts(if exact?, do: "RESULT: exact", else: "RESULT: MISMATCH")
 
+# --- after the row retention ---------------------------------------------------------------------
+# RETAIN_AFTER_DAYS (default 4) later by the retention clock: the retention job runs in
+# this process, the tables it emptied are rewritten (VACUUM FULL: the size a table settles
+# at when the space of expired rows is reused, not what a plain vacuum returns to the
+# operating system), and the same figures are compared again: they must not have moved.
+# First what the rollup job does every five minutes: the read phase above deleted stored
+# hours to time cold pages, and a project's page computes its last two hours without
+# storing them; an hour must be stored before its rows expire (PLAN §27.11).
+Conveyor.Metrics.Rollup.refresh!(DateTime.add(DateTime.utc_now(), -2, :day))
+days_later = RbeScale.env("RETAIN_AFTER_DAYS", 4)
+Application.put_env(:conveyor, :retention_clock_offset_s, days_later * 86_400)
+{retention_us, {:ok, retention}} = :timer.tc(fn -> Conveyor.Workers.BuildRetention.perform(%Oban.Job{args: %{}}) end)
+Application.delete_env(:conveyor, :retention_clock_offset_s)
+for table <- ~w(spawns spawn_inputs action_keys invocation_rollups), do: RbeScale.q("VACUUM FULL #{table}")
+sizes2 = RbeScale.sizes()
+{_, group_after} = RbeScale.get_json("#{node}/groups/rbe-scale/duplicate-work/json?range=24h")
+
+checks_after =
+  RbeScale.compare(group_after["report"], RbeScale.sum_classes(expected, member_ids), expected.hits |> Map.values() |> Enum.sum())
+
+exact_after? = Enum.all?(checks_after, & &1.ok)
+
+after_retention = %{
+  days_later: days_later,
+  seconds: Float.round(retention_us / 1_000_000, 1),
+  builds_expired: retention.projects |> Map.values() |> Enum.map(& &1.expired) |> Enum.sum(),
+  pruned_inputs: retention.pruned_inputs,
+  pruned_keys: retention.pruned_keys,
+  rows: Map.new(sizes2, fn {t, s} -> {t, s.rows} end),
+  bytes_per_build: Map.new(~w(spawns spawn_inputs action_keys invocation_rollups), &{&1, div(sizes2[&1].bytes, length(builds))}),
+  database_bytes: hd(hd(RbeScale.q("SELECT pg_database_size(current_database())"))),
+  exact: exact_after?,
+  checks: checks_after
+}
+
+IO.inspect(after_retention, label: "after retention", limit: :infinity)
+IO.puts(if exact_after?, do: "RESULT after retention: exact", else: "RESULT after retention: MISMATCH")
+
 File.mkdir_p!("bench/results")
 out = "bench/results/rbe_scale-#{label}.json"
 
@@ -635,6 +684,7 @@ File.write!(
       model: Map.delete(opts, :now),
       load: load,
       read: read,
+      after_retention: after_retention,
       exact: exact?,
       checks: Map.new(checks),
       top_statements: top,

@@ -1,0 +1,712 @@
+{
+  "label": "dw-full-60",
+  "nodes": 1,
+  "at": "2026-11-23T16:49:41.659813Z",
+  "read": {
+    "project_hours": 391,
+    "roll_hour_ms_p50": 57,
+    "roll_hour_ms_max": 720,
+    "group_page_cold_ms": 3323,
+    "group_page_warm_ms": 66,
+    "project_page_cold_ms": 232,
+    "project_page_warm_ms": 66,
+    "group_json_bytes": 257807
+  },
+  "load": {
+    "seconds": 68.37,
+    "rows": {
+      "action_keys": 189653,
+      "exec_properties": 120,
+      "invocation_rollups": 0,
+      "oban_jobs": 600,
+      "spawn_inputs": 123684,
+      "spawns": 909008
+    },
+    "pg_cpu_seconds": 23.4,
+    "samples": 136,
+    "jobs": {
+      "completed": 600
+    },
+    "upload_seconds": 18.28,
+    "logs_per_min": 526.5,
+    "spawns_per_s": 13295,
+    "parse_ms_p50": 159,
+    "parse_ms_p99": 699,
+    "parse_ms_max": 836,
+    "retried_jobs": 0,
+    "job_errors": 0,
+    "pg_exec_seconds": 18.0,
+    "deadlocks": 0,
+    "commits": 14799,
+    "rollbacks": 0,
+    "lock_wait_samples": 0,
+    "max_backends_waiting": 0,
+    "longest_lock_wait_s": 0.0,
+    "wal_bytes_per_build": 3498990,
+    "bytes_per_build": {
+      "action_keys": 82356,
+      "exec_properties": 27,
+      "spawn_inputs": 1061369,
+      "spawns": 1243026
+    },
+    "spawns_per_build": 1515,
+    "log_bytes_per_build": 1311720,
+    "blob_bytes_per_build": 1311720,
+    "database_bytes": 1444787891,
+    "analysis_only": false
+  },
+  "exact": true,
+  "projects": 60,
+  "builds": 600,
+  "spawns": 909008,
+  "checks": {
+    "app-004": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          6336,
+          10051649,
+          11193680
+        ],
+        "got": [
+          6336,
+          10051649,
+          11193680
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          645,
+          918457,
+          918457
+        ],
+        "got": [
+          645,
+          918457,
+          918457
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          1,
+          2649,
+          2649
+        ],
+        "got": [
+          1,
+          2649,
+          2649
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          1,
+          2649,
+          2649
+        ],
+        "got": [
+          1,
+          2649,
+          2649
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          656,
+          0,
+          0
+        ],
+        "got": [
+          656,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-015": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          29274,
+          45968789,
+          49523898
+        ],
+        "got": [
+          29274,
+          45968789,
+          49523898
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          2878,
+          3871455,
+          3871455
+        ],
+        "got": [
+          2878,
+          3871455,
+          3871455
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          1,
+          1910,
+          1910
+        ],
+        "got": [
+          1,
+          1910,
+          1910
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          1,
+          1910,
+          1910
+        ],
+        "got": [
+          1,
+          1910,
+          1910
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          3715,
+          0,
+          0
+        ],
+        "got": [
+          3715,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-025": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          19356,
+          31156874,
+          32919149
+        ],
+        "got": [
+          19356,
+          31156874,
+          32919149
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          1404,
+          1926638,
+          1926638
+        ],
+        "got": [
+          1404,
+          1926638,
+          1926638
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          2,
+          2686,
+          2686
+        ],
+        "got": [
+          2,
+          2686,
+          2686
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          2,
+          2686,
+          2686
+        ],
+        "got": [
+          2,
+          2686,
+          2686
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          1304,
+          0,
+          0
+        ],
+        "got": [
+          1304,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-048": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          13781,
+          21899984,
+          23404984
+        ],
+        "got": [
+          13781,
+          21899984,
+          23404984
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          726,
+          931980,
+          931980
+        ],
+        "got": [
+          726,
+          931980,
+          931980
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          19,
+          70311,
+          70311
+        ],
+        "got": [
+          19,
+          70311,
+          70311
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          19,
+          70311,
+          70311
+        ],
+        "got": [
+          19,
+          70311,
+          70311
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          1206,
+          0,
+          0
+        ],
+        "got": [
+          1206,
+          0,
+          0
+        ]
+      }
+    ],
+    "app-060": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          19176,
+          30551394,
+          32842709
+        ],
+        "got": [
+          19176,
+          30551394,
+          32842709
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          1701,
+          2316191,
+          2316191
+        ],
+        "got": [
+          1701,
+          2316191,
+          2316191
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          4,
+          6715,
+          6715
+        ],
+        "got": [
+          4,
+          6715,
+          6715
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          4,
+          6715,
+          6715
+        ],
+        "got": [
+          4,
+          6715,
+          6715
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          850,
+          0,
+          0
+        ],
+        "got": [
+          850,
+          0,
+          0
+        ]
+      }
+    ],
+    "group": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          697585,
+          1094101409,
+          1176046002
+        ],
+        "got": [
+          697585,
+          1094101409,
+          1176046002
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          57150,
+          77193294,
+          77193294
+        ],
+        "got": [
+          57150,
+          77193294,
+          77193294
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          401,
+          1698369,
+          1698369
+        ],
+        "got": [
+          401,
+          1698369,
+          1698369
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          401,
+          1698369,
+          1698369
+        ],
+        "got": [
+          401,
+          1698369,
+          1698369
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          87579,
+          0,
+          0
+        ],
+        "got": [
+          87579,
+          0,
+          0
+        ]
+      }
+    ]
+  },
+  "after_retention": {
+    "seconds": 0.4,
+    "rows": {
+      "action_keys": 189653,
+      "exec_properties": 120,
+      "invocation_rollups": 391,
+      "oban_jobs": 600,
+      "spawn_inputs": 123684,
+      "spawns": 909008
+    },
+    "exact": true,
+    "bytes_per_build": {
+      "action_keys": 71311,
+      "invocation_rollups": 9570,
+      "spawn_inputs": 195775,
+      "spawns": 1175579
+    },
+    "database_bytes": 884283059,
+    "checks": [
+      {
+        "name": "sequential, within the project",
+        "ok": true,
+        "expected": [
+          697585,
+          1094101409,
+          1176046002
+        ],
+        "got": [
+          697585,
+          1094101409,
+          1176046002
+        ]
+      },
+      {
+        "name": "sequential, across projects",
+        "ok": true,
+        "expected": [
+          57150,
+          77193294,
+          77193294
+        ],
+        "got": [
+          57150,
+          77193294,
+          77193294
+        ]
+      },
+      {
+        "name": "racing (all)",
+        "ok": true,
+        "expected": [
+          401,
+          1698369,
+          1698369
+        ],
+        "got": [
+          401,
+          1698369,
+          1698369
+        ]
+      },
+      {
+        "name": "racing, across projects",
+        "ok": true,
+        "expected": [
+          401,
+          1698369,
+          1698369
+        ],
+        "got": [
+          401,
+          1698369,
+          1698369
+        ]
+      },
+      {
+        "name": "cache hits",
+        "ok": true,
+        "expected": [
+          87579,
+          0,
+          0
+        ],
+        "got": [
+          87579,
+          0,
+          0
+        ]
+      }
+    ],
+    "days_later": 4,
+    "builds_expired": 0,
+    "pruned_inputs": 0,
+    "pruned_keys": 0
+  },
+  "model": {
+    "hours": 6,
+    "shared_pool": 12000,
+    "spawns_min": 500,
+    "spawns_max": 4000,
+    "share_min": 0.6,
+    "share_max": 0.8,
+    "wave": 50
+  },
+  "top_statements": [
+    [
+      "INSERT INTO \"spawns\" (\"status\",\"started_at\",\"runner\",\"exit_code\",\"outputs\",\"inserted_at\",\"queue_ms\",\"invocatio",
+      8795,
+      8735,
+      0.99
+    ],
+    [
+      "INSERT INTO \"spawn_inputs\" AS s0 (\"digest\",\"blob\",\"project_id\",\"touched_at\") VALUES ($1,$2,$3,$4),($5,$6,$7,$8",
+      8795,
+      4693,
+      0.53
+    ],
+    [
+      "SELECT a0.\"scope\", a0.\"key\", a0.\"first_finish\", a0.\"first_start\", a0.\"first_invocation_id\", a0.\"first_ordinal\"",
+      1200,
+      1476,
+      1.23
+    ],
+    [
+      "INSERT INTO action_keys AS k (scope, key, first_finish, first_start, first_invocation_id, first_ordinal, last_",
+      1200,
+      779,
+      0.65
+    ],
+    [
+      "SELECT DISTINCT s0.\"invocation_id\" FROM \"spawns\" AS s0 WHERE (s0.\"action_key\" = ANY($1))",
+      679,
+      690,
+      1.02
+    ],
+    [
+      "SELECT $2 FROM ONLY \"public\".\"invocations\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+      909608,
+      531,
+      0.0
+    ],
+    [
+      "SELECT $2 FROM ONLY \"public\".\"projects\" x WHERE \"id\" OPERATOR(pg_catalog.=) $1 FOR KEY SHARE OF x",
+      125604,
+      114,
+      0.0
+    ],
+    [
+      "SELECT a0.\"key\" FROM \"action_keys\" AS a0 WHERE ((a0.\"scope\" = $1) AND a0.\"key\" = ANY($2)) ORDER BY a0.\"key\" FO",
+      679,
+      99,
+      0.15
+    ],
+    [
+      "SELECT o0.\"id\", o0.\"state\", o0.\"queue\", o0.\"worker\", o0.\"args\", o0.\"meta\", o0.\"tags\", o0.\"errors\", o0.\"attempt",
+      600,
+      52,
+      0.09
+    ],
+    [
+      "UPDATE \"invocations\" AS i0 SET \"updated_at\" = $1 WHERE (i0.\"id\" IN (SELECT si0.\"id\" FROM \"invocations\" AS si0 ",
+      600,
+      52,
+      0.09
+    ],
+    [
+      "INSERT INTO \"invocation_artifacts\" (\"name\",\"size\",\"source\",\"digest\",\"inserted_at\",\"content_type\",\"invocation_i",
+      600,
+      31,
+      0.05
+    ],
+    [
+      "WITH \"subset\" AS (SELECT so0.\"id\" AS \"id\" FROM \"public\".\"oban_jobs\" AS so0 WHERE (so0.\"state\" = $7) AND (so0.\"",
+      579,
+      30,
+      0.05
+    ]
+  ],
+  "cold_page_statements": [
+    [
+      "SELECT s0.\"project_id\", s0.\"mnemonic\", s0.\"class\", s0.\"source\", s0.\"key_source\", s0.\"local\", s0.\"band\", s0.\"fr",
+      391,
+      4857,
+      12.42
+    ],
+    [
+      "SELECT s0.\"project_id\", s0.\"target_label\", s0.\"mnemonic\", s0.\"class\", count(*), sum(s0.\"ms\"), sum(s0.\"ms\"::big",
+      391,
+      3236,
+      8.28
+    ],
+    [
+      "SELECT s0.\"mnemonic\", count(s0.\"id\"), count(*) FILTER (WHERE s0.\"cache_hit\") FROM \"spawns\" AS s0 INNER JOIN (S",
+      391,
+      451,
+      1.15
+    ],
+    [
+      "SELECT s0.\"target_label\", count(s0.\"id\") FROM \"spawns\" AS s0 INNER JOIN (SELECT si0.\"id\" AS \"id\", si0.\"project",
+      391,
+      264,
+      0.68
+    ],
+    [
+      "SELECT count(*), sum(s1.\"ms\"), sum(s0.\"critical_path_ms\"), sum(s0.\"execution_ms\"), count(s0.\"critical_path_ms\"",
+      391,
+      209,
+      0.53
+    ],
+    [
+      "INSERT INTO \"invocation_rollups\" (\"running\",\"other\",\"failed\",\"aborted\",\"hour\",\"succeeded\",\"builds\",\"updated_at",
+      391,
+      188,
+      0.48
+    ]
+  ]
+}

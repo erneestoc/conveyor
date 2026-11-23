@@ -257,6 +257,94 @@ expire (`RETENTION_SPAWN_DAYS`, 30) and 0.5 s of one parse worker; 360 apps at 5
 a day are 87 GB a day. The hourly numbers of the page survive the expiry, so the spawn
 retention bounds the database size without changing the page.
 
+## Keeping only what the metrics need
+
+A project admin can turn on **Keep only what the duplicate-work metrics need** in the
+page's settings (Storage; off by default; audited with the other settings as
+`project.rbe_settings`). It is for projects that upload logs for these numbers and not
+for the per-build Actions tab. With it on, for logs parsed from then on:
+
+| | Default | Analysis only |
+|---|---|---|
+| Input list per spawn (`spawn_inputs`) | stored, shared per project | **not stored**. The input digest of every spawn still is: the fallback action key and the non-determinism check read it. |
+| Output list per spawn (`spawns.outputs`) | stored | **not stored** (the outputs digest and the primary output are) |
+| The uploaded log (artifact and its bytes) | kept with the build | **deleted once parsed** (bytes another build still references stay) |
+| Per-spawn rows (`spawns`) | execution-log retention (`RETENTION_SPAWN_DAYS`, 30) | **"Days per-spawn rows are kept"**: 1 to 30, default 3, never longer than the execution-log retention |
+| Action keys (`action_keys`) | execution-log retention + 2 days | the same: a build is still matched against a first execution whose rows are gone |
+| Hourly numbers of this page | build retention | the same |
+
+What it gives up:
+
+- **Which inputs changed.** The Actions tab of a build ("Why did it run?") still lists
+  the spawns and says whether an action's inputs changed, and states that input lists
+  are not kept for the project; the list of added, removed and changed inputs is not
+  available. After the row days the tab shows the log as expired.
+- **Re-reading cores from stored logs.** There is no stored log: the button is disabled
+  and says why. A changed cores declaration applies to logs parsed afterwards.
+- **Uploading a different log for a build after the row days** rebuilds its keys from
+  the rows that remain (as with the default retention, only sooner).
+
+**The freeze rule.** An hour's numbers are computed from the spawn rows of its builds.
+Rows expire with their build: retention (daily) deletes the rows of builds that started
+more than the row days ago. An hour is therefore **frozen one hour before its first
+build can expire** (at *start of the hour + row days − 1 hour*), and also whenever one of
+its builds is marked expired: from then on it keeps what its last summary holds and is
+never computed from part of its rows. Hours of such a project are summarized every five
+minutes over the whole row window, so a log parsed at least five minutes before the
+freeze is in the numbers.
+
+**What that costs in exactness.** Numbers are exact for the logs parsed before their
+hour froze. A log parsed later (a *late log*):
+
+- is merged into the action keys, so builds of hours that are not frozen are classed
+  against it correctly;
+- is itself in no number: its executions, hits and coverage are not counted;
+- cannot change a frozen hour: an execution there that it shows to be a duplicate (the
+  late log's execution finished earlier) keeps the class it had, `first` included.
+
+So duplicate time is under-counted by at most the executed time of the late logs plus,
+for each action key whose first execution a late log takes over, the time of one
+execution. The settings panel shows how many logs arrived late since the mode was turned
+on. The same rule holds for every project at its execution-log retention; this mode
+moves it from 30 days to the row days. Choose the days to cover the longest delay
+between a build's start and the upload of its log, of any shard or project of the
+group.
+
+**In a cache group** the mode is per project and members may differ. The group's keys
+are kept by the longest execution-log retention among its members, whatever their
+modes. Each member's hours freeze by its own days, and the group's page sums its
+members' hours: a late log of any member is matched by every member's later builds; an
+execution of an analysis-only member in a frozen hour keeps its class, while the same
+execution in a member that keeps rows for 30 days is classed again. Input lists were
+per project already, so one member's mode does not affect another's Actions tab.
+
+**Measured** (60 projects in one group, 600 builds, 909,008 spawns; PLAN §27.11):
+
+| per build (1,515 spawns) | default | analysis only | |
+|---|---|---|---|
+| `spawns` (heap + indexes) | 1,243 KB (820 B per spawn) | 921 KB (608 B per spawn) | 1.35× |
+| `spawn_inputs` | 1,061 KB as written (196 KB after `VACUUM FULL`) | 0 | |
+| `action_keys` | 82 KB | 83 KB | 1× |
+| uploaded log (blob store) | 1,312 KB, kept with the build | 0 once parsed | |
+| write-ahead log | 3.50 MB | 1.61 MB | 2.2× |
+| stored while the rows live (tables + log) | 3.70 MB | 1.00 MB | 3.7× |
+| parse job, p50 / p99 | 159 / 699 ms | 141 / 616 ms | |
+| logs per minute, one node | 527 | 606 | |
+| after the row retention has passed | rows stay 30 days | `spawns` 0, `spawn_inputs` 0; 71 KB of keys and 10 KB of hourly rows remain | |
+| exactness, before and after retention | 30 of 30 figures, group 5 of 5 | 30 of 30, group 5 of 5 | |
+
+Steady state per build a day, from these figures (computed, not run for 30 days; rows
+of the default for 30 days, of the mode for up to 4 because retention runs daily, keys
+32 days, hourly rows and the default's uploaded logs for the 90 days of build
+retention): database 44 MB against 6.8 MB, **6.5 times** less with compacted tables
+(72 MB against 6.8 MB, 10.6 times, with `spawn_inputs` as written); database and
+uploaded logs together 162 MB against 6.8 MB, **24 times** less. The whole bench
+database after the retention job with the clock moved four days and `VACUUM FULL`:
+884 MB (nothing expired) against 62 MB.
+
+Turning the mode off applies to logs parsed afterwards; rows, lists and logs that were
+not kept do not come back, and the hours whose rows expired stay frozen.
+
 A cache group's page reads stored hours only: its window starts at the top of the hour
 (a "24h" view covers up to 24 h 59 min) and hours whose builds changed are summarized
 again first, four projects at a time. With 360 projects it answers in under a second

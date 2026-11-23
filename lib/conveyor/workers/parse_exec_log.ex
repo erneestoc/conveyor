@@ -19,8 +19,10 @@ defmodule Conveyor.Workers.ParseExecLog do
          %{} = artifact <-
            Enum.find(Artifacts.list(inv), &ExecLog.name?(&1.name)) || {:cancel, :no_log},
          {:ok, binary} <- Blobs.read(inv.project_id, artifact.digest),
-         {:ok, parsed} <- parse(inv, binary) do
+         settings = settings(inv),
+         {:ok, parsed} <- parse(inv, binary, settings) do
       count = ExecLog.store!(inv, parsed)
+      if settings.analysis_only, do: analysis_only(inv, artifact)
 
       Conveyor.Watch.broadcast(
         Conveyor.Ingest.invocation_topic(inv.id),
@@ -34,16 +36,26 @@ defmodule Conveyor.Workers.ParseExecLog do
     end
   end
 
-  defp parse(inv, binary) do
+  defp settings(inv),
+    do: inv.project_id |> Conveyor.Projects.get_project!() |> Conveyor.Rbe.Settings.get()
+
+  # "Keep only what the duplicate-work metrics need": the uploaded log has been read for
+  # the last time, so it goes (a failure before this point retries the whole job with the
+  # log still there). A log whose build's hour is already frozen is counted as late: its
+  # keys were merged, its executions are in no number (PLAN §27.11).
+  defp analysis_only(inv, artifact) do
+    Artifacts.delete(inv, artifact)
+
+    if ExecLog.frozen?(inv.project_id, inv.started_at || inv.inserted_at),
+      do: Conveyor.Rbe.Settings.count_late!(inv.project_id)
+  end
+
+  defp parse(inv, binary, settings) do
     # How the project declares cores is read here, at parse time: the cores an exec
     # property states are stored per spawn (PLAN §27.7).
-    property =
-      inv.project_id
-      |> Conveyor.Projects.get_project!()
-      |> Conveyor.Rbe.Settings.get()
-      |> Map.fetch!(:cores_property)
+    opts = [cores_property: settings.cores_property, analysis_only: settings.analysis_only]
 
-    case ExecLog.parse(binary, cores_property: property) do
+    case ExecLog.parse(binary, opts) do
       {:ok, parsed} ->
         {:ok, parsed}
 

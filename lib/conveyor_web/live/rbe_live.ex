@@ -110,6 +110,8 @@ defmodule ConveyorWeb.RbeLive do
             "tolerance_s" => Integer.to_string(settings.tolerance_s),
             "cores_properties" => Settings.names_text(settings),
             "cores_unit" => settings.cores_property.unit,
+            "analysis_only" => settings.analysis_only,
+            "row_days" => Integer.to_string(settings.row_days),
             "cache_group" => (assigns.group && assigns.group.name) || ""
           })
     )
@@ -157,7 +159,7 @@ defmodule ConveyorWeb.RbeLive do
         metadata:
           Map.take(
             params,
-            ~w(cores pipeline_key tolerance_s cache_group cores_properties cores_unit)
+            ~w(cores pipeline_key tolerance_s cache_group cores_properties cores_unit analysis_only row_days)
           )
       )
 
@@ -682,6 +684,8 @@ defmodule ConveyorWeb.RbeLive do
           global_admin?={@global_admin?}
           properties={@properties}
           reread={@reread}
+          settings={@settings}
+          project={@project}
           range={@range}
           origin={@origin}
           upload_key?={@upload_key?}
@@ -1160,6 +1164,8 @@ defmodule ConveyorWeb.RbeLive do
   attr :global_admin?, :boolean, required: true
   attr :properties, :list, required: true
   attr :reread, :integer, required: true
+  attr :settings, :map, required: true
+  attr :project, :map, required: true
   attr :range, :string, required: true
   attr :origin, :string, required: true
   attr :upload_key?, :boolean, required: true
@@ -1225,6 +1231,45 @@ defmodule ConveyorWeb.RbeLive do
             builds already parsed keep what they had until their stored log is read again (below).
           </p>
         </fieldset>
+        <fieldset
+          id="rbe-storage"
+          class="space-y-2 border-t border-base-300 pt-4 sm:col-span-2"
+        >
+          <legend class="float-left mb-2 w-full text-xs font-medium">Storage</legend>
+          <div class="clear-both grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+            <.input
+              field={@form[:analysis_only]}
+              type="checkbox"
+              label="Keep only what the duplicate-work metrics need"
+            />
+            <.input
+              field={@form[:row_days]}
+              type="number"
+              min="1"
+              max="30"
+              label="Days per-spawn rows are kept in this mode"
+            />
+          </div>
+          <p class="text-[11px] leading-snug text-base-content/70">
+            When on, logs parsed from now on store no input lists and no output lists (a
+            build's Actions tab then cannot show which inputs changed), the uploaded log is
+            deleted once it is parsed, and per-spawn rows are kept for the days above
+            instead of the project's execution-log retention ({Conveyor.ExecLog.general_retention_days(
+              @project
+            )} days). The hourly numbers of this page and the action keys stay. An hour's
+            numbers are final one hour before its rows expire: a log parsed later is matched
+            by later builds and is itself not counted.
+            <span
+              :if={@settings.late_logs > 0}
+              id="rbe-late-logs"
+              class="font-medium text-base-content"
+            >
+              {Format.number(@settings.late_logs)} {if @settings.late_logs == 1,
+                do: "log has",
+                else: "logs have"} arrived that late.
+            </span>
+          </p>
+        </fieldset>
         <div class="sm:col-span-2">
           <button
             type="submit"
@@ -1282,11 +1327,19 @@ defmodule ConveyorWeb.RbeLive do
             unit. Each log is parsed again in the background, behind new uploads; nothing else
             about the builds changes.
           </p>
+          <p
+            :if={@settings.analysis_only}
+            id="rbe-reread-unavailable"
+            class="mt-1 text-xs font-medium text-base-content/80"
+          >
+            Not available: this project keeps only what the metrics need, so uploaded logs
+            are deleted once parsed and there is nothing to read again.
+          </p>
           <button
             type="button"
             id="rbe-reread-button"
             phx-click="reread"
-            disabled={@reread == 0}
+            disabled={@reread == 0 or @settings.analysis_only}
             data-confirm={"Parse the stored execution logs of #{@reread} builds again with the saved cores declaration?"}
             class="mt-2 rounded-md border border-base-300 px-3 py-1.5 text-xs font-medium transition-colors hover:bg-base-200 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary disabled:cursor-not-allowed disabled:opacity-50"
           >

@@ -118,6 +118,23 @@ defmodule Conveyor.Artifacts do
     end)
   end
 
+  @doc """
+  Detaches a file from an invocation and deletes its bytes unless something else pins or
+  references them (`Conveyor.Blobs.discard/2`, the checked delete of docs/spec/Blobs.tla:
+  the same content attached to another build of the project stays). The row goes first,
+  so a failure in between leaves an unreferenced blob that orphan pruning removes.
+  """
+  @spec delete(Invocation.t(), Artifact.t()) :: :ok
+  def delete(%Invocation{project_id: project_id}, %Artifact{} = artifact) do
+    Repo.delete_all(
+      from a in Artifact,
+        where: a.invocation_id == ^artifact.invocation_id and a.name == ^artifact.name
+    )
+
+    _ = Blobs.discard(project_id, artifact.digest)
+    :ok
+  end
+
   defp insert_artifact(inv, name, blob, source) do
     now = DateTime.utc_now()
 

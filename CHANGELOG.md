@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Duplicate work: "Keep only what the duplicate-work metrics need"** (a project
+  setting on the page, off by default, audited). When on, logs parsed from then on store
+  no input lists and no output lists, the uploaded log is deleted once parsed, and
+  per-spawn rows are kept for a few days (1 to 30, default 3) instead of the
+  execution-log retention; the hourly numbers and the action keys are kept as before.
+  The build's Actions tab then says that input lists are not kept, and "Re-read cores
+  from stored logs" is disabled with the reason. An hour's numbers are final one hour
+  before its rows expire; a log parsed later is matched by later builds, is not counted
+  itself, and is counted as late in the settings panel. Measured: per build of 1,515 spawns 3.7 MB stored (tables and log) against 1.0 MB while the rows live, 2.2 times less write-ahead log, and at steady state a database 6.5 times smaller (24 times counting the uploaded logs)
+  (docs/duplicate-work.md "Keeping only what the metrics need", PLAN §27.11).
+- **Summarized hours are never computed from part of their rows.** An hour is frozen
+  one hour before the first of its builds can lose its spawn rows to retention (before:
+  once the whole hour was past the cutoff, so an hour that straddled it could be
+  summarized again from the builds that still had rows), and whenever one of its builds
+  is marked expired. Applies to every project.
 - **Duplicate work: three named hit rates.** The tile "Hit rate, actual → ideal" is
   "Cache hit rate" with three values: *today* (served from cache), *perfect cache* (if
   every finished result were shared) and *with in-flight deduplication* (also merging

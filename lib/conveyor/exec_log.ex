@@ -53,6 +53,10 @@ defmodule Conveyor.ExecLog do
           | {:error, term()}
   def parse(binary, opts \\ []) when is_binary(binary) do
     property = Keyword.get(opts, :cores_property, Cores.default_property())
+    # Analysis only (`Conveyor.Rbe.Settings`): the rows carry no input list and no
+    # output list. Their digests are computed all the same: the fallback action key and
+    # the non-determinism check read them.
+    lean? = Keyword.get(opts, :analysis_only, false)
 
     with {:ok, entries} <- decode(binary) do
       table = Map.new(entries, &{&1.id, &1.type})
@@ -67,6 +71,7 @@ defmodule Conveyor.ExecLog do
         Enum.flat_map_reduce(entries, {%{}, 0, %{}}, fn
           %{type: {:spawn, s}}, {memo, ordinal, tally} ->
             {row, memo} = spawn_row(s, table, memo, property)
+            row = if lean?, do: %{row | outputs: %{}, inputs_list: nil}, else: row
 
             {[Map.put(row, :ordinal, ordinal)],
              {memo, ordinal + 1, Properties.observe(tally, s.platform)}}
@@ -337,7 +342,8 @@ defmodule Conveyor.ExecLog do
     spawns = spawns |> Cores.assign(Cores.context(inv)) |> Enum.map(&keyed/1)
     entries = Keys.entries(spawns, id)
 
-    lists = input_rows(project_id, spawns, now)
+    # A log parsed for an analysis-only project has no lists (`parse/2`).
+    lists = project_id |> input_rows(spawns, now) |> Enum.reject(&is_nil(&1.blob))
 
     rows =
       Enum.map(spawns, fn s ->
@@ -468,6 +474,50 @@ defmodule Conveyor.ExecLog do
   """
   @spec retention_days(Projects.Project.t()) :: pos_integer()
   def retention_days(%Projects.Project{} = project) do
+    case Conveyor.Rbe.Settings.get(project) do
+      %{analysis_only: true, row_days: days} -> min(days, general_retention_days(project))
+      _ -> general_retention_days(project)
+    end
+  end
+
+  @doc """
+  The moment before which the action keys of a project may be forgotten, less the two
+  days `Conveyor.Workers.BuildRetention` adds: the project's execution-log retention
+  whether or not it keeps spawn rows that long (an analysis-only project drops rows
+  after a few days and still matches later builds against earlier first executions).
+  """
+  @spec key_retention_cutoff(Projects.Project.t(), DateTime.t()) :: DateTime.t()
+  def key_retention_cutoff(%Projects.Project{} = project, now),
+    do: DateTime.add(now, -general_retention_days(project), :day)
+
+  @doc """
+  The clock of retention and of the freeze of summarized hours. `:retention_clock_offset_s`
+  moves it (tests and the scale bench let days pass without waiting for them).
+  """
+  @spec now() :: DateTime.t()
+  def now do
+    case Application.get_env(:conveyor, :retention_clock_offset_s, 0) do
+      0 -> DateTime.utc_now()
+      offset -> DateTime.add(DateTime.utc_now(), offset, :second)
+    end
+  end
+
+  @doc """
+  True when the hour a build started in no longer takes execution-log numbers: its
+  project's spawn rows of that hour have expired or are within an hour of expiring
+  (`Conveyor.Metrics.Rollup` keeps what the hour's row holds). A log parsed for such a
+  build is late: its keys are merged, its executions are not counted.
+  """
+  @spec frozen?(Projects.Project.t() | integer(), DateTime.t()) :: boolean()
+  def frozen?(project, %DateTime{} = started_at) do
+    hour = %{started_at | minute: 0, second: 0, microsecond: {0, 0}}
+    limit = DateTime.add(retention_cutoff(project, now()), 3600, :second)
+    DateTime.compare(hour, limit) == :lt
+  end
+
+  @doc "The project's execution-log retention in days, whatever its storage mode."
+  @spec general_retention_days(Projects.Project.t()) :: pos_integer()
+  def general_retention_days(%Projects.Project{} = project) do
     builds =
       Projects.retention_days(project) || Application.get_env(:conveyor, :retention_days, 90)
 
@@ -480,7 +530,7 @@ defmodule Conveyor.ExecLog do
 
   @doc "The moment before which a project's spawns are deleted by retention."
   @spec retention_cutoff(Projects.Project.t() | integer(), DateTime.t()) :: DateTime.t()
-  def retention_cutoff(project, now \\ DateTime.utc_now())
+  def retention_cutoff(project, now \\ now())
 
   def retention_cutoff(%Projects.Project{} = project, now),
     do: DateTime.add(now, -retention_days(project), :day)
@@ -659,9 +709,15 @@ defmodule Conveyor.ExecLog do
   @spec explain(Invocation.t()) :: %{
           previous: Invocation.t() | nil,
           rows: [explanation()],
-          counts: map()
+          counts: map(),
+          inputs_kept?: boolean()
         }
   def explain(%Invocation{} = inv) do
+    # An analysis-only project stores no input lists: a changed digest is known, which
+    # inputs changed is not.
+    inputs_kept? =
+      not Conveyor.Rbe.Settings.get(Projects.get_project!(inv.project_id)).analysis_only
+
     spawns = list(inv)
     previous = previous_with_log(inv)
 
@@ -674,6 +730,7 @@ defmodule Conveyor.ExecLog do
           spawn: s,
           reason: nil,
           outputs_changed?: nil,
+          inputs_kept?: inputs_kept?,
           added: [],
           removed: [],
           changed: []
@@ -705,13 +762,18 @@ defmodule Conveyor.ExecLog do
                     | reason: :inputs_changed,
                       outputs_changed?: p.outputs_digest != s.outputs_digest
                   },
-                  diff(p, s)
+                  if(inputs_kept?, do: diff(p, s), else: %{})
                 )
             end
         end
       end)
 
-    %{previous: previous, rows: rows, counts: Enum.frequencies_by(rows, & &1.reason)}
+    %{
+      previous: previous,
+      rows: rows,
+      counts: Enum.frequencies_by(rows, & &1.reason),
+      inputs_kept?: inputs_kept?
+    }
   end
 
   @doc "Input paths added, removed and changed between two spawns."

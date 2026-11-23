@@ -11,7 +11,8 @@
 # what is measured and how exactness is checked are described at the top of
 # bench/rbe_scale.exs; results go to bench/results/rbe_scale-<label>.json. Environment
 # passed through to the driver: SPAWNS_MIN, SPAWNS_MAX, SHARED_POOL, WAVE, HOURS, SEED,
-# UPLOADERS. Needs about 1.5 GB of disk per million spawns.
+# UPLOADERS, ANALYSIS_ONLY (1 = the projects keep only what the metrics need), RETAIN_AFTER_DAYS
+# (how far the retention clock is moved for the after-retention sizes, default 4). Needs about 1.5 GB of disk per million spawns.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

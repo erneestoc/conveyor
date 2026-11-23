@@ -263,4 +263,44 @@ defmodule ConveyorWeb.RbeCoresLiveTest do
       assert view |> element("#rbe-reread-button") |> render() =~ "(1 builds)"
     end
   end
+
+  test "keep only what the metrics need: saved, audited, no re-read, the Actions tab says so", %{
+    conn: conn,
+    project: p,
+    t0: t0
+  } do
+    inv = build_with_log!(p, t0, %{})
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
+    assert has_element?(view, "#rbe-storage")
+    refute has_element?(view, "#rbe-reread-unavailable")
+    refute has_element?(view, "#rbe-reread-button[disabled]")
+
+    view
+    |> form("#rbe-settings-form", %{"analysis_only" => "true", "row_days" => "2"})
+    |> render_submit()
+
+    assert %{analysis_only: true, row_days: 2} = Settings.get(Projects.get_project!(p.id))
+
+    assert [
+             %{
+               action: "project.rbe_settings",
+               metadata: %{"analysis_only" => "true", "row_days" => "2"}
+             }
+           ] =
+             Conveyor.Audit.recent(1)
+
+    assert has_element?(view, "#rbe-reread-unavailable")
+    assert has_element?(view, "#rbe-reread-button[disabled]")
+    refute has_element?(view, "#rbe-late-logs")
+
+    Settings.count_late!(p.id)
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
+    assert view |> element("#rbe-late-logs") |> render() =~ "1 log has"
+
+    view |> form("#rbe-settings-form", %{"row_days" => "0"}) |> render_submit()
+    assert render(view) =~ "spawn rows are kept"
+
+    {:ok, actions, _} = live(conn, ~p"/invocation/#{inv.id}/actions")
+    assert has_element?(actions, "#exec-log-inputs-not-kept")
+  end
 end

@@ -16,13 +16,23 @@ defmodule Conveyor.Rbe.Settings do
       its value reads (`auto`, `cores` or `millicores`; `Conveyor.ExecLog.Cores`). Read
       when an execution log is parsed: the cores are stored per spawn as the exact
       source, so a change applies to the logs parsed afterwards
-      (`Conveyor.Rbe.Reread` parses stored logs again).
+      (`Conveyor.Rbe.Reread` parses stored logs again);
+    * `analysis_only` ("Keep only what the duplicate-work metrics need", off by default)
+      and `row_days` (1 to #{30}, default #{3}): no input lists and no output lists are
+      stored, the uploaded log is deleted once parsed, and spawn rows are kept `row_days`
+      days instead of the project's execution-log retention (PLAN §27.11). Read when a
+      log is parsed and by retention;
+    * `late_logs`: a counter, not a setting: logs parsed while the mode was on whose
+      build's hour was already frozen (`count_late!/1`).
   """
   alias Conveyor.Projects
   alias Conveyor.Projects.Project
 
   @tolerances [1, 2, 5, 10, 30, 60]
   @default_tolerance 2
+
+  @default_row_days 3
+  @max_row_days 30
 
   @units ~w(auto cores millicores)
   @max_names 8
@@ -31,7 +41,10 @@ defmodule Conveyor.Rbe.Settings do
           cores: %{String.t() => float()},
           pipeline_key: String.t() | nil,
           tolerance_s: pos_integer(),
-          cores_property: Conveyor.ExecLog.Cores.property()
+          cores_property: Conveyor.ExecLog.Cores.property(),
+          analysis_only: boolean(),
+          row_days: pos_integer(),
+          late_logs: non_neg_integer()
         }
 
   @doc "The units a cores property can be read in."
@@ -50,8 +63,31 @@ defmodule Conveyor.Rbe.Settings do
       cores: Map.get(rbe, "cores", %{}),
       pipeline_key: Map.get(rbe, "pipeline_key"),
       tolerance_s: Map.get(rbe, "tolerance_s", @default_tolerance),
-      cores_property: cores_property(rbe)
+      cores_property: cores_property(rbe),
+      analysis_only: Map.get(rbe, "analysis_only", false) == true,
+      row_days: Map.get(rbe, "row_days", @default_row_days),
+      late_logs: Map.get(rbe, "late_logs", 0)
     }
+  end
+
+  @doc """
+  Counts a log that was parsed after the hour of its build had frozen (analysis-only
+  projects; the count is shown in the settings panel). One atomic statement: parsers of
+  one project do not read and write the settings map around each other.
+  """
+  @spec count_late!(integer()) :: :ok
+  def count_late!(project_id) when is_integer(project_id) do
+    Conveyor.Repo.query!(
+      """
+      UPDATE projects
+      SET settings = jsonb_set(settings, '{rbe,late_logs}',
+            to_jsonb(coalesce((settings #>> '{rbe,late_logs}')::int, 0) + 1))
+      WHERE id = $1 AND settings ? 'rbe'
+      """,
+      [project_id]
+    )
+
+    :ok
   end
 
   defp cores_property(rbe) do
@@ -80,9 +116,21 @@ defmodule Conveyor.Rbe.Settings do
          {:ok, tolerance} <- parse_tolerance(attrs["tolerance_s"]),
          current = get(project).cores_property,
          {:ok, names} <- parse_names(attrs["cores_properties"], current.names),
-         {:ok, unit} <- parse_unit(attrs["cores_unit"], current.unit) do
+         {:ok, unit} <- parse_unit(attrs["cores_unit"], current.unit),
+         {:ok, analysis_only} <- parse_flag(attrs["analysis_only"], get(project).analysis_only),
+         {:ok, row_days} <- parse_row_days(attrs["row_days"], get(project).row_days) do
       rbe =
         %{"cores" => cores, "tolerance_s" => tolerance}
+        |> then(&if(analysis_only, do: Map.put(&1, "analysis_only", true), else: &1))
+        |> then(
+          &if(row_days == @default_row_days, do: &1, else: Map.put(&1, "row_days", row_days))
+        )
+        |> then(fn rbe ->
+          case get(project).late_logs do
+            0 -> rbe
+            n -> Map.put(rbe, "late_logs", n)
+          end
+        end)
         |> then(&if(pipeline_key, do: Map.put(&1, "pipeline_key", pipeline_key), else: &1))
         |> then(fn rbe ->
           # The built-in declaration is not stored, so it follows the built-in list.
@@ -179,6 +227,19 @@ defmodule Conveyor.Rbe.Settings do
   defp parse_unit(nil, current), do: {:ok, current}
   defp parse_unit(unit, _current) when unit in @units, do: {:ok, unit}
   defp parse_unit(_unit, _current), do: {:error, "the unit is one of #{Enum.join(@units, ", ")}"}
+
+  defp parse_flag(nil, current), do: {:ok, current}
+  defp parse_flag(value, _current), do: {:ok, value in [true, "true", "on"]}
+
+  defp parse_row_days(nil, current), do: {:ok, current}
+  defp parse_row_days("", _current), do: {:ok, @default_row_days}
+
+  defp parse_row_days(text, _current) do
+    case Integer.parse(to_string(text)) do
+      {days, ""} when days >= 1 and days <= @max_row_days -> {:ok, days}
+      _ -> {:error, "spawn rows are kept a whole number of days from 1 to #{@max_row_days}"}
+    end
+  end
 
   @doc "The property names as the form's text."
   @spec names_text(t()) :: String.t()

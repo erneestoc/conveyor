@@ -162,6 +162,36 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ### Duplicate work (was "RBE opportunity") — 2026-11-21 (PLAN §27, docs/duplicate-work.md), unreleased
 
+- **2026-11-23, owner's decisions after seeing the live pages (all landed).**
+  (1) *Hit rates* are three named values, "today", "perfect cache", "with in-flight
+  deduplication" (`cache.hit_rate.*`; `actual_rate`/`ideal_rate`/`rbe_rate` are aliases
+  to remove after one release). (2) *Per logged day*: every per-day figure is the
+  window's total ÷ `logged_days` (UTC days of the build's start with a parsed log;
+  `Report.logged_days/1` reads the hourly rows, so the window's last computed bucket of
+  up to two hours counts as one day); tiles say "N of M days have logs"; JSON has
+  `logged_days`, `window_days`, `per_logged_day`. (3) "Racing by pipeline" excludes
+  non-remotable racing (`Hour.fold`; hours rolled earlier keep the old sums until rolled
+  again); small tiles say "exact"; the cold-machines tile is hidden when it equals the
+  sequential duplicates (`cold_is_all?/1`). The money setting was skipped on purpose.
+- **Analysis-only storage (PLAN §27.11, docs/duplicate-work.md "Keeping only what the
+  metrics need").** `Settings` `analysis_only` + `row_days` (+ the `late_logs` counter,
+  `count_late!/1`); `ExecLog.parse(analysis_only: true)` (no `inputs_list`, no
+  `outputs`), `ParseExecLog` deletes the log through `Artifacts.delete/2` →
+  `Blobs.discard/2`; `ExecLog.retention_days/1` (rows) against
+  `key_retention_cutoff/2` (keys: the execution-log retention, whatever the mode);
+  `ExecLog.frozen?/2` + `Rollup.expired_build?/2` (the freeze rule, for every project);
+  `Workers.Rollup` checks the whole row window of such projects; `ExecLog.explain/1`
+  returns `inputs_kept?`. **Rules to keep:** an hour is never rolled from part of its
+  rows (freeze one hour before the first expiry, and on any `expired` build); keys never
+  follow `row_days`; retention and the freeze read `ExecLog.now/0` (tests and the bench
+  move it with `:retention_clock_offset_s`; do not call `DateTime.utc_now/0` there).
+  Tests: `test/conveyor/rbe_analysis_only_test.exs` (incl. the freeze property), the
+  last test of `rbe_cores_live_test.exs`. Bench: `ANALYSIS_ONLY=1 bench/rbe_scale.sh …`
+  and the "after retention" block (clock moved `RETAIN_AFTER_DAYS`, retention run in the
+  driver, `VACUUM FULL`, figures compared again). Measured at 60 projects × 600 builds (PLAN §27.11 has the table): 3.7 MB → 1.0 MB stored per build while rows live, WAL 2.2× less, steady-state database 6.5× smaller (24× with the uploaded logs), 30 of 30 figures exact before and after retention.
+  **Not done:** a narrower spawn row (needs a schema change: a second table or dropped
+  columns); input lists per cache group; deleting rows early for late logs (they wait
+  for the daily retention); a late-log count for projects that keep everything.
 - **Renamed 2026-11-23 (owner: metrics, not advice).** User-facing it is "Duplicate
   work": navigation, page title and heading, docs (`docs/duplicate-work.md`, mkdocs nav),
   routes `/p/:slug/duplicate-work`, `/groups/:name/duplicate-work`, `…/duplicate-work/json`,
