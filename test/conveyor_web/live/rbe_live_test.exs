@@ -257,11 +257,20 @@ defmodule ConveyorWeb.RbeLiveTest do
           {~p"/p/#{other.slug}/rbe/json?range=24h",
            ~p"/p/#{other.slug}/duplicate-work/json?range=24h"}
         ] do
-      assert conn |> get(old) |> json_response(200) == conn |> get(new) |> json_response(200)
+      # `days` is the window's length up to the moment of the request
+      body = fn path ->
+        conn |> get(path) |> json_response(200) |> update_in(["report"], &Map.delete(&1, "days"))
+      end
+
+      assert body.(old) == body.(new)
     end
 
     with_key = fn path ->
-      build_conn() |> put_req_header("x-api-key", key) |> get(path) |> json_response(200)
+      build_conn()
+      |> put_req_header("x-api-key", key)
+      |> get(path)
+      |> json_response(200)
+      |> update_in(["report"], &Map.delete(&1, "days"))
     end
 
     assert with_key.(~p"/api/v1/rbe?range=24h") == with_key.(~p"/api/v1/duplicate-work?range=24h")
