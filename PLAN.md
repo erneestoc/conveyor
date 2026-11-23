@@ -2903,3 +2903,122 @@ runs the key anyway, the row moves on to that execution as the first of a new
 generation, and a hit links a commit to the generation it was served from. That makes
 the row order-dependent (not a minimum), so it needs its own merge rule, touch rule and
 model; it would make cross-commit duplicates exact wherever a cache links the commits.
+
+### 28.5 The page, throughput and scale (2026-11-23, built and measured)
+
+**Page** (`rbe_live.ex`, `#rbe-stream`; JSON under `stream`). A source line (event
+stream, execution logs, or both) with the coverage of per-action events and the builds
+counted only, without a commit, pending and late. For the builds reported from the
+stream: the two headline classes, each with same commit, estimate and any commit (the
+large number is the estimate when there is one and the figures differ, else the
+same-commit figure, labelled "estimate", "at least" or "same at any commit"); three hit
+rates (a range is same commit to any commit); executed; the evidence tile; kinds of
+action; top targets (`stream["tgt"]`, the 50 targets of each hour with the most
+duplicated time, 20 shown). The settings and the empty state lead with the one
+`.bazelrc` line, the Bazel version and the optional commit; the execution-log recipe is
+an "exact mode (optional)" disclosure. A cache group shows the same; targets of
+projects the viewer cannot see are left out (`rbe_stream_live_test.exs`).
+
+**Prompt classification.** `Session` emits `{:stream_finalized, id}` when a build with
+per-action events is final; `Workers.StreamKeys` (queue `parse`) merges its keys. The
+5-minute job is the backstop. The read path rolls stale hours, so the page is current
+after the merge. No Oban uniqueness: the lookup cost 0.38 ms of Postgres per build,
+more than merging a small build; a job for a build already merged returns at once.
+`STREAM_KEYS_ON_FINALIZE=false` turns the job off.
+
+**Hot path.** Per action in the recorded builds (1.6 to 2.6 KB, 30 to 36 arguments):
+protobuf decode 13 to 16 µs, key 11 to 13 µs, chunk encode 0.4 to 0.6 µs. The key now
+hashes the arguments in one call over iodata (the same bytes, the same key, pinned by
+comparing before and after): **1.7 to 2.1 µs**. The decode is the shared decode of every
+frame and was left alone (a partial decoder that skips the command line would have to
+replace the generated one for this message).
+
+**Throughput** (`bench/run.sh --profile stream|stream-off|stream-paced|stream-paced-off`,
+laptop, native Postgres 17, load average 3 to 9 from the runs themselves; the seven
+recorded builds replayed, the "off" streams are the same builds without successful
+`ActionExecuted` and the empty `Progress` behind each; one run each):
+
+| | flat out, off | flat out, on | paced, off | paced, on |
+|---|---|---|---|---|
+| streams × builds | 50 × 700 | 50 × 700 | 200 × 400 | 200 × 400 |
+| events | 362,400 | 1,308,700 | 207,620 | 749,501 |
+| actions | 0 | 506,300 | 0 | 289,948 |
+| events/s | 82,400 | 100,200 | 1,860 | 6,520 |
+| actions/s | – | **38,800** | – | 2,520 (paced) |
+| node CPU per event | 57 µs | 49 µs | 98 µs | 76 µs |
+| node CPU, total | 20.7 s | 64.7 s | 20.4 s | 57.0 s |
+| Postgres CPU, total | 2.7 s | 5.6 s | 4.8 s | 6.1 s |
+| RSS per stream | 2.4 MB | 8.4 MB | 0.5 MB | 1.4 MB |
+| ack p50 / p99 | 50 / 179 ms | 81 / 517 ms | 1,004 / 2,025 ms | 1,016 / 2,012 ms |
+| WAL, total | 104 MB | 158 MB | 109 MB | 119 MB |
+| WAL per event | 288 B | 121 B | 523 B | 159 B |
+
+Per action (with its progress frame; on minus off, over the actions): **82 µs of node
+CPU flat out (126 µs paced), 6 µs of Postgres CPU, 106 B of WAL flat out (36 B paced)**.
+Without the key merges (`STREAM_KEYS_ON_FINALIZE=false`, flat out): 62.2 s node CPU,
+148 MB WAL, ack p99 722 ms: the merges of 700 builds cost 2.5 s of node CPU and 10 MB of
+WAL and finished with the last stream. Stored per build (723 actions on average):
+`stream_actions` 13.9 KB as ingested, `action_keys` next to nothing here (every replay
+is the same build: 821 keys in all), raw store unchanged (32 KB against 29 KB).
+**One node sustains about 38,000 actions per second; a 3,500-action build costs about
+0.3 s of one core, 0.02 s of Postgres CPU, 0.4 MB of WAL, 50 to 100 KB of records and a
+merge of tens of milliseconds.** Paced ack latency is the batch timer's, with or
+without the flag.
+
+**Builds without the flag** (`flatout`, 200 × 10,000, the standard fixtures; base =
+9777d3f in a worktree, same machine, same hour): base 20,873 events/s, WAL 617.2 B per
+event, ack 7.9 / 196 ms; head with the merge job off 17,703 events/s (load average 14
+at the time), WAL **617.6 B per event**, ack 8.6 / 209 ms; head with the job on 20,118
+events/s, ack 8.3 / 197 ms. Three quarters of those fixtures carry a few successful
+action events (they were recorded with the flag), so with the job on they are merged:
++86 MB of WAL (11 KB per such build), no measurable node CPU. A build with no successful
+action event emits no effect and no job. One earlier run of this comparison was
+discarded: the machine slept during it.
+
+**Scale** (`bench/stream_scale.sh`: 60 projects in one cache group, 300 recorded builds
+in 30 waves of ten, 15 % without a commit, replayed 40 at once through gRPC with API
+keys, one node):
+
+| | |
+|---|---|
+| actions / executions | 150,921 / 72,805 |
+| ingest | 5.1 to 5.3 s: 28,600 to 29,400 actions/s |
+| key merges (300 jobs) | p50 11 ms, p99 32 to 38 ms; all merged when the last stream ended |
+| deadlocks / lock waits | 0 / 0 samples in the first run, 1 of 25 samples (under 10 ms) in the second |
+| `stream_actions` | 300 rows, 4.4 MB (records 2.27 MB: 15.1 B per action) |
+| `action_keys` | 123,425 rows, 27.1 MB (220 B per row); 87,117 same-commit rows (71 %) |
+| WAL | 84 to 88 MB |
+| group report, first read (rolls 111 project-hours) / again | 0.41 to 0.43 s / 0.35 to 0.36 s |
+| exactness | **exact**: counts equal brute force in both key spaces, times within the cells' rounding |
+
+The report was read in the driver with the page's function
+(`ConveyorWeb.RbeReport.group/3`), not through a browser. Not run: 360 projects, two
+nodes, a second machine.
+
+### 28.6 Leftovers (2026-11-23)
+
+- **`action_keys` per stream build: measured, reduced.** Keys are the dominant stored
+  cost (27.1 MB against 4.4 MB of records in the scale run; 373 B per execution).
+  Same-commit rows are marked (`out = 1`; the stream has no output digest, so the
+  column was a constant) and deleted two days after the stream records of their scope
+  (`Stream.prune_commit_keys!/2`, by `BuildRetention`; 5 days by default against 32).
+  Rows merged before this change are not marked and leave with the other keys. Not
+  done: "no same-commit row until a second commit appears" (in steady state nearly
+  every key has been run at two commits, so it saves little).
+- **Late builds: counted and shown** (`settings["rbe"]["late_stream_builds"]`,
+  `stream.late_builds`, the source line).
+- **`invocations_stream_keys_pending`: fixed additively.** The pending query is two
+  statements, one per partial index (`invocations_stream_keys_stale`, migration
+  `20261123183348`).
+- **Non-cacheable spawns: indistinguishable, documented.** `ActionExecuted` has no
+  cacheable flag, so the stream counts them as executions and the log does not. None of
+  the seven recorded logs has one (0 of 3,463 spawns), so the over-count is 0 on the
+  fixtures and not measured otherwise. Across commits, a re-run on a machine that had
+  the result is classed as changed work, which keeps them out of the estimate there.
+- **Retried and flaky actions: stated, not verified.** One event per action; no
+  recording has a retried action.
+- **Not done:** the TLA+ model of the stream variant (the interval touch rule, the
+  estimate's evidence, same-commit pruning); `RawLog.tla`/`Ingest.tla` for the third
+  kind of sequence number; `end == start` repair for Bazel 8.0 to 8.5; the generations
+  design of §28.4; a recording with a real warm C++ build at a second commit, with
+  non-cacheable spawns, with a retried action, on Linux.

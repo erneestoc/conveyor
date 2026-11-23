@@ -727,26 +727,26 @@ defmodule ConveyorWeb.RbeLive do
         sent per-action events (<code class="font-mono">--build_event_publish_all_actions</code>){share_text(
           @report.stream.coverage.with_events,
           @report.stream.coverage.builds
-        )}; {Format.number(@report.stream.builds)} are reported from them.
+        )}; {Format.number(@report.stream.builds)} reported from them.
         <span :if={@report.stream.logged_builds > 0} id="rbe-stream-logged">
-          {Format.number(@report.stream.logged_builds)} also uploaded an execution log and
-          are reported from the log.
+          {Format.number(@report.stream.logged_builds)} also uploaded an execution log:
+          reported from the log.
         </span>
         <span :if={@report.stream.counts_only_builds > 0} id="rbe-stream-counts-only">
-          {Format.number(@report.stream.counts_only_builds)} are counted only: their events
-          carry no usable action times (Bazel before 8.6).
+          {Format.number(@report.stream.counts_only_builds)} counted only: no usable action
+          times in the events (Bazel before 8.6).
         </span>
         <span :if={@report.stream.no_commit_builds > 0} id="rbe-stream-no-commit">
-          {Format.number(@report.stream.no_commit_builds)} name no commit and are in no
+          {Format.number(@report.stream.no_commit_builds)} without a commit: in no
           same-commit figure.
         </span>
         <span :if={@report.stream.pending_builds > 0} id="rbe-stream-pending">
-          {Format.number(@report.stream.pending_builds)} are pending classification (done
-          when a build ends, at the latest by the 5-minute job).
+          {Format.number(@report.stream.pending_builds)} pending classification (done when
+          a build ends, at the latest by the 5-minute job).
         </span>
         <span :if={@report.stream.late_builds > 0} id="rbe-stream-late">
-          {Format.number(@report.stream.late_builds)} arrived after their hour's figures
-          were final and are not counted.
+          {Format.number(@report.stream.late_builds)} merged after the hour's figures were
+          final: not counted.
         </span>
       </p>
       <p id="rbe-log-coverage">
@@ -1259,7 +1259,12 @@ defmodule ConveyorWeb.RbeLive do
       <p class="mb-3 max-w-prose text-xs text-base-content/70">
         Cores per mnemonic replace the estimate wherever an action does not state its own cores.
       </p>
-      <.form for={@form} id="rbe-settings-form" phx-submit="save" class="grid gap-3 sm:grid-cols-2">
+      <.form
+        for={@form}
+        id="rbe-settings-form"
+        phx-submit="save"
+        class="grid grid-cols-1 gap-3 sm:grid-cols-2"
+      >
         <.input
           field={@form[:cores]}
           type="textarea"
@@ -1283,13 +1288,16 @@ defmodule ConveyorWeb.RbeLive do
             :if={@global_admin?}
             field={@form[:cache_group]}
             type="text"
-            label="Cache group (projects whose executions are compared with each other)"
+            label="Cache group (projects compared together)"
             placeholder="monorepo"
           />
         </div>
-        <fieldset class="rounded-md border border-base-300 p-3 sm:col-span-2" id="rbe-cores-property">
+        <fieldset
+          class="min-w-0 rounded-md border border-base-300 p-3 sm:col-span-2"
+          id="rbe-cores-property"
+        >
           <legend class="px-1 text-xs font-medium">How this project declares cores per action</legend>
-          <div class="grid gap-3 sm:grid-cols-2">
+          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
             <.input
               field={@form[:cores_properties]}
               type="text"
@@ -1316,7 +1324,7 @@ defmodule ConveyorWeb.RbeLive do
         </fieldset>
         <fieldset
           id="rbe-storage"
-          class="space-y-2 border-t border-base-300 pt-4 sm:col-span-2"
+          class="min-w-0 space-y-2 border-t border-base-300 pt-4 sm:col-span-2"
         >
           <legend class="float-left mb-2 w-full text-xs font-medium">Storage</legend>
           <div class="clear-both flex flex-wrap items-end gap-x-8 gap-y-2 [&_input[type=number]]:w-24">
@@ -1541,7 +1549,20 @@ defmodule ConveyorWeb.RbeLive do
             </span>
             <span :if={!(@stream.estimate && @stream.estimate.evidence.share)}>—</span>
           </:value>
-          <span :if={@stream.estimate}>
+          <span
+            :if={
+              @stream.estimate && @stream.estimate.evidence.unknown.n == 0 &&
+                is_nil(@stream.estimate.evidence.share)
+            }
+            id="rbe-stream-settled"
+          >
+            Every repeat in this window is between builds of one commit, or there is none:
+            nothing to estimate.
+          </span>
+          <span :if={
+            @stream.estimate &&
+              !(@stream.estimate.evidence.unknown.n == 0 && is_nil(@stream.estimate.evidence.share))
+          }>
             Builds that read an earlier build's cache found {Format.number(
               @stream.estimate.evidence.unchanged.n
             )} actions unchanged across commits and re-ran {Format.number(
@@ -1766,9 +1787,16 @@ defmodule ConveyorWeb.RbeLive do
     """
   end
 
+  # One value when both read the same; "up to" when nothing is a duplicate at one commit.
   defp core_range(0, 0), do: "—"
-  defp core_range(same, same), do: core(same)
-  defp core_range(same, any), do: "#{core(same)} – #{core(any)}"
+
+  defp core_range(same, any) do
+    case {core(same), core(any)} do
+      {text, text} -> text
+      {_, upper} when same == 0 -> "0 – #{upper}"
+      {lower, upper} -> "#{lower} – #{upper}"
+    end
+  end
 
   defp count_range(same, same), do: Format.number(same)
   defp count_range(same, any), do: "#{Format.number(same)} – #{Format.number(any)}"
@@ -1783,7 +1811,7 @@ defmodule ConveyorWeb.RbeLive do
 
   defp panel(assigns) do
     ~H"""
-    <section id={@id} class="rounded-md border border-base-300 p-4">
+    <section id={@id} class="min-w-0 rounded-md border border-base-300 p-4">
       <h2 class="text-sm font-semibold">{@title}</h2>
       <p :if={@note != []} class="mb-3 mt-0.5 max-w-prose text-xs text-base-content/70">
         {render_slot(@note)}

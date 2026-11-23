@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Duplicate work from the event stream: one line of setup.** With
+  `build --build_event_publish_all_actions` (Bazel 8.6 or later) and nothing else the
+  Duplicate work page reports sequential and racing duplicates: **same commit** (exact
+  for identical inputs; name the commit with `--build_metadata=COMMIT_SHA=...` or a
+  workspace status), **any commit** (an upper bound) and an **estimate** between the two
+  from what builds that read an earlier build's cache found unchanged or re-ran
+  (measured against execution logs: exact on two recorded scenarios, −0.5 % and −7 % on
+  two with a constructed warm build, absent without evidence). Also from the stream:
+  hit rates, kinds of action, top targets, a source and coverage line (counted only for
+  Bazel before 8.6, without a commit, pending, late). A cache group shows the same.
+  Execution logs are now "exact mode (optional)". Builds are classified when they end
+  (`STREAM_KEYS_ON_FINALIZE`, default on; the 5-minute job is the backstop). One
+  additive index (`invocations_stream_keys_stale`). Measured: about 38,000 actions per
+  second per node, 80 µs of node CPU and 100 bytes of write-ahead log per action, 15
+  bytes per stored record; builds without the flag write what they wrote before
+  (docs/duplicate-work.md, PLAN §28.4 to §28.6). JSON: `stream.estimate`,
+  `stream.hit_rate`, `stream.per_day`, `stream.mnemonics`, `stream.targets`,
+  `stream.late_builds`. `mix conveyor.seed --stream-demo` seeds demo projects through
+  gRPC.
+
 - **`--build_event_publish_all_actions` is safe to turn on.** With the flag Bazel sends
   an event per action. A successful action no longer becomes a row of a build's Actions
   tab (only failed actions do, as without the flag; the row held the whole command
@@ -13,8 +33,7 @@
   stores them. Two additive columns (`invocations.events_skipped`,
   `event_segments.skipped_total`) let the persistence check account for every sequence
   number as stored or skipped. Builds recorded with the flag before this change keep
-  their rows and events. The duplicate-work metrics do not read these events yet
-  (PLAN §28).
+  their rows and events (PLAN §28).
 
 - **Duplicate work: "Keep only what the duplicate-work metrics need"** (a project
   setting on the page, off by default, audited). When on, logs parsed from then on store

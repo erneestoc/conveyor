@@ -160,13 +160,45 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
-### Duplicate work from the event stream — 2026-11-23 (PLAN §28.3), core path landed
+### Duplicate work from the event stream — 2026-11-23 (PLAN §28.3 to §28.6), built, not deployed
 
-One flag (`build --build_event_publish_all_actions`, Bazel 8.6+) and no upload: records
-per action in `stream_actions`, keys merged by `Workers.Rollup`, classes at roll time,
-`Report.build/2` → `source` and `stream` (same-commit floor, any-commit ceiling). Code:
-`lib/conveyor/rbe/stream*.ex`; tests `test/conveyor/rbe_stream_*`. NEXT: the page, the
-docs, a browser check, the throughput bench, the TLA+ model (PLAN §28.3 "Not done").
+One flag (`build --build_event_publish_all_actions`, Bazel 8.6+) and no upload.
+
+- **Code map.** `lib/conveyor/rbe/stream_actions.ex` (key, record, chunk codec; a hit
+  keeps its key and the start of the execution it was served from),
+  `rbe/stream.ex` (`merge_keys!/1`, `hour/1` with the estimate's evidence and top
+  targets, retention, `prune_commit_keys!/2`), `rbe/report.ex` (`stream/7`,
+  `estimate/4`), `workers/stream_keys.ex` (merge when a build ends; the effect is
+  `{:stream_finalized, id}` in `ingest/session.ex`), `conveyor_web/live/rbe_live.ex`
+  (`stream_report`, `stream_hero`, `stream_setup`, `coverage`),
+  `seed/stream_demo.ex` (demo seed and the fixture helpers the tests delegate to),
+  `bench.ex` (profiles `stream*`), `bench/stream_scale.{sh,exs}`,
+  `e2e/stream-shots.mjs`. Tests: `test/conveyor/rbe_stream_*` (estimate validation in
+  `rbe_stream_estimate_test.exs`), `test/conveyor_web/live/rbe_stream_live_test.exs`,
+  `test/conveyor/seed/stream_demo_test.exs`.
+- **Demo and screenshots.** `BES_INGEST_AUTH=api_key ADMIN_TOKEN=x PORT=4100 mix phx.server`
+  (the dev default `none` sends every stream to `default`), then
+  `mix conveyor.seed --stream-demo`, then
+  `cd e2e && OUT=/some/dir ADMIN_TOKEN=x node stream-shots.mjs`.
+- **Bench.** `bench/run.sh --label x --profile stream` (and `stream-off`,
+  `stream-paced`, `stream-paced-off`); `bench/stream_scale.sh --label x` (database
+  `conveyor_stream_scale`, drop it afterwards). Numbers: PLAN §28.5.
+- **Gotchas.** The standard `test/fixtures/bep` builds carry a few successful action
+  events, so the `flatout` profile runs key merges too (+11 KB of WAL per such build);
+  compare with `STREAM_KEYS_ON_FINALIZE=false` when judging the ingest path alone. A
+  laptop that sleeps during a bench run produces a plausible-looking wrong report
+  (builds fail, the clock jumps): check `builds_ok`. `action_keys.out` is the key space
+  for stream keys (0 any commit, 1 same commit), not an output hash. The estimate's
+  evidence in a stored hour is as of its last roll; the two bounds follow the touch
+  rule. `test/conveyor/artifacts_test.exs` fails now and then with a refused
+  connection to its fake cache (seen twice in five gate runs; passes on a rerun).
+- **NEXT, in order:** deploy and try on the trial with a real build; a recording with a
+  real warm C++ build at a second commit (replaces the constructed one in the estimate's
+  validation), with non-cacheable spawns, and with a retried action; the generations
+  design (PLAN §28.4, makes cross-commit duplicates exact where a cache links commits);
+  the TLA+ model of the stream variant; 360 projects and two nodes for
+  `bench/stream_scale.sh`; a partial decoder for `ActionExecuted` if the 13 to 16 µs of
+  decode per action matter.
 
 ### Duplicate work (was "RBE opportunity") — 2026-11-21 (PLAN §27, docs/duplicate-work.md), unreleased
 
