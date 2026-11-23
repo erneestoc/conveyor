@@ -1640,6 +1640,13 @@ defmodule ConveyorWeb.InvocationLive do
     <div id="events">
       <div class="mb-2 flex flex-wrap items-center gap-3 text-xs text-base-content/60">
         <span>{@total} events · page {@page} of {@pages}</span>
+        <span
+          :if={(@invocation.events_skipped || 0) > 0}
+          id="events-skipped"
+          title="Events of successful actions (sent with --build_event_publish_all_actions) and the empty progress event behind each are counted, not stored. A project setting on its Duplicate work page keeps them."
+        >
+          · {@invocation.events_skipped} per-action events received and not stored
+        </span>
         <.link
           :if={@page > 1}
           patch={~p"/invocation/#{@invocation.id}/events?page=#{@page - 1}"}

@@ -2555,3 +2555,110 @@ their rows expired and were then computed from nothing. That is the stated limit
 hour never summarized before it froze); the 5-minute rollup job closes it in
 production and the bench now runs the same refresh before retention. Not measured: a
 real 30 days; `spawns` after `VACUUM FULL` in the mode; a networked database.
+
+## 28. Duplicate work from the event stream (2026-11-23; step 1 landed, the rest is designed, not built)
+
+The owner's requirement: no step for the user other than the BES endpoint. One line,
+`build --build_event_publish_all_actions` (Bazel 8.6+, 9.x), makes Bazel send one
+`ActionExecuted` per spawn; the research (recorded streams with the compact execution
+log of the same builds, buildtools and abseil, Bazel 8.9 and 9.2) says start and end are
+within 1 ms of the log, cache hits are emitted with the original execution's times, and
+`label + mnemonic + primary output + hash of the command line` identifies an action
+exactly at one commit and over-counts across commits.
+
+### 28.1 Step 1 (built): the flag must be safe to turn on
+
+**Before:** every `ActionExecuted` became an `actions` row with the whole command line
+(the table behind a build's Actions tab, meant for failed actions), and every frame went
+to the raw store.
+
+**Rows.** `Normalizer` writes an `actions` row only for a failed action (what Bazel sends
+without the flag). A successful one changes `event_count` and nothing else. The live
+digest of a build (`Session.mark_event`) no longer repeats the newest failed action for
+every successful one.
+
+**Raw bytes, measured** (`RawStore.Codec.compress_bep`, segments of at most 500 events,
+the recorded streams):
+
+| stream | events | successful actions | stored, all frames | stored without them | per action |
+|---|---|---|---|---|---|
+| buildtools 9.2 cold | 611 | 248 | 53.1 KB | 10.8 KB | 170 B |
+| buildtools 8.9 cold | 2,729 | 1,316 | 165.5 KB | 16.9 KB | 113 B |
+| abseil 9.2 cold | 3,541 | 1,357 | 163.3 KB | 49.3 KB | 84 B |
+| abseil 9.2, second machine | 3,519 | 1,357 | 163.0 KB | 45.9 KB | 86 B |
+
+"Without them" drops each successful `ActionExecuted` and the `Progress` frame right
+behind it when that carries no text (Bazel sends one per action as the link to the next
+event): 77 to 92 % of the stream's events, 3.4 to 10 times the stored bytes of the rest,
+84 to 170 B per action against a target of 20 B per action for the whole feature. That
+is not small, so **the default is to drop them** and keeping them is a project setting
+(`settings["rbe"]["keep_action_events"]`, "Keep per-action events in the raw event
+stream" on the Duplicate work page's settings, audited with the other settings). The
+build's Events tab says how many events were received and not stored. Failed actions
+are always stored. The setting is read once per stream (one statement by primary key in
+the worker's load step; `Ingest.Context.keep_action_events` overrides it for tests and
+the seed).
+
+**The protocol is unchanged.** A dropped frame is decoded, scrubbed, normalized, counted
+and acknowledged by the commit of the batch that absorbed it, like a kept one; it
+advances the sequence and the fence (`last_event_seq`). `Batch.add_skipped/2` is the
+third kind of sequence number beside an event and a marker; skipped frames count towards
+`batch_max_events`. The pairing of a `Progress` frame with the action before it is
+session state (`after_action`); a session resumed from the row does not know what came
+before and keeps the first such frame, which costs one empty frame and nothing else.
+
+**The oracle, adapted and not weakened.** Two additive columns
+(`20261123170604_action_events_skipped`):
+
+- `invocations.events_skipped`: frames counted in `event_count` that are not in the raw
+  store. A counter of the normalizer's state, so it commits through the fence with the
+  batch that acknowledges the frames and a resumed stream continues from it.
+- `event_segments.skipped_total`: the build's skipped frames below this row's last
+  sequence number (cumulative, from the row's count at the start of the batch plus the
+  batch's own up to its last kept event; `Batch.merge/2` carries the tail across batches
+  without events).
+
+`RawStore.audit/1` then requires of the event rows, in order: each starts after the one
+before; `1 ≤ count ≤ last − first + 1`; `skipped_total` does not decrease; the gap to the
+row before is no larger than the growth of `skipped_total`; and
+`last = frames so far + skipped_total`, i.e. **every sequence number up to each row's end
+is a stored frame or a counted skipped one**. With no skipped frame this is the old rule
+term for term (each row starts where the last ended and holds as many frames as
+sequence numbers). `Verify.check/2`: `event_count = sent` and `last_event_seq = sent + 1`
+as before; stored and decoded frames `= sent − events_skipped`; the largest
+`skipped_total` may not exceed the row's count. Compaction (`RawArchive.put_events`)
+checks frames and row counts against `event_count − events_skipped`; an archived build's
+Events tab pages over that number. A segment row deleted from a build with skipped
+frames is still reported (`segments_not_contiguous`; contract test, both write modes,
+batches of 7 events so skipped frames fall inside, between and after segments).
+
+Not done in this step: `RawLog.tla`/`Ingest.tla` do not model the third kind of sequence
+number (acknowledgement and fencing are the same transitions as for a kept event; the
+models were not changed and `check.sh` was not run again for this step).
+
+### 28.2 Design for the remaining steps (not built)
+
+- **Key (`key_source` 2, "stream").** First 8 bytes of SHA-256 over
+  `"conveyor-stream-key-v1\0"`, then label, mnemonic, primary output path and the SHA-256
+  of the length-prefixed command line, each length-prefixed. Width: for 10⁹ distinct
+  actions in one scope the expected number of colliding pairs is n²/2⁶⁵ ≈ 0.027 with 8
+  bytes and 6·10⁻¹² with 12; a collision misclassifies one action, so 8 bytes are
+  enough for a metric. The configuration id adds nothing (research).
+- **Hit flag.** `action start < BuildStarted.start_time` (both in the stream; strict; a
+  build without `start_time` has no hit flag and its actions count as executed).
+- **Accumulator.** In `Normalizer`/`Batch`, a binary per batch of packed records (key
+  hash, start, duration, mnemonic id, target id, hit flag), no command line held; the
+  chunk commits with its batch (a `stream_actions (invocation_id, day, first_seq, bytea)`
+  row written in the group transaction after the fence, `ON CONFLICT DO NOTHING`), so a
+  chunk is committed exactly once with the sequence numbers it came from and a resumed
+  stream needs no rebuilt state. Daily partitions for retention (`row_days`, default 3).
+- **Classification.** At roll time from the chunks and `action_keys` rows (the §27.3
+  rule: nothing stores a class). Two key spaces: the key (any commit: the ceiling) and
+  key + commit tag (same commit: the floor). A build with a parsed execution log uses the
+  log and its stream records are ignored.
+- **Version gate.** Bazel ≥ 8.6: times; 8.0 to 8.5 (`end == start`) and 7.x (no times):
+  counts only, stated on the page with the number of such builds.
+- **Exact only with execution logs:** the action digest, cores from exec properties,
+  input lists and their difference, near misses, non-determinism, Bazel 7.
+- **Follow-up:** fetching the execution log by reference from a reachable remote cache
+  (`BuildToolLogs` carries a bytestream URI; a worker like `fetch_profile.ex`).

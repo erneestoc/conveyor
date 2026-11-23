@@ -257,6 +257,18 @@ expire (`RETENTION_SPAWN_DAYS`, 30) and 0.5 s of one parse worker; 360 apps at 5
 a day are 87 GB a day. The hourly numbers of the page survive the expiry, so the spawn
 retention bounds the database size without changing the page.
 
+## Per-action events in the event stream
+
+`build --build_event_publish_all_actions` makes Bazel send an event for every action.
+The metrics of this page do not read those events yet (they are computed from execution
+logs); what Conveyor does with them today is keep them cheap. A successful action adds
+no row to a build's Actions tab, and its event, with the empty progress event Bazel
+sends behind it, is counted but not stored with the build's raw events: on recorded
+builds these are 77 to 92 % of a stream's events and 84 to 170 stored bytes per action.
+The build's Events tab says how many events were received and not stored. **Keep
+per-action events in the raw event stream** in the settings below stores them for
+builds that start afterwards. Failed actions are always stored and listed.
+
 ## Keeping only what the metrics need
 
 A project admin can turn on **Keep only what the duplicate-work metrics need** in the

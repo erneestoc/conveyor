@@ -17,6 +17,12 @@ defmodule Conveyor.Ingest.Batch do
             last_seq: 0,
             events: [],
             event_bytes: 0,
+            # Frames acknowledged with this batch but not kept in the raw store: how many,
+            # how many of them came after the last kept event, and how many the build had
+            # skipped before this batch.
+            skipped: 0,
+            skipped_tail: 0,
+            skipped_base: 0,
             log: [],
             log_bytes: 0,
             log_lines: 0,
@@ -53,9 +59,28 @@ defmodule Conveyor.Ingest.Batch do
       batch
       | events: [{seq, kind, bytes} | batch.events],
         event_bytes: batch.event_bytes + byte_size(bytes),
+        skipped_tail: 0,
         last_seq: seq
     }
   end
+
+  @doc """
+  Records an event at `seq` that is acknowledged with this batch and normalized, but whose
+  bytes are not kept (a successful per-action event of `--build_event_publish_all_actions`).
+  Unlike a marker it is counted: the segment rows say how many such frames precede them.
+  """
+  @spec add_skipped(t(), pos_integer()) :: t()
+  def add_skipped(batch, seq) do
+    %{batch | skipped: batch.skipped + 1, skipped_tail: batch.skipped_tail + 1, last_seq: seq}
+  end
+
+  @doc "Sets how many frames the build had skipped before this batch (from the row)."
+  @spec skipped_base(t(), non_neg_integer()) :: t()
+  def skipped_base(batch, n), do: %{batch | skipped_base: n}
+
+  @doc "Events absorbed into this batch, kept or not (what the batch limit counts)."
+  @spec absorbed(t()) :: non_neg_integer()
+  def absorbed(%__MODULE__{events: events, skipped: skipped}), do: length(events) + skipped
 
   @doc "Records a sequence number that is acknowledged with this batch but stores nothing (control messages)."
   @spec add_marker(t(), pos_integer()) :: t()
@@ -127,6 +152,9 @@ defmodule Conveyor.Ingest.Batch do
       # Lists are newest-first.
       events: b.events ++ a.events,
       event_bytes: a.event_bytes + b.event_bytes,
+      skipped: a.skipped + b.skipped,
+      skipped_tail: if(b.events == [], do: a.skipped_tail + b.skipped, else: b.skipped_tail),
+      skipped_base: a.skipped_base,
       log: b.log ++ a.log,
       log_bytes: a.log_bytes + b.log_bytes,
       log_lines: a.log_lines + b.log_lines,
@@ -213,7 +241,13 @@ defmodule Conveyor.Ingest.Batch do
   @spec event_segment_row(t(), (iodata() -> binary())) :: map() | nil
   def event_segment_row(%__MODULE__{} = b, compress \\ RawStore.compressors().bep) do
     RawStore.event_segment(
-      %{invocation_id: b.invocation_id, day: b.day, bytes: b.event_bytes},
+      %{
+        invocation_id: b.invocation_id,
+        day: b.day,
+        bytes: b.event_bytes,
+        # Skipped frames of the build below this row's last sequence number.
+        skipped_total: b.skipped_base + b.skipped - b.skipped_tail
+      },
       Enum.reverse(b.events),
       compress
     )

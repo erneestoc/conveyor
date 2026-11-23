@@ -158,6 +158,33 @@ defmodule Conveyor.Ingest.BatchTest do
     assert [r1, r2, r3, r4, r5] == [a1.ref, a2.ref, a3.ref, o1.ref, o2.ref]
 
     # A second batch starting at the same sequence (a restarted worker) is its own unit.
+    skipping = fn first, base, steps ->
+      Enum.reduce(
+        steps,
+        Batch.skipped_base(Batch.new(@id, 1, ~D[2026-09-18], first, 0, 0), base),
+        fn
+          {:event, seq}, b -> Batch.add_event(b, seq, "progress", "p")
+          {:skip, seq}, b -> Batch.add_skipped(b, seq)
+        end
+      )
+    end
+
+    # Skipped frames are counted; a segment row says how many lie below its last event.
+    s1 = skipping.(1, 0, skip: 1, event: 2, skip: 3, skip: 4)
+    assert Batch.absorbed(s1) == 4 and Batch.event_count(s1) == 1 and not Batch.empty?(s1)
+    assert %{first_seq: 2, last_seq: 2, count: 1, skipped_total: 1} = Batch.event_segment_row(s1)
+    # Only skipped frames: the batch acknowledges them and writes no segment.
+    s2 = skipping.(5, 3, skip: 5, skip: 6)
+    assert s2.last_seq == 6 and Batch.event_segment_row(s2) == nil and not Batch.empty?(s2)
+    s3 = skipping.(7, 5, skip: 7, event: 8)
+    assert %{first_seq: 8, skipped_total: 6} = Batch.event_segment_row(s3)
+    # Merged, the tail of skipped frames carries across batches without events.
+    m12 = Batch.merge(s1, s2)
+    assert {m12.skipped, m12.skipped_tail, m12.skipped_base} == {5, 4, 0}
+    assert %{skipped_total: 1} = Batch.event_segment_row(m12)
+    m = Batch.merge(m12, s3)
+    assert %{first_seq: 2, last_seq: 8, count: 2, skipped_total: 6} = Batch.event_segment_row(m)
+
     again = Batch.new(@id, 1, ~D[2026-09-18], 1, 0, 0) |> Batch.add_event(1, "started", "a")
     assert [{{@id, 0}, _, _}, {{@id, 1}, _, _}] = Batch.units([a1, again])
   end

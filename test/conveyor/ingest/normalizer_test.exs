@@ -89,11 +89,20 @@ defmodule Conveyor.Ingest.NormalizerTest do
            )
   end
 
+  test "a successful action adds no row: the command line is not copied into the database" do
+    {state, batch, events} = run("clean_build_and_test")
+    assert Enum.any?(events, &match?(%{payload: {:action, %{success: true}}}, &1))
+    assert batch.actions == [] and state.inv.actions_failed == 0
+    assert Normalizer.skipped(state).inv.events_skipped == 1
+  end
+
   test "build failure records failed targets and actions" do
     {state, batch, _} = run("build_failure")
     assert state.inv.status == "failed" and state.inv.targets_failed == 1
     assert state.inv.actions_failed == 1
     failed = Enum.find(batch.actions, &(not &1.success))
+    # Only failed actions get a row, whatever the stream carries (PLAN §28.1).
+    assert Enum.all?(batch.actions, &(not &1.success))
 
     assert failed.mnemonic == "Genrule" and failed.exit_code == 1 and
              failed.label == "//lib:broken"

@@ -121,13 +121,14 @@ defmodule Conveyor.RawStore.Segments do
     end
   end
 
-  @doc "What the rows say they hold, without their bytes: `{first_seq, last_seq, count}` per event row."
-  @spec event_index(Invocation.t()) :: [{pos_integer(), pos_integer(), pos_integer()}]
+  @doc "What the rows say they hold, without their bytes: `{first_seq, last_seq, count, skipped_total}` per event row."
+  @spec event_index(Invocation.t()) ::
+          [{pos_integer(), pos_integer(), pos_integer(), non_neg_integer()}]
   def event_index(%Invocation{} = inv) do
     Repo.all(
       from s in base(inv, EventSegment, []),
         order_by: s.first_seq,
-        select: {s.first_seq, s.last_seq, s.count}
+        select: {s.first_seq, s.last_seq, s.count, s.skipped_total}
     )
   end
 

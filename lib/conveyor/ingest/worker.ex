@@ -159,7 +159,10 @@ defmodule Conveyor.Ingest.Worker do
   end
 
   @impl true
-  def handle_continue(:load, w), do: w |> run(Session.loaded(w.session, load(w))) |> finish()
+  def handle_continue(:load, w) do
+    w = %{w | session: Session.keep_action_events(w.session, keep_action_events?(w.ctx))}
+    w |> run(Session.loaded(w.session, load(w))) |> finish()
+  end
 
   # `acker` receives `{:ack, seq}` once the event is committed (or `{:ack_failed, seq, reason}`).
   # The call itself returns as soon as the event is absorbed, so the gRPC handler keeps
@@ -295,6 +298,17 @@ defmodule Conveyor.Ingest.Worker do
   defp load(w) do
     Retry.with_backoff(fn -> load_or_create(w.ctx, w.invocation_id, w.stream_id) end,
       label: "worker load #{w.invocation_id}"
+    )
+  end
+
+  # Whether the project keeps the frames of successful per-action events in the raw store
+  # (`Conveyor.Rbe.Settings`, off by default). Read once per stream, by primary key; a
+  # context may state it (tests, the seed).
+  defp keep_action_events?(%{keep_action_events: keep?}) when is_boolean(keep?), do: keep?
+
+  defp keep_action_events?(%{project_id: project_id}) do
+    Retry.with_backoff(fn -> Conveyor.Rbe.Settings.keep_action_events?(project_id) end,
+      label: "worker settings #{project_id}"
     )
   end
 

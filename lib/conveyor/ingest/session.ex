@@ -83,6 +83,11 @@ defmodule Conveyor.Ingest.Session do
             invocation_id: nil,
             project_id: nil,
             norm_opts: [],
+            # Whether successful per-action events are kept in the raw store (a project
+            # setting; they are dropped by default, PLAN §28.1), and whether the event
+            # before this one was such a dropped event (its empty Progress goes with it).
+            keep_action_events: false,
+            after_action: false,
             # :loading | :live | {:refused, reason}
             phase: :loading,
             day: nil,
@@ -132,7 +137,8 @@ defmodule Conveyor.Ingest.Session do
 
   @doc """
   A session for one invocation of one project, not yet loaded. Options: `:invocation_id`,
-  `:project_id` (required), `:keywords`, `:api_key_tags`, `:max_log_bytes`.
+  `:project_id` (required), `:keywords`, `:api_key_tags`, `:max_log_bytes`,
+  `:keep_action_events` (default false: see `keep_action_events/2`).
   """
   @spec new(Config.t(), keyword()) :: t()
   def new(%Config{} = config, opts) do
@@ -140,9 +146,22 @@ defmodule Conveyor.Ingest.Session do
       config: config,
       invocation_id: Keyword.fetch!(opts, :invocation_id),
       project_id: Keyword.fetch!(opts, :project_id),
-      norm_opts: Keyword.take(opts, [:keywords, :api_key_tags, :max_log_bytes])
+      norm_opts: Keyword.take(opts, [:keywords, :api_key_tags, :max_log_bytes]),
+      keep_action_events: Keyword.get(opts, :keep_action_events, false)
     }
   end
+
+  @doc """
+  Sets whether the frames of successful `ActionExecuted` events, and of the empty
+  `Progress` event Bazel sends behind each, are kept in the raw store. With
+  `--build_event_publish_all_actions` they are most of a stream (measured: 77 to 92 % of
+  its events, 3.4 to 10 times the stored bytes of the rest), and nothing reads them back:
+  what the duplicate-work metrics need is taken when the event arrives. A dropped frame is
+  normalized, counted (`events_skipped`) and acknowledged with its batch like any other.
+  """
+  @spec keep_action_events(t(), boolean()) :: t()
+  def keep_action_events(%__MODULE__{} = s, keep?) when is_boolean(keep?),
+    do: %{s | keep_action_events: keep?}
 
   @doc """
   The row was read: at start, or after a `:reload`. Everything the session held is replaced
@@ -181,7 +200,9 @@ defmodule Conveyor.Ingest.Session do
             inv.last_event_seq + 1,
             inv.log_bytes,
             inv.log_lines
-          ),
+          )
+          |> Batch.skipped_base(inv.events_skipped || 0),
+        after_action: false,
         inflight: %{},
         blocked: [],
         stream_finished: inv.stream_finished,
@@ -427,14 +448,29 @@ defmodule Conveyor.Ingest.Session do
         case Event.unwrap(event) do
           {:ok, bep} ->
             {bep, changed?} = Scrub.event(bep)
-
-            bytes =
-              if changed?, do: BuildEventStream.BuildEvent.encode(bep), else: any_bytes(event)
-
-            kind = bep |> Event.payload_kind() |> to_string()
             {norm, batch} = Normalizer.apply(s.norm, bep, seq, s.batch)
-            batch = Batch.add_event(batch, seq, kind, bytes)
-            mark_event({%{s | norm: norm, batch: batch}, fx}, bep)
+
+            case raw_disposition(s, bep) do
+              :keep ->
+                bytes =
+                  if changed?,
+                    do: BuildEventStream.BuildEvent.encode(bep),
+                    else: any_bytes(event)
+
+                kind = bep |> Event.payload_kind() |> to_string()
+                batch = Batch.add_event(batch, seq, kind, bytes)
+                mark_event({%{s | norm: norm, batch: batch, after_action: false}, fx}, bep)
+
+              {:skip, after_action?} ->
+                s = %{
+                  s
+                  | norm: Normalizer.skipped(norm),
+                    batch: Batch.add_skipped(batch, seq),
+                    after_action: after_action?
+                }
+
+                mark_event({s, fx}, bep)
+            end
 
           {:error, reason} ->
             log =
@@ -451,6 +487,19 @@ defmodule Conveyor.Ingest.Session do
         {%{s | batch: Batch.add_marker(s.batch, seq)}, fx}
     end
   end
+
+  # Whether an event's frame goes to the raw store. A successful per-action event does not
+  # (unless the project keeps them), nor does the Progress event right behind it when it
+  # carries no text: Bazel sends one per action as the link to the next event. A resumed
+  # session does not know what came before it and keeps the first such Progress frame.
+  defp raw_disposition(%{keep_action_events: true}, _bep), do: :keep
+
+  defp raw_disposition(_s, %{payload: {:action, %{success: true}}}), do: {:skip, true}
+
+  defp raw_disposition(%{after_action: true}, %{payload: {:progress, %{stdout: "", stderr: ""}}}),
+    do: {:skip, false}
+
+  defp raw_disposition(_s, _bep), do: :keep
 
   defp any_bytes(%V1.BuildEvent{event: {:bazel_event, %Google.Protobuf.Any{value: bytes}}}),
     do: bytes
@@ -472,7 +521,7 @@ defmodule Conveyor.Ingest.Session do
 
   defp maybe_flush({s, fx} = acc) do
     cond do
-      Batch.event_count(s.batch) >= s.config.batch_max_events -> flush(acc)
+      Batch.absorbed(s.batch) >= s.config.batch_max_events -> flush(acc)
       s.batch.event_bytes + s.batch.log_bytes >= s.config.batch_max_bytes -> flush(acc)
       s.stream_finished -> flush(acc)
       s.flush_armed -> acc
@@ -543,6 +592,7 @@ defmodule Conveyor.Ingest.Session do
         s.norm.inv[:log_bytes],
         s.norm.inv[:log_lines]
       )
+      |> Batch.skipped_base(s.norm.inv[:events_skipped] || 0)
 
     {%{s | batch: next, inflight: Map.put(s.inflight, batch.ref, batch)}, [{:submit, batch} | fx]}
   end
@@ -615,7 +665,8 @@ defmodule Conveyor.Ingest.Session do
         :test_result ->
           %{dirty | tests: Map.merge(dirty.tests, s.batch.tests), summary: true}
 
-        :action ->
+        # Only a failed action added a row to the batch (the newest one).
+        :action when not payload.success ->
           %{dirty | actions: Enum.take(s.batch.actions, 1) ++ dirty.actions, summary: true}
 
         _ ->

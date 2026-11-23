@@ -38,9 +38,15 @@ build:ci  --bes_upload_mode=wait_for_upload_complete --bes_timeout=120s
 build:dev --bes_upload_mode=nowait_for_upload_complete --bes_timeout=30s
 ```
 
-Event volume is what costs the server and the network: `--build_event_publish_all_actions`
-emits one event per action and multiplies the stream for large builds; leave it off unless
-you want every action in the Actions tab.
+Event volume is what costs the server and the network. `--build_event_publish_all_actions`
+emits one event per action (two with the progress event behind each), 1.7 to 2.3 KB on
+the wire per action, mostly the command line. Conveyor takes it as follows: only failed
+actions appear in a build's Actions tab, with or without the flag; the events of
+successful actions are counted and, by default, not stored with the build's raw events
+(its Events tab says how many; the project setting "Keep per-action events in the raw
+event stream" on the Duplicate work page stores them, at 84 to 170 stored bytes per
+action in recorded builds). The duplicate-work metrics do not read these events yet;
+they still come from execution logs (below).
 
 ## Profiles, test logs and artifacts
 

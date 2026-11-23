@@ -162,6 +162,26 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ### Duplicate work (was "RBE opportunity") — 2026-11-21 (PLAN §27, docs/duplicate-work.md), unreleased
 
+- **Event-stream mode (PLAN §28), step 1 of several landed 2026-11-23; the rest is NOT
+  built.** The owner chose `build --build_event_publish_all_actions` (Bazel 8.6+) as the
+  only setup for both fleets. Landed: a successful `ActionExecuted` adds no `actions`
+  row (`Normalizer`); its frame and the empty `Progress` frame behind it are dropped
+  from the raw store by default (`Session.raw_disposition/2`, `Batch.add_skipped/2`,
+  project setting `settings["rbe"]["keep_action_events"]` read once per stream by
+  `Worker.keep_action_events?/1`, `Ingest.Context.keep_action_events` for tests); the
+  oracle accounts for them (`invocations.events_skipped`, `event_segments.skipped_total`,
+  `RawStore.audit/1`'s rule, `Verify`, `RawArchive.put_events`). **Rules to keep:** a
+  skipped frame is acknowledged only by its batch's commit like any event; every
+  sequence number is a stored frame, a counted skipped frame or the end marker; a test
+  that asserts "stored as sent" passes `keep_action_events: true` in its context (the
+  fixtures `clean_build_and_test` and `build_only_verbose` carry per-action events).
+  **NEXT, in order (PLAN §28.2):** the stream key and packed records accumulated per
+  batch and committed with it; `action_keys` for key source "stream" with the
+  same-commit and any-commit key spaces; the hourly rollup with a `source` dimension;
+  the page (floor and ceiling, version gate, coverage); retention; fixtures from the
+  research recordings (`…/scratchpad/bes-only/raw`, scrub first) with accuracy tests
+  against the execution logs; the ingest and scale benches; docs; a browser check.
+  Nothing of that list exists; the Duplicate work page still reads execution logs only.
 - **2026-11-23, owner's decisions after seeing the live pages (all landed).**
   (1) *Hit rates* are three named values, "today", "perfect cache", "with in-flight
   deduplication" (`cache.hit_rate.*`; `actual_rate`/`ideal_rate`/`rbe_rate` are aliases

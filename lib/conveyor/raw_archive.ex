@@ -79,7 +79,7 @@ defmodule Conveyor.RawArchive do
 
   # What archiving reads of a build's row (the wide columns stay in the database).
   @archive_fields ~w(id project_id inserted_at raw_status stream_finished status finished_at
-                     event_count log_bytes)a
+                     event_count events_skipped log_bytes)a
 
   @doc "The rows of the given builds (the columns archiving reads), in the order of the ids; a build deleted meanwhile is left out."
   @spec load([Ecto.UUID.t()]) :: [Invocation.t()]
@@ -281,9 +281,12 @@ defmodule Conveyor.RawArchive do
       frames = :counters.get(counts, 1)
       rows = :counters.get(counts, 2)
 
-      if frames == inv.event_count and rows == inv.event_count and frames > 0,
+      # The frames the build skipped on purpose are not in the segments (PLAN §28.1).
+      kept = inv.event_count - (inv.events_skipped || 0)
+
+      if frames == kept and rows == kept and frames > 0,
         do: {:ok, blob},
-        else: discard(inv, blob, {:mismatch, {:events, frames, rows, inv.event_count}})
+        else: discard(inv, blob, {:mismatch, {:events, frames, rows, kept}})
     end
   end
 

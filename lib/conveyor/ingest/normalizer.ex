@@ -26,7 +26,7 @@ defmodule Conveyor.Ingest.Normalizer do
 
   @type state :: State.t()
 
-  @counter_fields ~w(targets_configured targets_completed targets_failed tests_total tests_passed tests_failed tests_flaky tests_timed_out actions_failed event_count log_bytes log_lines)a
+  @counter_fields ~w(targets_configured targets_completed targets_failed tests_total tests_passed tests_failed tests_flaky tests_timed_out actions_failed event_count events_skipped log_bytes log_lines)a
 
   @doc "Builds a state from an invocation row (a struct or map)."
   @spec new(map(), keyword()) :: state()
@@ -70,6 +70,13 @@ defmodule Conveyor.Ingest.Normalizer do
     state = increment(state, :event_count)
     handle(Event.payload_kind(event), event, seq, state, batch)
   end
+
+  @doc """
+  Counts an event whose frame is not kept in the raw store (the session decides which;
+  the count travels with the batch that acknowledges the event).
+  """
+  @spec skipped(state()) :: state()
+  def skipped(%State{} = state), do: increment(state, :events_skipped)
 
   # --- per payload ------------------------------------------------------------------------
 
@@ -210,6 +217,13 @@ defmodule Conveyor.Ingest.Normalizer do
     {state, Batch.upsert_target(batch, target_key(attrs), attrs)}
   end
 
+  # Only a failed action gets an `actions` row (the table is what the Actions tab lists:
+  # the command line, the outputs and the failure). Bazel sends failed actions by default
+  # and every action with `--build_event_publish_all_actions`: a row with the whole
+  # command line per successful action would be megabytes per build (PLAN §28.1).
+  defp handle(:action, %{payload: {:action, %{success: true}}}, _seq, state, batch),
+    do: {state, batch}
+
   defp handle(
          :action,
          %{id: %{id: {:action_completed, aid}}, payload: {:action, a}},
@@ -226,7 +240,7 @@ defmodule Conveyor.Ingest.Normalizer do
       configuration_id:
         configuration_id(a.configuration) |> blank_to_nil() || configuration_id(aid.configuration),
       mnemonic: blank_to_nil(a.type),
-      success: a.success,
+      success: false,
       exit_code: a.exit_code,
       started_at: started,
       ended_at: ended,
@@ -238,8 +252,7 @@ defmodule Conveyor.Ingest.Normalizer do
       failure_message: failure_message(a.failure_detail)
     }
 
-    state = if a.success, do: state, else: increment(state, :actions_failed)
-    {state, Batch.add_action(batch, attrs)}
+    {increment(state, :actions_failed), Batch.add_action(batch, attrs)}
   end
 
   defp handle(

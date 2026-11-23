@@ -84,7 +84,7 @@ defmodule Conveyor.RawStore do
           map() | nil
   def event_segment(_unit, [], _compress), do: nil
 
-  def event_segment(%{invocation_id: id, day: day, bytes: bytes}, events, compress) do
+  def event_segment(%{invocation_id: id, day: day, bytes: bytes} = unit, events, compress) do
     {first, _, _} = hd(events)
     {last, _, _} = List.last(events)
 
@@ -95,6 +95,7 @@ defmodule Conveyor.RawStore do
       last_seq: last,
       count: length(events),
       byte_size: bytes,
+      skipped_total: Map.get(unit, :skipped_total, 0),
       payload: compress.(Enum.map(events, fn {_seq, _kind, message} -> Codec.frame(message) end))
     }
   end
@@ -216,7 +217,7 @@ defmodule Conveyor.RawStore do
           |> Enum.take(per_page)
 
         # Compaction checked that the blob holds exactly the row's count.
-        {Enum.zip(first..(first + per_page), events), inv.event_count}
+        {Enum.zip(first..(first + per_page), events), inv.event_count - (inv.events_skipped || 0)}
 
       :segments ->
         segment_page(inv, first, first + per_page - 1)
@@ -228,7 +229,7 @@ defmodule Conveyor.RawStore do
     {rows, total} =
       inv
       |> Segments.event_index()
-      |> Enum.map_reduce(0, fn {seq, _last_seq, count}, before ->
+      |> Enum.map_reduce(0, fn {seq, _last_seq, count, _skipped}, before ->
         {{seq, before + 1, count}, before + count}
       end)
 
@@ -405,12 +406,14 @@ defmodule Conveyor.RawStore do
 
   @typedoc """
   What the store holds for a build: `frames` events that decode out of it, `events` it
-  says it holds, `log_bytes` of log text that read out of it, and `problems` with how it
-  is stored (gaps or overlaps between pieces).
+  says it holds, `skipped` frames it says were acknowledged without being kept (successful
+  per-action events, PLAN §28.1), `log_bytes` of log text that read out of it, and
+  `problems` with how it is stored (gaps or overlaps between pieces).
   """
   @type audit :: %{
           frames: non_neg_integer(),
           events: non_neg_integer(),
+          skipped: non_neg_integer(),
           log_bytes: non_neg_integer(),
           problems: [tuple()]
         }
@@ -424,7 +427,14 @@ defmodule Conveyor.RawStore do
     case form(inv) do
       # One object per kind: contiguous by construction.
       :archived ->
-        %{frames: frames, events: frames, log_bytes: log_bytes, problems: []}
+        # Compaction checked the frames against the row's counts.
+        %{
+          frames: frames,
+          events: frames,
+          skipped: inv.events_skipped || 0,
+          log_bytes: log_bytes,
+          problems: []
+        }
 
       :segments ->
         events = Segments.event_index(inv)
@@ -441,19 +451,25 @@ defmodule Conveyor.RawStore do
         %{
           frames: frames,
           events: events |> Enum.map(&elem(&1, 2)) |> Enum.sum(),
+          skipped: events |> Enum.map(&elem(&1, 3)) |> Enum.max(fn -> 0 end),
           log_bytes: log_bytes,
           problems: problems
         }
     end
   end
 
-  # Event rows cover 1..N without gaps or overlaps.
+  # Event rows account for every sequence number 1..N, in order and without overlaps:
+  # each one up to a row's last is either a frame of this or an earlier row, or one of
+  # the frames the build skipped up to there (`skipped_total`, which only grows). Without
+  # skipped frames this is the old rule: each row starts where the one before ended and
+  # holds as many frames as sequence numbers.
   defp contiguous?(segments) do
     segments
-    |> Enum.reduce_while(1, fn {first, last, count}, expected ->
-      if first == expected and last >= first and count == last - first + 1,
-        do: {:cont, last + 1},
-        else: {:halt, :broken}
+    |> Enum.reduce_while({0, 0, 0}, fn {first, last, count, skipped}, {prev, held, was} ->
+      if first > prev and count >= 1 and count <= last - first + 1 and skipped >= was and
+           first - prev - 1 <= skipped - was and last == held + count + skipped,
+         do: {:cont, {last, held + count, skipped}},
+         else: {:halt, :broken}
     end)
     |> then(&(&1 != :broken))
   end

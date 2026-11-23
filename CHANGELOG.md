@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- **`--build_event_publish_all_actions` is safe to turn on.** With the flag Bazel sends
+  an event per action. A successful action no longer becomes a row of a build's Actions
+  tab (only failed actions do, as without the flag; the row held the whole command
+  line), and by default the events of successful actions, with the empty progress event
+  behind each, are counted but not stored with the build's raw events: measured on
+  recorded builds they are 77 to 92 % of a stream and 84 to 170 stored bytes per action.
+  The Events tab says how many were received and not stored; "Keep per-action events in
+  the raw event stream" (a project setting on the Duplicate work page, off by default)
+  stores them. Two additive columns (`invocations.events_skipped`,
+  `event_segments.skipped_total`) let the persistence check account for every sequence
+  number as stored or skipped. Builds recorded with the flag before this change keep
+  their rows and events. The duplicate-work metrics do not read these events yet
+  (PLAN §28).
+
 - **Duplicate work: "Keep only what the duplicate-work metrics need"** (a project
   setting on the page, off by default, audited). When on, logs parsed from then on store
   no input lists and no output lists, the uploaded log is deleted once parsed, and

@@ -55,6 +55,37 @@ defmodule Conveyor.Ingest.WorkerTest do
   end
 
   @tag :capture_log
+  test "a project that keeps per-action events stores the stream as sent", %{
+    ctx: ctx,
+    project: project
+  } do
+    refute Conveyor.Rbe.Settings.keep_action_events?(project.id)
+    refute Conveyor.Rbe.Settings.keep_action_events?(-1)
+
+    assert {:ok, project} =
+             Conveyor.Rbe.Settings.put(project, %{"keep_action_events" => "true"})
+
+    assert Conveyor.Rbe.Settings.get(project).keep_action_events
+    assert Conveyor.Rbe.Settings.keep_action_events?(project.id)
+    # Another save that does not mention the flag keeps it.
+    assert {:ok, project} = Conveyor.Rbe.Settings.put(project, %{"tolerance_s" => "5"})
+    assert Conveyor.Rbe.Settings.get(project).keep_action_events
+
+    id = Replay.uuid()
+    events = events("clean_build_and_test")
+    push_all(ctx, id, events)
+    finish(ctx, id, length(events) + 1)
+    inv = reload(id)
+    assert inv.events_skipped == 0 and inv.event_count == length(events)
+    assert :ok = Ingest.Verify.check(id, length(events))
+    assert length(Invocations.events(inv)) == length(events)
+    # Kept in the raw stream, still no row per successful action.
+    assert Invocations.actions(inv) == []
+
+    assert {:ok, _} = Conveyor.Rbe.Settings.put(project, %{"keep_action_events" => "false"})
+    refute Conveyor.Rbe.Settings.keep_action_events?(project.id)
+  end
+
   test "persists a full build, finalizes and exits after lingering", %{ctx: ctx} do
     ctx = %{ctx | session: session(linger_ms: 2_000)}
     id = Replay.uuid()
@@ -119,11 +150,21 @@ defmodule Conveyor.Ingest.WorkerTest do
     # The fixture's profile is a local file: settled in the final batch, no fetch job.
     assert inv.profile_status == "unavailable" and inv.profile_uri =~ "file://"
     assert :ok = Ingest.Verify.check(id, length(events))
-    assert length(Invocations.events(inv)) == length(events)
+    # The fixture was recorded with an event per action: the frames of the successful
+    # ones are counted, not stored (PLAN §28.1), and the oracle above accounts for them.
+    assert inv.events_skipped > 0
+    assert length(Invocations.events(inv)) == length(events) - inv.events_skipped
+
+    refute Enum.any?(Invocations.events(inv), fn e ->
+             match?(%{payload: {:action, %{success: true}}}, e) or
+               match?(%{"action" => %{"success" => true}}, e)
+           end)
+
     assert Invocations.log(inv) =~ "Build completed successfully"
     assert length(Invocations.targets(inv)) == 5
     assert length(Invocations.test_results(inv)) == 5
-    assert Invocations.actions(inv) != [] and Invocations.metrics(inv).build_metrics != %{}
+    # Only failed actions get a row; this build has none.
+    assert Invocations.actions(inv) == [] and Invocations.metrics(inv).build_metrics != %{}
     # The file-set graph stays in the raw events only (PLAN §26.1): no derived rows.
     assert Enum.any?(events, &match?(%{payload: {:named_set_of_files, _}}, &1))
 

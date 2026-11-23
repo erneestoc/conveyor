@@ -444,6 +444,82 @@ defmodule Conveyor.Ingest.SessionTest do
     s
   end
 
+  defp action(seq, success?) do
+    Replay.ordered_event(@stream, seq, %BES.BuildEvent{
+      id: %BES.BuildEventId{
+        id: {:action_completed, %BES.BuildEventId.ActionCompletedId{label: "//a:b"}}
+      },
+      payload:
+        {:action,
+         %BES.ActionExecuted{success: success?, type: "Genrule", command_line: ["sh", "-c", "x"]}}
+    })
+  end
+
+  defp submitted(fx), do: for({:submit, batch} <- fx, do: batch)
+
+  test "frames of successful actions and the empty progress behind each are counted, not kept" do
+    s = live()
+    {s, _} = Session.push(s, progress(1), :c1, {:c1, 1})
+    {s, _} = Session.push(s, action(2, true), :c1, {:c1, 2})
+    {s, _} = Session.push(s, progress(3, ""), :c1, {:c1, 3})
+    # An empty progress that does not follow an action, a failed action and a progress
+    # with text are kept.
+    {s, _} = Session.push(s, progress(4, ""), :c1, {:c1, 4})
+    {s, _} = Session.push(s, action(5, false), :c1, {:c1, 5})
+    {s, _} = Session.push(s, action(6, true), :c1, {:c1, 6})
+    {s, _} = Session.push(s, progress(7, "text\n"), :c1, {:c1, 7})
+    {s, _} = Session.push(s, action(8, true), :c1, {:c1, 8})
+    {s, fx} = Session.timer(s, :flush)
+
+    assert [batch] = submitted(fx)
+    assert Enum.map(Enum.reverse(batch.events), &elem(&1, 0)) == [1, 4, 5, 7]
+    assert batch.last_seq == 8 and batch.skipped == 4 and batch.skipped_tail == 1
+    assert batch.invocation.events_skipped == 4 and batch.invocation.event_count == 8
+    assert [%{seq: 5, success: false}] = batch.actions
+
+    assert %{first_seq: 1, last_seq: 7, count: 4, skipped_total: 3} =
+             Batch.event_segment_row(batch)
+
+    # The next batch starts from what the build has skipped so far; every sequence number
+    # of a batch without a kept frame is still acknowledged by its commit.
+    {s, _} = Session.committed(s, batch.ref)
+    {s, _} = Session.push(s, progress(9, ""), :c1, {:c1, 9})
+    {s, _} = Session.push(s, action(10, true), :c1, {:c1, 10})
+    {s, fx} = Session.timer(s, :flush)
+    assert [next] = submitted(fx)
+    assert next.events == [] and next.skipped == 2 and next.skipped_base == 4
+    assert next.first_seq == 9 and next.last_seq == 10
+    {_s, fx} = Session.committed(s, next.ref)
+    assert {:ack, :c1, 9} in fx and {:ack, :c1, 10} in fx
+  end
+
+  test "skipped frames count towards the batch limit, and a resumed session starts from the row" do
+    s =
+      %{@config | batch_max_events: 3}
+      |> Session.new(invocation_id: @id, project_id: 1)
+      |> Session.loaded({:ok, %{row(last: 20) | events_skipped: 11}})
+      |> elem(0)
+
+    {s, _} = Session.push(s, action(21, true), :c1, {:c1, 21})
+    {s, _} = Session.push(s, action(22, true), :c1, {:c1, 22})
+    {_s, fx} = Session.push(s, progress(23), :c1, {:c1, 23})
+    assert [batch] = submitted(fx)
+    assert batch.invocation.events_skipped == 13
+    assert %{first_seq: 23, last_seq: 23, skipped_total: 13} = Batch.event_segment_row(batch)
+  end
+
+  test "a project that keeps per-action events stores every frame" do
+    s = Session.keep_action_events(live(), true)
+    {s, _} = Session.push(s, action(1, true), :c1, {:c1, 1})
+    {s, _} = Session.push(s, progress(2, ""), :c1, {:c1, 2})
+    {_s, fx} = Session.timer(s, :flush)
+    assert [batch] = submitted(fx)
+    assert Batch.event_count(batch) == 2 and batch.skipped == 0
+    refute Map.has_key?(batch.invocation, :events_skipped)
+    # A successful action still adds no row.
+    assert batch.actions == []
+  end
+
   test "the final batch carries the final status and counts the tags once" do
     s = live(tags: %{"team" => "core"})
     {s, _} = Session.push(s, progress(1), :c1, {:c1, 1})

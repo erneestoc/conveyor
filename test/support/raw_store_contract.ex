@@ -215,7 +215,7 @@ defmodule Conveyor.RawStoreContract do
       log_bytes: byte_size(log),
       log: log,
       pages: for({page, per} <- @pages, do: {Enum.slice(numbered, (page - 1) * per, per), n}),
-      audit: %{frames: n, events: n, log_bytes: byte_size(log), problems: []}
+      audit: %{frames: n, events: n, skipped: 0, log_bytes: byte_size(log), problems: []}
     }
   end
 

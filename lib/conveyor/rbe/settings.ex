@@ -22,6 +22,11 @@ defmodule Conveyor.Rbe.Settings do
       stored, the uploaded log is deleted once parsed, and spawn rows are kept `row_days`
       days instead of the project's execution-log retention (PLAN §27.11). Read when a
       log is parsed and by retention;
+    * `keep_action_events` ("Keep per-action events in the raw event stream", off by
+      default): with `--build_event_publish_all_actions` Bazel sends an event per action;
+      the frames of the successful ones (and the empty Progress event behind each) are
+      not kept in a build's raw events unless this is on (PLAN §28.1). Read when a
+      stream starts;
     * `late_logs`: a counter, not a setting: logs parsed while the mode was on whose
       build's hour was already frozen (`count_late!/1`).
   """
@@ -44,6 +49,7 @@ defmodule Conveyor.Rbe.Settings do
           cores_property: Conveyor.ExecLog.Cores.property(),
           analysis_only: boolean(),
           row_days: pos_integer(),
+          keep_action_events: boolean(),
           late_logs: non_neg_integer()
         }
 
@@ -66,8 +72,25 @@ defmodule Conveyor.Rbe.Settings do
       cores_property: cores_property(rbe),
       analysis_only: Map.get(rbe, "analysis_only", false) == true,
       row_days: Map.get(rbe, "row_days", @default_row_days),
+      keep_action_events: Map.get(rbe, "keep_action_events", false) == true,
       late_logs: Map.get(rbe, "late_logs", 0)
     }
+  end
+
+  @doc """
+  Whether the project keeps the frames of successful per-action events (one statement by
+  primary key: the ingest worker asks once per stream). False for a project that is gone.
+  """
+  @spec keep_action_events?(integer()) :: boolean()
+  def keep_action_events?(project_id) when is_integer(project_id) do
+    %{rows: rows} =
+      Conveyor.Repo.query!(
+        "SELECT settings #>> '{rbe,keep_action_events}' FROM projects WHERE id = $1",
+        [project_id],
+        cache_statement: "conveyor_keep_action_events"
+      )
+
+    rows == [["true"]]
   end
 
   @doc """
@@ -118,10 +141,13 @@ defmodule Conveyor.Rbe.Settings do
          {:ok, names} <- parse_names(attrs["cores_properties"], current.names),
          {:ok, unit} <- parse_unit(attrs["cores_unit"], current.unit),
          {:ok, analysis_only} <- parse_flag(attrs["analysis_only"], get(project).analysis_only),
-         {:ok, row_days} <- parse_row_days(attrs["row_days"], get(project).row_days) do
+         {:ok, row_days} <- parse_row_days(attrs["row_days"], get(project).row_days),
+         {:ok, keep_events} <-
+           parse_flag(attrs["keep_action_events"], get(project).keep_action_events) do
       rbe =
         %{"cores" => cores, "tolerance_s" => tolerance}
         |> then(&if(analysis_only, do: Map.put(&1, "analysis_only", true), else: &1))
+        |> then(&if(keep_events, do: Map.put(&1, "keep_action_events", true), else: &1))
         |> then(
           &if(row_days == @default_row_days, do: &1, else: Map.put(&1, "row_days", row_days))
         )

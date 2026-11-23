@@ -39,6 +39,8 @@ defmodule Conveyor.Invocations.Invocation do
     field :options, :map, default: %{}
     field :workspace_status, :map, default: %{}
     field :event_count, :integer, default: 0
+    # Events counted in `event_count` whose frames are not in the raw store (PLAN §28.1).
+    field :events_skipped, :integer, default: 0
     field :log_bytes, :integer, default: 0
     field :log_lines, :integer, default: 0
     field :targets_configured, :integer, default: 0

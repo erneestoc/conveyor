@@ -9,6 +9,8 @@ defmodule Conveyor.Invocations.EventSegment do
     field :first_seq, :integer, primary_key: true
     field :last_seq, :integer
     field :count, :integer
+    # Frames of the build below `last_seq` that were acknowledged but not kept (PLAN §28.1).
+    field :skipped_total, :integer, default: 0
     field :byte_size, :integer
     field :payload, :binary
     # Blob mode (PLAN §25 step 2): the bytes live in a raw-log object, not in the row.

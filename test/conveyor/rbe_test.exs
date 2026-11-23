@@ -580,6 +580,7 @@ defmodule Conveyor.RbeTest do
                cores_property: Cores.default_property(),
                analysis_only: false,
                row_days: 3,
+               keep_action_events: false,
                late_logs: 0
              }
 

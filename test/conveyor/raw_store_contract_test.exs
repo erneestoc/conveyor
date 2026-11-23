@@ -626,9 +626,66 @@ defmodule Conveyor.RawStoreContractTest do
     end
 
     for mode <- [:postgres, :blob] do
+      test "#{mode} mode: successful per-action events are counted, not stored, and the oracle accounts for every sequence number",
+           %{ctx: ctx} do
+        raw_log_mode!(unquote(mode), flush_ms: 20)
+        # Small batches: skipped frames fall inside segments, between them and after the last.
+        ctx = %{ctx | session: %{Conveyor.Ingest.session_config() | batch_max_events: 7}}
+
+        for name <- @fixtures do
+          sent = name |> fixture_bytes() |> Conveyor.Bep.Fixture.frames()
+
+          ok? =
+            &match?({:action, %{success: true}}, BuildEventStream.BuildEvent.decode(&1).payload)
+
+          actions = Enum.count(sent, ok?)
+
+          id = ingest_fixture!(name, ctx)
+          inv = Repo.get!(Invocation, id)
+          assert inv.event_count == length(sent)
+          assert inv.events_skipped >= actions and inv.events_skipped <= 2 * actions
+          assert :ok = Verify.check(id, length(sent))
+
+          before = reads(inv)
+          assert before.audit.problems == []
+          assert before.audit.frames == length(sent) - inv.events_skipped
+          kept = Conveyor.Bep.Fixture.frames(before.bep)
+          refute Enum.any?(kept, ok?)
+          # What is kept is what was sent, in order, without the skipped frames.
+          assert [] ==
+                   Enum.reduce(sent, kept, fn
+                     frame, [frame | rest] -> rest
+                     _frame, rest -> rest
+                   end)
+
+          # The oracle tells a skipped frame from a lost one: a segment that goes missing
+          # is a problem, whatever the row counts.
+          if actions > 0 and unquote(mode) == :postgres do
+            {1, _} =
+              Repo.delete_all(
+                from(s in Conveyor.Invocations.EventSegment,
+                  where: s.invocation_id == ^id and s.first_seq == 1
+                )
+              )
+
+            assert {:error, problems} = Verify.check(id, length(sent))
+            assert Enum.any?(problems, &match?({:segments_not_contiguous, _}, &1))
+          else
+            assert {:ok, :archived} = RawStore.compact(id, later())
+            archived = Repo.get!(Invocation, id)
+            assert :ok = Verify.check(id, length(sent))
+            assert reads(archived).bep == before.bep
+            assert reads(archived).pages == before.pages
+          end
+        end
+      end
+
       test "#{mode} mode: every fixture is stored as it was sent and reads the same once archived",
            %{ctx: ctx} do
         raw_log_mode!(unquote(mode), flush_ms: 20)
+
+        # As sent: the project keeps per-action events (off by default, PLAN §28.1).
+        ctx = %{ctx | keep_action_events: true}
 
         for name <- @fixtures do
           id = ingest_fixture!(name, ctx)
@@ -653,7 +710,7 @@ defmodule Conveyor.RawStoreContractTest do
     test "downloads and the events tab of an archived build come from a one-shot store, byte for byte",
          %{conn: conn, ctx: ctx} do
       adapter!(OneShot)
-      id = ingest_fixture!("build_only_verbose", ctx)
+      id = ingest_fixture!("build_only_verbose", %{ctx | keep_action_events: true})
       log_resp = get(conn, ~p"/invocation/#{id}/download/log")
       log = response(log_resp, 200)
       events = response(get(build_conn(), ~p"/invocation/#{id}/download/events"), 200)

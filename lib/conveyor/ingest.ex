@@ -32,6 +32,8 @@ defmodule Conveyor.Ingest do
               peer: nil,
               limits: nil,
               session: nil,
+              # nil: the project's setting decides (`Conveyor.Rbe.Settings`).
+              keep_action_events: nil,
               registry: Conveyor.Ingest.Registry,
               worker_supervisor: Conveyor.Ingest.WorkerSupervisor
 

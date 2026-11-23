@@ -111,6 +111,7 @@ defmodule ConveyorWeb.RbeLive do
             "cores_properties" => Settings.names_text(settings),
             "cores_unit" => settings.cores_property.unit,
             "analysis_only" => settings.analysis_only,
+            "keep_action_events" => settings.keep_action_events,
             "row_days" => Integer.to_string(settings.row_days),
             "cache_group" => (assigns.group && assigns.group.name) || ""
           })
@@ -159,7 +160,7 @@ defmodule ConveyorWeb.RbeLive do
         metadata:
           Map.take(
             params,
-            ~w(cores pipeline_key tolerance_s cache_group cores_properties cores_unit analysis_only row_days)
+            ~w(cores pipeline_key tolerance_s cache_group cores_properties cores_unit analysis_only row_days keep_action_events)
           )
       )
 
@@ -1250,6 +1251,23 @@ defmodule ConveyorWeb.RbeLive do
               label="Days per-spawn rows are kept in this mode"
             />
           </div>
+          <.input
+            field={@form[:keep_action_events]}
+            type="checkbox"
+            label="Keep per-action events in the raw event stream"
+          />
+          <p
+            id="rbe-action-events-help"
+            class="max-w-3xl text-[11px] leading-snug text-base-content/70"
+          >
+            With <code>--build_event_publish_all_actions</code>
+            Bazel sends an event for every action. Unless this is on, the events of
+            successful actions (and the empty progress event behind each) are counted but
+            not stored with a build's raw events: its Events tab and its event-stream
+            download do not contain them. Failed actions are always stored. Measured on
+            recorded builds, these events are 77 to 92 % of a stream and 3 to 10 times the
+            stored bytes of the rest.
+          </p>
           <p class="max-w-3xl text-[11px] leading-snug text-base-content/70">
             When on, logs parsed from now on store no input lists and no output lists (a
             build's Actions tab then cannot show which inputs changed), the uploaded log is

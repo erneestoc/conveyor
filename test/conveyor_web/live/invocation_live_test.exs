@@ -52,6 +52,8 @@ defmodule ConveyorWeb.InvocationLiveTest do
     {:ok, view, _} = live(conn, ~p"/invocation/#{ok_id}/events")
     assert has_element?(view, "#event-1")
     assert has_element?(view, "#download-events")
+    # The fixture has an event per action: the successful ones are counted, not stored.
+    assert has_element?(view, "#events-skipped")
     refute has_element?(view, "#events-next")
     {:ok, view, _} = live(conn, ~p"/invocation/#{ok_id}/events?page=99")
     assert has_element?(view, "#events")
