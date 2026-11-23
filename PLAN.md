@@ -2396,10 +2396,14 @@ time 155 µs per spawn. The group's JSON is 5.4 MB: `from` (who repeated whom, 3
 that missed the cache in the hour, unbounded (10 KB per project-hour here): every
 dashboard read of a busy project decodes it. Input lists are stored per project, so a
 shared library's list exists once per app (788 thousand rows for 277 thousand distinct
-lists: 2.85 times). The same keep-alive connection could not be used for two uploads in
-the demo seed (the second request got 400, `Bandit.HTTPError: Request line HTTP error`
-after a body); the seed and the bench close the connection per request, the cause is
-open.
+lists: 2.85 times).
+
+**Found on the way, fixed since.** The same keep-alive connection could not be used for
+two uploads in the demo seed (the second request got 400, `Bandit.HTTPError: Request
+line HTTP error` after a body): every second upload on a reused proxy connection
+failed. Root-caused and fixed in `e370767`: the handlers answered on the conn from
+before the body was read. A real pilot on the trial (2026-11-23, §27.10) verified 20 of
+20 uploads afterwards.
 
 **The owner's fleet, estimated.** Assumptions: 360 apps, 3,500 spawns per log (the
 middle of 2,000 to 5,000), every CI build uploads, the per-spawn costs above, list
@@ -2438,3 +2442,21 @@ Not measured: real logs of the owner's size and shape (the model's hit rate is 9
 fleet with warm machines has more hits and fewer executions per log); `db.t3.micro` or
 any network between node and database; a parse concurrency other than 2 per node; the
 LiveView render of the 360-row group page (the JSON is timed; the page shows 25 rows).
+
+### 27.10 Pilot on the trial with real builds (2026-11-23)
+
+**Four protobuf shards racing against an empty shared NativeLink cache** (7 of 12 logs
+uploaded before the upload fix of `e370767`): 1,685 executions / 5,764.8 s; racing 622 /
+2,959.2 s (51.3 % of executed wall time); sequential 27 / 32.8 s; cache hits 8,512; 315
+racing executions within the 2 s tolerance.
+
+**Three buildtools apps as three projects in cache group `go-monorepo`**, a private disk
+cache per machine, two rounds: 1,068 executions / 1,072.0 s; 190 distinct keys; racing
+8 / 300.2 s (GoStdlib and the Go toolchain builder compiled concurrently); sequential
+870 / 599.2 s; hit rate 0 % today against 81.5 % with a perfect cache.
+
+An independent brute-force SQL classification over the raw spawn rows matched every
+figure. Cores were all "measured" (no exec properties in these builds).
+
+Lessons: API keys need the `upload` scope; coverage (logs / builds) must be read with
+the numbers.
