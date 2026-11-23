@@ -33,6 +33,7 @@ defmodule Conveyor.Workers.BuildRetention do
         Conveyor.Metrics.Rollup.prune!(project.id, cutoff)
         spawn_cutoff = ExecLog.retention_cutoff(project, now)
         expired = ExecLog.expire_before(project, spawn_cutoff)
+        Conveyor.Rbe.Stream.expire!(project, now)
         Conveyor.Rbe.Fleet.prune!(project.id, cutoff)
         {project.slug, %{deleted: deleted, cutoff: cutoff, expired: expired}}
       end

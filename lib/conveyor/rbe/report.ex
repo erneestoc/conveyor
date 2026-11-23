@@ -63,6 +63,10 @@ defmodule Conveyor.Rbe.Report do
         cold: per_day(cold, logged_days)
       },
       coverage: %{builds: row.succeeded + row.failed + row.aborted, logs: rbe["builds"] || 0},
+      # Where the figures above come from, and the same analysis from the event stream
+      # alone for the builds without a parsed log (`Conveyor.Rbe.Stream`).
+      source: source(rbe),
+      stream: stream(rbe["stream"], cores, row.succeeded + row.failed + row.aborted),
       keys: rbe["keys"] || %{},
       executed: executed,
       cache: %{
@@ -106,6 +110,58 @@ defmodule Conveyor.Rbe.Report do
       projects: projects(rbe, cores, visible, names),
       pipelines: pipelines(rbe["pipe"] || %{}, cores, visible),
       fleet: fleet(row.fleet || %{})
+    }
+  end
+
+  defp source(rbe) do
+    case {(rbe["builds"] || 0) > 0, (get_in(rbe, ["stream", "builds"]) || 0) > 0} do
+      {true, true} -> "both"
+      {true, false} -> "execution_log"
+      {false, true} -> "stream"
+      {false, false} -> "none"
+    end
+  end
+
+  # Two figures per class: against the key at the build's commit (a floor: duplicates at
+  # one commit, exact) and against the key at any commit (a ceiling: every duplicate,
+  # and actions whose inputs changed without changing their command line).
+  defp stream(nil, _cores, _builds), do: nil
+
+  defp stream(s, cores, builds) do
+    figure = fn space ->
+      classes = s[space] || %{}
+      cell = fn names -> names |> Enum.map(&total(classes[&1], cores)) |> add() end
+      racing = cell.(Hour.racing())
+      sequential = cell.(Hour.sequential())
+      executed = cell.(["first", "nocommit" | Hour.dups()])
+
+      %{
+        first: cell.(["first"]),
+        racing: racing,
+        sequential: sequential,
+        cross_project: cell.(~w(racing_x seq_x)),
+        duplicate: add([racing, sequential]),
+        duplicate_time_share: rate(racing.ms + sequential.ms, executed.ms),
+        no_commit: cell.(["nocommit"]),
+        executed: executed
+      }
+    end
+
+    any = figure.("any")
+
+    %{
+      builds: s["builds"] || 0,
+      counts_only_builds: s["counts_only"] || 0,
+      no_commit_builds: s["no_commit"] || 0,
+      pending_builds: s["pending"] || 0,
+      logged_builds: s["logged"] || 0,
+      # builds that sent per-action events, of the finished builds of the window
+      coverage: %{builds: builds, with_events: s["events"] || 0},
+      executed: any.executed,
+      hits: total(s["hit"], cores),
+      untimed: total(s["untimed"], cores).n,
+      same_commit: figure.("same"),
+      any_commit: any
     }
   end
 

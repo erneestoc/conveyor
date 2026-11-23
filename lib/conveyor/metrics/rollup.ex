@@ -219,7 +219,11 @@ defmodule Conveyor.Metrics.Rollup do
       remote_sent: num(sent),
       remote_fetched: num(fetched),
       fleet: Conveyor.Rbe.Fleet.compute(finished),
-      rbe: Conveyor.Rbe.Hour.compute(finished)
+      rbe:
+        Conveyor.Rbe.Stream.join(
+          Conveyor.Rbe.Hour.compute(finished),
+          Conveyor.Rbe.Stream.hour(finished)
+        )
     }
   end
 
@@ -266,16 +270,30 @@ defmodule Conveyor.Metrics.Rollup do
   # left, more than a roll takes; and (2) whenever one of its builds is marked `expired`,
   # which covers a retention that was shortened and lengthened again (rows that are gone
   # do not come back with the setting).
+  #
+  # The stream half of `rbe` (`Conveyor.Rbe.Stream`) freezes by its own days, the same
+  # way: the records of the hour's builds are deleted then.
   defp freeze_spawn_sums(%Row{} = row, project_id, hour) do
     hour = to_utc(hour)
+    logs? = Conveyor.ExecLog.frozen?(project_id, hour) or expired_build?(project_id, hour)
+    stream? = Conveyor.Rbe.Stream.frozen?(project_id, hour)
 
-    if Conveyor.ExecLog.frozen?(project_id, hour) or expired_build?(project_id, hour) do
-      case Repo.get_by(Row, project_id: project_id, hour: hour) do
-        nil -> row
-        existing -> Map.merge(row, Map.take(existing, @spawn_fields))
-      end
-    else
-      row
+    case (logs? or stream?) && Repo.get_by(Row, project_id: project_id, hour: hour) do
+      %Row{} = existing ->
+        {new_log, new_stream} = Conveyor.Rbe.Stream.split(row.rbe)
+        {old_log, old_stream} = Conveyor.Rbe.Stream.split(existing.rbe)
+        row = if logs?, do: Map.merge(row, Map.take(existing, @spawn_fields)), else: row
+
+        rbe =
+          Conveyor.Rbe.Stream.join(
+            if(logs?, do: old_log, else: new_log),
+            if(stream?, do: old_stream, else: new_stream)
+          )
+
+        %{row | rbe: rbe}
+
+      _ ->
+        row
     end
   end
 

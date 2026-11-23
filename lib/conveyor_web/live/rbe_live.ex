@@ -724,6 +724,21 @@ defmodule ConveyorWeb.RbeLive do
       <span :if={@report.coverage.logs == 0}>
         Without logs only the bound below is known.
       </span>
+      <span :if={@report.stream} id="rbe-stream-source">
+        Source: {stream_source(@report.source)}. {Format.number(@report.stream.coverage.with_events)} of {Format.number(
+          @report.stream.coverage.builds
+        )} finished builds sent per-action events (<code>--build_event_publish_all_actions</code>).
+        From the event stream alone, for the {Format.number(@report.stream.builds)} of them
+        without a parsed log: duplicates took at least {Format.duration(
+          @report.stream.same_commit.duplicate.ms
+        )} (same commit) and at most {Format.duration(@report.stream.any_commit.duplicate.ms)} (any commit) of {Format.duration(
+          @report.stream.executed.ms
+        )} executed wall time.
+        <span :if={@report.stream.counts_only_builds > 0} id="rbe-stream-counts-only">
+          {Format.number(@report.stream.counts_only_builds)} builds had no usable action times
+          (Bazel before 8.6) and are counted only.
+        </span>
+      </span>
     </div>
     <div
       :if={@report.coverage.logs == 0}
@@ -1512,4 +1527,8 @@ defmodule ConveyorWeb.RbeLive do
     end}</span>
     """
   end
+
+  defp stream_source("both"), do: "execution logs, and the event stream for builds without one"
+  defp stream_source("execution_log"), do: "execution logs"
+  defp stream_source(_), do: "the event stream"
 end

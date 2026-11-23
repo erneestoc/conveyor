@@ -33,6 +33,17 @@ defmodule Conveyor.StreamFixture do
     end)
   end
 
+  @doc "When the recorded build started (`BuildStarted.start_time`)."
+  def started_at(name) do
+    name
+    |> path("bep")
+    |> Fixture.read!()
+    |> Enum.find_value(fn
+      %{payload: {:started, s}} -> Conveyor.Bep.Event.to_datetime(s.start_time)
+      _ -> nil
+    end)
+  end
+
   def log(name), do: File.read!(path(name, "log"))
 
   def stream_id(id), do: %V1.StreamId{build_id: "b", invocation_id: id, component: :TOOL}

@@ -65,6 +65,8 @@ defmodule Conveyor.ExecLog.ActionKey do
   @spec source_name(integer() | nil) :: String.t()
   def source_name(@bazel), do: "bazel"
   def source_name(@fallback), do: "fallback"
+  # `Conveyor.Rbe.StreamActions`: from the event stream (PLAN §28).
+  def source_name(2), do: "stream"
   def source_name(_), do: "none"
 
   @doc """

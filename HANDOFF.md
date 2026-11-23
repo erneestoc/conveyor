@@ -160,6 +160,14 @@ priv/protos/            vendored Bazel 9.2.0 / googleapis / remote-apis protos (
 
 ## 7. Next work, in order (with concrete specs)
 
+### Duplicate work from the event stream — 2026-11-23 (PLAN §28.3), core path landed
+
+One flag (`build --build_event_publish_all_actions`, Bazel 8.6+) and no upload: records
+per action in `stream_actions`, keys merged by `Workers.Rollup`, classes at roll time,
+`Report.build/2` → `source` and `stream` (same-commit floor, any-commit ceiling). Code:
+`lib/conveyor/rbe/stream*.ex`; tests `test/conveyor/rbe_stream_*`. NEXT: the page, the
+docs, a browser check, the throughput bench, the TLA+ model (PLAN §28.3 "Not done").
+
 ### Duplicate work (was "RBE opportunity") — 2026-11-21 (PLAN §27, docs/duplicate-work.md), unreleased
 
 - **Event-stream mode (PLAN §28), step 1 of several landed 2026-11-23; the rest is NOT

@@ -86,6 +86,54 @@ defmodule ConveyorWeb.RbeLiveTest do
     assert render(view) =~ "GoCompilePkg"
   end
 
+  test "builds with per-action events and no log: a line states the source", %{
+    conn: conn,
+    project: p,
+    t0: t0
+  } do
+    alias Conveyor.Rbe.{Stream, StreamActions, StreamChunk}
+    us = DateTime.to_unix(t0, :microsecond)
+
+    for {offset, version} <- [{0, 2}, {30, 2}, {60, 0}] do
+      inv = build!(p, DateTime.add(t0, offset, :second), %{stream_actions: 1, last_event_at: t0})
+      start = us + offset * 1_000_000
+      # `version` 0: a Bazel that sends no end time.
+      record =
+        StreamActions.record(
+          "//a:b",
+          "Compile",
+          "a/b.o",
+          ["cc"],
+          start,
+          start + version * 1_000_000,
+          us,
+          2
+        )
+
+      Repo.insert!(%StreamChunk{
+        invocation_id: inv.id,
+        first_seq: 2,
+        day: DateTime.to_date(t0),
+        n: 1,
+        records: StreamActions.encode([record])
+      })
+    end
+
+    assert Stream.merge_pending!(DateTime.add(t0, -60, :second)) == 3
+    {:ok, view, _} = live(conn, ~p"/p/#{p.slug}/duplicate-work")
+    line = view |> element("#rbe-stream-source") |> render()
+    assert line =~ "the event stream" and line =~ "3 of 3"
+    assert has_element?(view, "#rbe-stream-counts-only")
+
+    assert %{"report" => %{"source" => "stream", "stream" => stream}} =
+             conn |> get(~p"/p/#{p.slug}/duplicate-work/json") |> json_response(200)
+
+    assert %{"builds" => 3, "counts_only_builds" => 1, "untimed" => 1} = stream
+    assert %{"duplicate" => %{"n" => 1, "ms" => 2000}} = stream["same_commit"]
+    assert %{"duplicate" => %{"n" => 1}, "first" => %{"n" => 1}} = stream["any_commit"]
+    assert stream["coverage"] == %{"builds" => 3, "with_events" => 3}
+  end
+
   test "the cold-machines tile shows when it differs from the sequential duplicates", %{
     conn: conn,
     project: p,

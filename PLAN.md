@@ -2663,57 +2663,160 @@ models were not changed and `check.sh` was not run again for this step).
 - **Follow-up:** fetching the execution log by reference from a reachable remote cache
   (`BuildToolLogs` carries a bytestream URI; a worker like `fetch_profile.ex`).
 
-### 28.3 State / next (2026-11-23, second worker; ran out of context after one small step)
+### 28.3 Built (2026-11-23): the core path, from the stream to the report
 
-**Done in this step (pure, nothing calls it yet):** `Conveyor.Rbe.StreamActions`
-(`lib/conveyor/rbe/stream_actions.ex`, `test/conveyor/rbe_stream_actions_test.exs`):
+Supersedes §28.2 where they differ. The page, the docs, a browser check and a throughput
+bench are not done (see "Not done").
 
-- `key/4`: the §28.2 key (8 bytes; command line hashed argument by argument, never
-  held). `key_source/0` = 2. `ActionKey.source_name/1` does not name it yet.
-- `record/7` → `{key, start µs | nil, duration µs, mnemonic, label, hit?}`; hit =
-  `start < build start` (strict; no build start: never a hit); `timed?/1` is false for
-  no times (Bazel 7) and `end == start` (8.0 to 8.5). Microseconds, not milliseconds, so
-  the class boundary (`start < first finish`) is compared at the log's precision.
-- `encode/1` / `decode/1`: version byte + zstd over columns (keys, starts, durations,
-  mnemonic index, label index, flags, two string tables local to the chunk, so a chunk
-  decodes alone). **15.1 B per action on a synthetic chunk** (1,000 actions, 50 labels,
-  3 mnemonics); not measured on the recorded streams.
+**Record** (`Conveyor.Rbe.StreamActions`). Per successful `ActionExecuted`:
+`{key, start µs | nil, duration µs, mnemonic, label, hit?, seq}`. The key is §28.2's
+(8 bytes; the command line is hashed argument by argument in the normalizer and never
+held). `seq` is the event's sequence number: the record's ordinal in the build (what
+`action_keys.first_ordinal` holds). Hit = `start < BuildStarted.start_time`, strict; the
+build start is the row's `started_at` once `bazel_version` is set, so a resumed session
+needs no state. **Only an execution (timed, not a hit) carries its key and start**; a
+hit keeps its duration (what the cache saved), an untimed action nothing. Microseconds,
+so the class boundary is compared at the log's precision.
 
-**Decisions taken from reading the code, for whoever builds the rest:**
+**What "untimed" is.** Bazel 7 sends no times and 8.0 to 8.5 `end == start`: such a
+build has no timed record and is **counts only** (decided when the hour is rolled, no
+column). In 8.6+/9.x the actions that are not spawns (file writes, symlinks, middlemen:
+49 of 248 in buildtools, 735 of 1,357 in abseil) have no times either; they are counted
+as `untimed` and are not in the execution log at all.
 
-- Storage: a table, not the blob store (`stream_actions (invocation_id, day, first_seq,
-  n, records bytea)`, primary key `(invocation_id, day, first_seq)`, daily partitions like
-  the segment tables). Insert it in `Writer.Transaction.write!/3` after
-  `update_invocations!` with `on_conflict: :nothing`: the fence then makes it exactly
-  once, a taken-over stream's stale batch is rolled back before it, and a resend is a
-  no-op. `Batch` gains `stream: []` (records newest first; `merge/2`: `b.stream ++
-  a.stream`; part of `empty?/1`), `Writer.Plan.rows/2` a `stream_rows` list (one row per
-  unit, `StreamActions.encode(Enum.reverse(unit.stream))`). No session state is needed:
-  the build start for the hit flag is the normalizer's `inv.started_at`, which a resumed
-  session reads from the row.
-- Where: the `handle(:action, %{payload: {:action, %{success: true}}}, …)` clause of
-  `Normalizer` (today a no-op beside the count).
-- Counts only: derive at roll time (a build whose records are all `not timed?`); no
-  column needed.
-- Classification: `Rbe.Hour.executions/1` is SQL over `spawns`; stream records are not
-  rows, so the stream half is computed in Elixir per hour: decode the hour's chunks,
-  read the `action_keys` rows of their keys by primary key in sorted chunks
-  (`Keys.read_rows` pattern), classify with `ActionKey.classify/4`, fold into the same
-  cells under a `"stream"` sub-map of `invocation_rollups.rbe` (the `source` dimension).
-  Floor and ceiling as two key spaces in the same table: the ceiling key is the stream
-  key; the floor key is `sha256(stream key ‖ commit tag)[0..8]` (no row when the build
-  has no `commit` tag). Both merged by `Keys.merge!/4` per scope (its `out` field wants
-  a 16-hex prefix: pass a constant; `nondet` false). `Keys.holders/3` finds late-arrival
-  victims through `spawns.action_key`, which stream records are not in: the stream path
-  needs its own way to mark hours stale (touch the builds of the scope whose
-  `started_at` falls between the changed keys' new and old first finish, or keep
-  `(scope, hour)` of the changed keys; undecided).
-- A build with `exec_log_status in ("parsed", "expired")` ignores its chunks at roll time.
+**Storage: a table, not the blob store, and not partitioned.** `stream_actions
+(invocation_id, first_seq, day, n, records bytea)`, primary key `(invocation_id,
+first_seq)`, one row per ingest batch that held such events
+(`20261123173252_stream_actions`). The row is inserted in
+`Writer.Transaction.write!/3` after the fenced update with `ON CONFLICT DO NOTHING`:
+the fence makes it exactly once (tests: restart mid-build with resends, a takeover by a
+second node whose stale worker then pushes an action event). `Batch.stream` carries the
+records; nothing in `Session` changed. Partitions were not used because retention is
+per project (`row_days`), not per day for everyone; a build has one row after its merge
+(below), so the deletes are small. `invocations.stream_actions` counts the records (a
+normalizer counter, through the fence); `invocations.stream_keys_at` says when the keys
+were merged.
 
-**Not done (all of the scope's items 1 to 7 beyond the pure module):** the accumulator
-in `Normalizer`/`Batch`, the migration and the chunk row in the fenced transaction,
-version gate in the rollup, commit floor, key upsert and classification, rollup `source`
-dimension, cores, retention, `Report`/JSON fields, the recorded fixtures and accuracy
-tests, the takeover/resend/out-of-order tests, the property test against brute force,
-`ActionKeys.tla`. Recorded pairs are still only in the research scratchpad
-(`bes-only/raw/{bt9,ab9,bt8}-*`), not in `test/fixtures`.
+**Measured** (recorded streams through the real ingest path; chunk = columns + two
+string tables local to the chunk, zstd level 9):
+
+| build | actions (executed) | as ingested | after the merge (one chunk) |
+|---|---|---|---|
+| abseil 9.2 cold | 1,357 (622) | 21.2 KB in 10 chunks, 15.6 B per action | 15.6 KB, **11.5 B per action** |
+| buildtools 9.2 cold | 248 (199) | 5.7 KB in 2 chunks, 22.9 B per action | 5.1 KB, **20.7 B per action** |
+| buildtools 9.2 warm | 248 (0; 199 hits) | 3.3 KB, 13.4 B per action | not measured |
+
+Where the bytes are (abseil, one chunk): keys 5.0 KB (8 B per execution, incompressible),
+labels 2.2 KB + their indices 1.6 KB, durations 1.9 KB, finish times 1.7 KB. The target
+of 20 B per action holds for abseil and misses by 0.7 B for buildtools (a small build
+with long external labels; 80 % of its actions are executions). The label is stored and
+not read yet (a top-targets list is the page's job); dropping it would save about a
+quarter. `action_keys` rows were not measured for stream builds (expected: two per
+executed action and scope with a commit, one without).
+
+**Keys** (`Conveyor.Rbe.Stream.merge_keys!/1`; `merge_pending!/1` is called by
+`Workers.Rollup` every 5 minutes before it rolls, for finished builds with
+`stream_keys_at` null or older than `last_event_at`). One transaction per build: the
+build's chunks are rewritten as one; per key the first finisher of the build is merged
+with `Keys.merge!/4` (sorted bulk, the §27.3 minimum) into the project's scope and its
+cache group's, **under two keys**:
+
+- the stream key: **any commit, the ceiling**;
+- `sha256("conveyor-stream-commit-v1\0" ‖ key ‖ commit)[0..8]`: **same commit, the
+  floor**, only when the build names a commit (`Stream.commit/1`: the tag `commit`, else
+  `commit_sha`, `git_commit`, `build_scm_revision`, `stable_git_commit`; tags come from
+  `--build_metadata`, workspace status, keywords and API key defaults as before).
+
+Why two rows per action and not one: a first finisher per commit cannot be derived from
+a first finisher over all commits, and a per-key list of commits is the unbounded list
+§27.3 avoids. A build without a commit writes one row per action and is in no
+same-commit figure (its executions are reported as `no_commit`).
+
+**Stale hours after a late arrival (decided here).** Stream executions are not in
+`spawns`, so `Keys.holders/3` cannot find them. Rule: when a row moves from first finish
+`F_old` to an earlier `F_new`, the only executions whose class changes are the one that
+was first (its build's span contains `F_old`) and those that started in
+`[F_new, F_old)`. So `merge_keys!` touches (`Keys.touch!`) the builds that held the old
+firsts and every build of the scope's projects with stream records whose
+`[started_at − 60 s, finished_at + 60 s]` overlaps `[min F_new, max F_old]` over the rows
+that moved (a row inserted by a concurrent merge after the pre-read counts as
+`F_old = now`). Builds arriving in the order they ran move no row and touch only
+themselves. A superset is harmless: an hour rolled once more. Touching a build in a
+frozen hour changes nothing (below).
+
+**Classification** (`Stream.hour/1`, called by `Rollup.compute/3`): for the hour's
+finished builds with records, merged keys and **no parsed execution log** (`parsed` or
+`expired`: such a build is reported from its log, counted as `logged`), the chunks are
+decoded, the rows of both keys are read by primary key in the project's scope and the
+group's, and each execution is classed with `ActionKey.classify/4`. Nothing stores a
+class. Stored under `invocation_rollups.rbe["stream"]` (the `source` dimension; the
+execution-log half is the rest of `rbe`, unchanged): `any` and `same`
+(`class → mnemonic → cell`), `hit`, `untimed`, and the build counts `events`, `builds`,
+`logged`, `pending`, `counts_only`, `no_commit`. Cores: wall × CPU ÷ wall of the mnemonic
+in the build (`BuildMetrics`, floor 1), else 1; the project's per-mnemonic setting is
+applied when the report is read, like for logs.
+
+**Retention and freeze.** Records live `Stream.days/1` = the project's `row_days`
+(default 3, the analysis-only setting, whether or not that mode is on), at most the
+execution-log retention; `Workers.BuildRetention` deletes them (`Stream.expire!/2`).
+Keys and hourly rows as for logs. The stream half of an hour freezes by the §27.11 rule
+with those days (`Stream.frozen?/2`), independently of the log half
+(`Rollup.freeze_spawn_sums`). `Workers.Rollup` checks the whole row window of projects
+with stream builds, as it does for analysis-only projects. Not built: a `late` counter
+for builds merged after their hour froze.
+
+**Report** (`Report.build/2`, the JSON routes): `source` (`execution_log`, `stream`,
+`both`, `none`) and `stream` (nil without per-action events): `builds`,
+`counts_only_builds`, `no_commit_builds`, `pending_builds`, `logged_builds`,
+`coverage: {builds, with_events}`, `executed`, `hits`, `untimed`, and `same_commit` /
+`any_commit`, each `{first, racing, sequential, cross_project, duplicate,
+duplicate_time_share, no_commit, executed}`. The page has one plain line
+(`#rbe-stream-source`).
+
+**Accuracy** (`test/conveyor/rbe_stream_accuracy_test.exs`; fixtures in
+`test/fixtures/stream`, 3.0 MB: scrubbed streams, zstd, and the compact execution logs
+of the same builds; the truth is a brute-force classification of the logs by action
+digest; wall seconds, executions in parentheses):
+
+| scenario | truth seq / racing | floor (same commit) | ceiling (any commit) | over-count |
+|---|---|---|---|---|
+| buildtools, one commit, two machines, 10 min apart | 62.0 (199) / 0 | 62.0 (199) / 0 | 62.0 (199) / 0 | 0 |
+| buildtools, one commit, 1 s apart | 20.5 (195) / 41.5 (4) | equal | equal | 0 |
+| abseil, one commit, 15 min apart | 549.7 (622) / 0 | equal | equal | 0 |
+| abseil, one commit, 7 s apart | 398.3 (585) / 149.2 (37) | equal | equal | 0 |
+| buildtools, cold then warm (199 hits) | 0 / 0 | 0 | 0 | 0 |
+| buildtools, Go change, two commits | 0 / 0 | 0 | 4.7 (12) / 0 | 4.7 s of none |
+| abseil, C++ header change, two commits | 257.8 (387) / 0 | 0 | 512.3 (622) / 0 | 98.7 % |
+
+Executed and hit counts equal the log's in every scenario. "Equal" is count for count
+and within 1 ms per execution (the log keeps whole milliseconds). The two-commit rows
+show what the two figures are: the floor has none of the cross-commit duplicates (387
+real ones in abseil), the ceiling has all of them and every execution whose inputs
+changed without changing its command line. The recordings were made one after the
+other; "at once" moves one build's times in the fixture.
+
+**Also tested.** `rbe_stream_test.exs`: a build that arrives after a later one takes
+over the firsts; a build with a parsed log is reported from the log; Bazel 7.6 and 8.4
+are counts only, 8.6 is timed; a cache group over two projects (`cross_project`);
+records expire after three days, the frozen hours keep their numbers, a later build is
+sequential against keys whose records are gone. `rbe_stream_ingest_test.exs`: restart,
+resend, takeover. `rbe_stream_property_test.exs` (StreamData): two projects of a group,
+two hours, two commits or none, keys merged in any order with hours read in between and
+one build merged twice: stored figures equal the brute-force classes in both key
+spaces. With the touch rule removed the property fails (checked once by hand).
+
+**Not done / follow-ups.**
+- The page beyond one line, `docs/duplicate-work.md`, a browser check, a throughput and
+  scale bench with 2 KB action events, `action_keys` bytes per stream build.
+- `docs/spec/ActionKeys.tla` does not model the stream variant (the interval touch
+  rule); the property test is the only check of it. `RawLog.tla`/`Ingest.tla` unchanged.
+- Top targets from the stored labels; a `late` counter; `end == start` repair with the
+  BES event time for Bazel 8.0 to 8.5.
+- Not covered by a recording: a failed spawn that is retried, non-cacheable spawns (the
+  stream counts every timed, successful, non-hit action as an execution; the log
+  excludes non-cacheable ones), a second machine with another `PATH` (research:
+  precision 0.25 without `--incompatible_strict_action_env`), Linux.
+- The merge runs up to five minutes after a build finishes; until then the build is
+  `pending` in its hour.
+- `invocations_stream_keys_pending` (partial index) no longer matches the pending
+  query exactly (it also takes `last_event_at > stream_keys_at`); harmless, could go.
