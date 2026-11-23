@@ -116,7 +116,10 @@ defmodule Conveyor.Ingest.ScrubTest do
   end
 
   test "recorded fixtures are already scrubbed, so scrubbing them again changes nothing" do
-    for event <- Fixture.read!(@fixture) do
+    streams = Path.wildcard(Path.join(File.cwd!(), "test/fixtures/stream/*.bep.zst"))
+    assert length(streams) == 10
+
+    for path <- [@fixture | streams], event <- Fixture.read!(path) do
       assert {^event, false} = Scrub.event(event)
     end
   end

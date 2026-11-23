@@ -14,7 +14,12 @@ defmodule Conveyor.Bep.Fixture do
   @doc "Reads and decodes every event in the file. Raises on malformed input."
   @spec read!(Path.t()) :: [BuildEvent.t()]
   def read!(path) do
-    path |> File.read!() |> decode_all!()
+    bytes = File.read!(path)
+
+    # `.zst`: the same file, zstd-compressed (the recorded streams of test/fixtures/stream).
+    if String.ends_with?(path, ".zst"),
+      do: bytes |> :zstd.decompress() |> IO.iodata_to_binary() |> decode_all!(),
+      else: decode_all!(bytes)
   end
 
   @doc "Decodes a varint-delimited binary of `BuildEvent`s."
