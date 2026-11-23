@@ -149,7 +149,7 @@ tiles and in the legend line.
 
 A **logged day** is a UTC day in which at least one build *started* whose execution log
 was parsed. Every per-day figure of both pages is the window's total ÷ the window's
-logged days, and each headline tile says "N of M days have logs", M being the UTC days
+logged days, and each headline tile says "N of M days have logs (UTC days the window touches)", M being the UTC days
 the window touches (a 7-day window that starts and ends at noon touches 8). A project
 that enabled logs yesterday therefore shows the same daily figure in the 24h and the 7d
 view. With no logged day there is no per-day figure. One approximation: the window's

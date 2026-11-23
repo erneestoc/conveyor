@@ -1236,7 +1236,7 @@ defmodule ConveyorWeb.RbeLive do
           class="space-y-2 border-t border-base-300 pt-4 sm:col-span-2"
         >
           <legend class="float-left mb-2 w-full text-xs font-medium">Storage</legend>
-          <div class="clear-both grid gap-3 sm:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+          <div class="clear-both flex flex-wrap items-end gap-x-8 gap-y-2 [&_input[type=number]]:w-24">
             <.input
               field={@form[:analysis_only]}
               type="checkbox"
@@ -1250,7 +1250,7 @@ defmodule ConveyorWeb.RbeLive do
               label="Days per-spawn rows are kept in this mode"
             />
           </div>
-          <p class="text-[11px] leading-snug text-base-content/70">
+          <p class="max-w-3xl text-[11px] leading-snug text-base-content/70">
             When on, logs parsed from now on store no input lists and no output lists (a
             build's Actions tab then cannot show which inputs changed), the uploaded log is
             deleted once it is parsed, and per-spawn rows are kept for the days above
@@ -1425,7 +1425,7 @@ defmodule ConveyorWeb.RbeLive do
         <span class="text-base">{@unit} per logged day</span>
       </p>
       <p class="mt-1 text-xs text-base-content/70" id={"#{@id}-days"}>
-        {@logged_days} of {@window_days} days have logs
+        {@logged_days} of {@window_days} days have logs (UTC days the window touches)
       </p>
       <p class="mt-2 text-sm font-medium">{@claim}</p>
       <p class="mt-1 text-xs leading-snug text-base-content/70" id={"#{@id}-help"}>{@help}</p>
