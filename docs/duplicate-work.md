@@ -49,6 +49,14 @@ in no command line. So each class of duplicate has three figures:
 | **any commit** | every execution that repeats an action another build finished or was running, whatever the commit | an upper bound: every real duplicate is in it, and so is every action whose inputs changed without changing its command line |
 | **estimate** | same commit, plus the share of the rest that is likely the same work | an estimate, always between the two; absent when the window has no evidence |
 
+**Shards that share a cache.** A cache hit is sent with the start and end of the
+execution it was served from. Conveyor counts an action as a hit when those times lie
+before the build's own start, or when another build reports the same action with the
+same start and duration: then it is one execution that several builds saw, attributed
+to one of them, and a hit for the others. Shards of one commit that start together
+against one cache are exact with this (checked on a fixture built from the recorded
+builds; PLAN §28.7).
+
 **The estimate.** A cache hit is sent with the times of the execution it was served
 from, so Conveyor knows which builds read the results of which. Such a build shows what
 changed between two commits: the actions it got from the cache were unchanged, the ones

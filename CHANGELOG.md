@@ -21,6 +21,12 @@
   `stream.hit_rate`, `stream.per_day`, `stream.mnemonics`, `stream.targets`,
   `stream.late_builds`. `mix conveyor.seed --stream-demo` seeds demo projects through
   gRPC.
+- **Duplicate work from the event stream: shards that share a cache.** A build served an
+  action that another build ran during its own run counted that hit as an execution
+  (racing about three times too high on four shards against one remote cache). Records
+  with the same action, start and duration are now one execution; the other builds'
+  records are hits. A migration marks stream builds for a new key merge, so hours that
+  are not final are corrected within minutes of the deploy (PLAN §28.7).
 
 - **`--build_event_publish_all_actions` is safe to turn on.** With the flag Bazel sends
   an event per action. A successful action no longer becomes a row of a build's Actions

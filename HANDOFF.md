@@ -192,7 +192,13 @@ One flag (`build --build_event_publish_all_actions`, Bazel 8.6+) and no upload.
   evidence in a stored hour is as of its last roll; the two bounds follow the touch
   rule. `test/conveyor/artifacts_test.exs` fails now and then with a refused
   connection to its fake cache (seen twice in five gate runs; passes on a rerun).
-- **NEXT, in order:** deploy and try on the trial with a real build; a recording with a
+- **Shards against one cache (PLAN §28.7, 2026-11-24).** An execution reported by
+  several builds (same key, start, duration) is one execution; `action_keys.out = 2`
+  rows hold which build it is attributed to. Migration `20261124000625` re-merges
+  stored stream builds once. After the deploy the trial's `stream-shards` project should
+  read executed 2,166, hits 4,674, first 1,140: check it.
+- **NEXT, in order:** check the trial after the redeploy; a real recording of concurrent
+  shards with a shared cache; a recording with a
   real warm C++ build at a second commit (replaces the constructed one in the estimate's
   validation), with non-cacheable spawns, and with a retried action; the generations
   design (PLAN §28.4, makes cross-commit duplicates exact where a cache links commits);

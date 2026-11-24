@@ -84,7 +84,8 @@ defmodule Conveyor.Rbe.StreamTest do
     firsts =
       Repo.all(
         from k in ActionKey,
-          where: k.scope == ^p.id,
+          # (not the rows of single executions: each names its own build)
+          where: k.scope == ^p.id and k.out != 2,
           select: k.first_invocation_id,
           distinct: true
       )
@@ -184,7 +185,9 @@ defmodule Conveyor.Rbe.StreamTest do
     assert Stream.frozen?(p.id, base)
     assert {:ok, _} = Conveyor.Workers.BuildRetention.perform(%Oban.Job{})
     assert Stream.records(a) == [] and Stream.records(b) == []
-    assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id), :count) == 398
+    # per build 199 any-commit rows (shared), and of its own: same commit shared, one
+    # per execution
+    assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id), :count) == 796
 
     # The hours are rolled again (something touched their builds) and hold what they held.
     Keys.touch!([a, b], DateTime.utc_now())
@@ -218,7 +221,8 @@ defmodule Conveyor.Rbe.StreamTest do
       |> Enum.split_with(&(&1.out == "0000000000000000"))
       |> Tuple.to_list()
 
-    assert length(any) == 199 and length(same) == 199
+    # (same commit and one per execution)
+    assert length(any) == 199 and length(same) == 398
 
     assert Repo.aggregate(from(k in ActionKey, where: k.scope == ^p.id and k.out == 1), :count) ==
              199

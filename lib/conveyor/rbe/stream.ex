@@ -37,6 +37,7 @@ defmodule Conveyor.Rbe.Stream do
   @top 50
   @any_commit "0000000000000000"
   @at_commit "0000000000000001"
+  @execution "0000000000000002"
   @finished ["succeeded", "failed", "aborted"]
   # How far a build's actions may lie outside `[started_at, finished_at]` (clock
   # readings of one machine, rounded differently).
@@ -77,6 +78,22 @@ defmodule Conveyor.Rbe.Stream do
   def commit_key(key, commit) do
     <<k::binary-size(8), _::binary>> =
       :crypto.hash(:sha256, ["conveyor-stream-commit-v1\0", key, commit])
+
+    k
+  end
+
+  @doc """
+  The key of one execution: the stream key with the execution's start and duration. A
+  cache hit is sent with the times of the execution it was served from, unchanged, so
+  two builds that report the same key, start and duration saw **one** execution: one of
+  them ran it and the others were served its result. The rule "a hit started before its
+  build did" cannot see that when the execution happened during the build (shards that
+  start together against one cache), PLAN §28.7.
+  """
+  @spec execution_key(StreamActions.action()) :: binary()
+  def execution_key({key, start, duration, _mnemonic, _label, _hit, _seq}) do
+    <<k::binary-size(8), _::binary>> =
+      :crypto.hash(:sha256, ["conveyor-stream-exec-v1\0", key, <<start::64, duration::64>>])
 
     k
   end
@@ -133,9 +150,17 @@ defmodule Conveyor.Rbe.Stream do
 
               now = DateTime.utc_now()
               entries = id |> compact!() |> entries(commit(inv.tags))
+              {wide, _} = List.last(scopes)
 
               affected =
                 Enum.flat_map(scopes, fn {scope, project_ids} ->
+                  # An execution's own row lives in the widest scope only: where the
+                  # cache that served it is shared.
+                  entries =
+                    if scope == wide,
+                      do: entries,
+                      else: Enum.reject(entries, &(&1.out == @execution))
+
                   merge_scope(scope, project_ids, inv, entries, now)
                 end)
 
@@ -205,9 +230,14 @@ defmodule Conveyor.Rbe.Stream do
         do: Enum.group_by(executions, &{commit_key(elem(&1, 0), commit), @at_commit}),
         else: %{}
 
+    # One row per execution (key, start, duration): the build with the smallest id among
+    # those that report it is the one it is attributed to; the others were served it.
+    by_execution = Enum.group_by(executions, &{execution_key(&1), @execution})
+
     executions
     |> Enum.group_by(&{elem(&1, 0), @any_commit})
     |> Map.merge(by_commit)
+    |> Map.merge(by_execution)
     |> Enum.map(fn {{key, out}, execs} ->
       {_, start, duration, _, _, _, seq} = Enum.min_by(execs, &rank/1)
 
@@ -362,12 +392,33 @@ defmodule Conveyor.Rbe.Stream do
         own_rows = rows(own, keys)
 
         wide_rows =
-          if wide == own and hits == [],
-            do: own_rows,
-            else: rows(wide, Enum.uniq(keys ++ Enum.map(hits, &elem(&1, 0))))
+          rows(
+            wide,
+            Enum.uniq(
+              keys ++ Enum.map(hits, &elem(&1, 0)) ++ Enum.map(executions, &execution_key/1)
+            )
+          )
+
+        # A record whose execution is attributed to another build is a hit served from
+        # that build while both were running (builds merged before this rule have no
+        # such row and count as before, until they are merged again).
+        {served, executions} =
+          Enum.split_with(executions, fn e ->
+            row = wide_rows[execution_key(e)]
+            row != nil and row.first_invocation_id != id
+          end)
+
+        acc =
+          Enum.reduce(served, acc, fn {_, _, duration, mnemonic, _, _, _}, acc ->
+            add(acc, ["hit", mnemonic], [1, duration, duration])
+          end)
+
+        served =
+          for {_, _, duration, mnemonic, _, _, _} = e <- served,
+              do: {wide_rows[execution_key(e)].first_invocation_id, mnemonic, duration}
 
         ratio = ratios(id, executions)
-        {seen, acc} = seen(hits, id, commit, wide_rows, acc)
+        {seen, acc} = seen(hits, served, id, commit, wide_rows, acc)
         pid = Integer.to_string(project_id)
 
         Enum.reduce(executions, acc, fn {key, start, duration, mnemonic, label, _, seq}, acc ->
@@ -391,9 +442,9 @@ defmodule Conveyor.Rbe.Stream do
   # row held by another build. A hit served from a build at another commit (or with no
   # commit on either side) is counted under `"est" → "xhit"`: an action seen unchanged
   # across commits by a build that had the earlier result.
-  defp seen([], _id, _commit, _rows, acc), do: {%{}, acc}
+  defp seen([], [], _id, _commit, _rows, acc), do: {%{}, acc}
 
-  defp seen(hits, id, commit, rows, acc) do
+  defp seen(hits, served, id, commit, rows, acc) do
     linked =
       for {key, start, duration, mnemonic, _, _, _} <- hits,
           row = rows[key],
@@ -401,6 +452,9 @@ defmodule Conveyor.Rbe.Stream do
           row.first_start != nil,
           DateTime.to_unix(row.first_start, :microsecond) == start,
           do: {row.first_invocation_id, mnemonic, duration}
+
+    # Results served while both builds ran name their build directly.
+    linked = linked ++ served
 
     seen = linked |> Enum.map(&elem(&1, 0)) |> Enum.uniq()
 
@@ -587,14 +641,14 @@ defmodule Conveyor.Rbe.Stream do
   days, not for the weeks an any-commit row lives: per execution they are most of the
   key table (PLAN §28.6). A build of that commit that arrives later starts over in the
   same-commit figure (a lower floor, never a wrong duplicate). A stream key is the only
-  key of 8 bytes; `out = 1` marks the same-commit space (`entries/2`).
+  key of 8 bytes; `out` marks the space: 1 same commit, 2 one execution (`entries/2`).
   """
   @spec prune_commit_keys!(integer(), DateTime.t()) :: non_neg_integer()
   def prune_commit_keys!(scope, cutoff) do
     {n, _} =
       Repo.delete_all(
         from(k in ActionKey,
-          where: k.scope == ^scope and k.out == 1 and k.last_finish < ^cutoff,
+          where: k.scope == ^scope and k.out in [1, 2] and k.last_finish < ^cutoff,
           where: fragment("octet_length(?) = 8", k.key)
         ),
         timeout: @timeout

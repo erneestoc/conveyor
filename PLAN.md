@@ -3022,3 +3022,49 @@ nodes, a second machine.
   kind of sequence number; `end == start` repair for Bazel 8.0 to 8.5; the generations
   design of §28.4; a recording with a real warm C++ build at a second commit, with
   non-cacheable spawns, with a retried action, on Linux.
+
+### 28.7 Shards against one cache: an execution several builds report (2026-11-24, built)
+
+**Found on the trial** (protobuf on Linux, four shards started together against an empty
+remote cache, then two warm ones): truth executed 2,166 and hits 4,674; the report said
+executed 4,540, hits 2,300, racing 3,321. A shard that is served an action another
+shard ran *during* its own run gets the other execution's start and end, which lie
+after its own start, so "a hit started before its build" (§28.3) took it for an
+execution.
+
+**Rule.** A hit carries the times of the execution it was served from, unchanged
+(verified on the recordings: start and end equal to the microsecond for 199 of 199 and
+187 of 187 hits; starts have microsecond resolution). So records with the same stream
+key, start and duration are **one execution**, reported by several builds. Its key
+(`Stream.execution_key/1`: SHA-256 over a domain, the key, start and duration, 8 bytes)
+is merged like the others (`action_keys.out = 2`, in the widest scope only, deleted
+with the same-commit rows): the row's holder, the smallest invocation id among the
+builds that report it, is the build the execution is attributed to; in every other
+build the record is a **hit** (counted as one, with its duration as time saved, and as
+evidence that the build read the holder's cache). The old rule stays. Attribution by
+id and not by build start: the totals are the same, the row stays a minimum
+(order-independent, the existing touch rule covers a holder that changes), and which
+shard "ran" an action nobody can tell from the stream; in a group this can attribute an
+execution to another project than the one that ran it.
+
+**Collision.** Two different executions of one key are merged only if they start in
+the same microsecond and last equally long: for two racers starting within a second of
+each other about 10⁻⁶ times the chance of equal duration; none among the recorded
+pairs of cold builds (their figures still equal the execution logs).
+
+**Fixture** (`rbe_stream_shards_test.exs`; constructed, truth by construction): the two
+recorded abseil builds of one commit 7 s apart, 311 actions of the second turned into
+hits with the first build's times (all after the second build's start). Before the
+fix: executed 1,244, hits 0, racing 329 (truth 18). After: executed 933, hits 311,
+racing 18, sequential 293, firsts 622: equal to the truth.
+
+**Stored data.** A one-off migration (`20261124000625_stream_keys_remerge`) marks the
+builds whose records still exist as not merged; the rollup job merges them again
+within five minutes, which writes the execution rows and makes their hours stale, so
+every hour that is not final is rolled under the new rule. Final hours keep their
+numbers. Not chosen: a rule version on the hourly row (the rows of the new key space
+have to be written by a merge anyway).
+
+**Not verified:** a real recording of concurrent shards with a shared cache (the
+fixture is constructed); the trial's numbers after redeploy; whether a remote cache
+ever rewrites the times of a result (then such hits stay executions, as before).
